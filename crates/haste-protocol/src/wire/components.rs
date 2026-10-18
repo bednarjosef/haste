@@ -20,7 +20,7 @@ use bytes::Bytes;
 use haste_core::Component;
 
 use super::slot::{component_name, skip_component};
-use super::{DecodeError, DecodeResult, IdSet, Reader, Wire, MAX_LIST};
+use super::{DecodeError, DecodeResult, IdSet, Reader, SoundEvent, Wire, MAX_LIST};
 use crate::packets::ids::ProtocolTables;
 
 /// Components in one patch (the same cap `slot::skip_patch` enforces).
@@ -69,6 +69,8 @@ fn read_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<ItemComponent>
         "enchantments" => ItemComponent::Enchantments(read_enchantments(r)?),
         "stored_enchantments" => ItemComponent::StoredEnchantments(read_enchantments(r)?),
         "tool" => ItemComponent::Tool(read_tool(r)?),
+        "minimum_attack_charge" => ItemComponent::MinimumAttackCharge(r.f32()?),
+        "piercing_weapon" => ItemComponent::PiercingWeapon(read_piercing_weapon(r)?),
         // Layout known, value not modelled: keep it as written.
         _ => {
             let start = r.peek_rest();
@@ -115,6 +117,17 @@ fn read_tool(r: &mut Reader<'_>) -> DecodeResult<Tool> {
         default_mining_speed: r.f32()?,
         damage_per_block: r.var_int()?,
         can_destroy_blocks_in_creative: r.bool()?,
+    })
+}
+
+/// `piercing_weapon`: knockback and dismount flags, then the optional draw and hit sounds
+/// (vanilla `PiercingWeapon.STREAM_CODEC`).
+fn read_piercing_weapon(r: &mut Reader<'_>) -> DecodeResult<PiercingWeapon> {
+    Ok(PiercingWeapon {
+        deals_knockback: r.bool()?,
+        dismounts: r.bool()?,
+        sound: r.option(SoundEvent::read)?,
+        hit_sound: r.option(SoundEvent::read)?,
     })
 }
 
@@ -216,6 +229,24 @@ impl ComponentPatch {
             _ => None,
         })
     }
+
+    /// `minimum_attack_charge`: the attack strength (0..1) below which the item cannot attack
+    /// (`Player.cannotAttackWithItem`).
+    pub fn minimum_attack_charge(&self) -> Option<f32> {
+        self.added.iter().find_map(|c| match c {
+            ItemComponent::MinimumAttackCharge(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    /// `piercing_weapon`: the item is a spear; a left click is a STAB, not an attack or a
+    /// block break (`Minecraft.startAttack`).
+    pub fn piercing_weapon(&self) -> Option<&PiercingWeapon> {
+        self.added.iter().find_map(|c| match c {
+            ItemComponent::PiercingWeapon(v) => Some(v),
+            _ => None,
+        })
+    }
 }
 
 /// One added data component with its decoded value.
@@ -243,6 +274,10 @@ pub enum ItemComponent {
     StoredEnchantments(Vec<EnchantmentLevel>),
     /// `tool`.
     Tool(Tool),
+    /// `minimum_attack_charge`.
+    MinimumAttackCharge(f32),
+    /// `piercing_weapon`.
+    PiercingWeapon(PiercingWeapon),
     /// Any other component: its type name as a registry id and its data as
     /// written (skipped by `slot::skip_component`).
     Other {
@@ -285,6 +320,18 @@ pub struct ToolRule {
     pub speed: Option<f32>,
     /// Whether those blocks drop themselves.
     pub correct_for_drops: Option<bool>,
+}
+
+/// `piercing_weapon`: a spear's stab parameters (vanilla `PiercingWeapon`), the draw and hit
+/// sounds optional.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PiercingWeapon {
+    pub deals_knockback: bool,
+    pub dismounts: bool,
+    /// The draw sound (`weapon.makeSound`).
+    pub sound: Option<SoundEvent>,
+    /// The hit sound (`weapon.makeHitSound`).
+    pub hit_sound: Option<SoundEvent>,
 }
 
 /// `rarity`: vanilla's four values; ids are the wire's VarInt.
@@ -354,6 +401,8 @@ mod tests {
             (11, "minecraft:food"),
             (12, "minecraft:rarity"),
             (13, "minecraft:mystery"),
+            (14, "minecraft:minimum_attack_charge"),
+            (15, "minecraft:piercing_weapon"),
         ])
     }
 
@@ -436,6 +485,43 @@ mod tests {
         w.f32(1.0);
         w.var_int(2);
         w.bool(true);
+    }
+
+    /// The spear's `piercing_weapon` (knockback, dismounts, an optional draw sound with no
+    /// fixed range, no hit sound) and `minimum_attack_charge`.
+    #[test]
+    fn spear_components_read_their_values() {
+        let tables = tables();
+        let mut spear = Writer::new();
+        spear.bool(true); // deals_knockback
+        spear.bool(false); // dismounts
+        let sound = SoundEvent {
+            name: Identifier::minecraft("item.spear.attack"),
+            fixed_range: None,
+        };
+        spear.option(&Some(sound), |w, v| {
+            w.identifier(&v.name);
+            w.option(&v.fixed_range, |w, r| w.f32(*r));
+        });
+        spear.option(&None::<SoundEvent>, |_, _| {});
+        let charge = 0.75f32;
+        let body = patch(
+            &[(15, &spear.buf), (14, charge.to_be_bytes().as_slice())],
+            &[],
+        );
+        let parsed = read_patch(&body, &tables).unwrap();
+        let weapon = parsed.piercing_weapon().unwrap();
+        assert!(weapon.deals_knockback);
+        assert!(!weapon.dismounts);
+        assert_eq!(
+            weapon.sound,
+            Some(SoundEvent {
+                name: Identifier::minecraft("item.spear.attack"),
+                fixed_range: None,
+            })
+        );
+        assert_eq!(weapon.hit_sound, None);
+        assert_eq!(parsed.minimum_attack_charge(), Some(0.75));
     }
 
     #[test]

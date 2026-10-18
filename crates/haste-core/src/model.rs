@@ -312,6 +312,16 @@ pub enum Decoration {
     ItemFrame(ItemFrameDecoration),
     Painting(PaintingDecoration),
     Lightning(LightningDecoration),
+    ExperienceOrb(ExperienceOrbDecoration),
+}
+
+/// The state `ExperienceOrbRenderer.submit` collects for an experience orb.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExperienceOrbDecoration {
+    /// The orb's `Value` metadata, which picks the icon tier (`ExperienceOrb.getIcon`).
+    pub value: i32,
+    /// The orb's age in ticks (plus the partial tick), driving the colour cycle.
+    pub age: f32,
 }
 
 /// The state `ItemFrameRenderer.extractRenderState` collects for an item frame.

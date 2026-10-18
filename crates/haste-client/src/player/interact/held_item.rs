@@ -24,6 +24,13 @@ pub(super) struct HeldItem {
     /// The player's `minecraft:attack_speed` with this item held
     /// (`Player.getCurrentItemAttackStrengthDelay`).
     pub(super) attack_speed: f64,
+    /// `minecraft:piercing_weapon` (a spear): the weapon's draw sound
+    /// (`PiercingWeapon.makeSound`), which the report or patch may also leave unset.
+    pub(super) piercing: bool,
+    pub(super) piercing_sound: Option<String>,
+    /// `minecraft:minimum_attack_charge`: the attack strength below which the item cannot
+    /// attack (`Player.cannotAttackWithItem`); 0 when the item has none.
+    pub(super) minimum_attack_charge: f32,
     /// [`swap_key`] of this stack, for the first-person equip.
     pub(super) swap_key: u64,
 }
@@ -78,6 +85,27 @@ impl Interaction {
         let tool = patch.tool().map(|t| tool_from_component(t, data));
         let efficiency = efficiency_from_enchantments(&patch, data);
         let attack_speed = self.item_attack_speed(&stack, data);
+        // `piercing_weapon` / `minimum_attack_charge`: the stack's own patch, else the item's
+        // defaults from the reports.
+        let name = stack
+            .item
+            .and_then(|i| data.registries.name("minecraft:item", i));
+        let piercing_sound = patch
+            .piercing_weapon()
+            .map(|w| w.sound.as_ref().map(|s| s.name.to_string()))
+            .or_else(|| {
+                name.and_then(|n| {
+                    self.item_components
+                        .as_ref()
+                        .and_then(|ic| ic.piercing_weapon_sound(n))
+                        .map(|s| s.map(str::to_owned))
+                })
+            });
+        let piercing = piercing_sound.is_some();
+        let minimum_attack_charge = patch
+            .minimum_attack_charge()
+            .or_else(|| name.and_then(|n| self.item_components.as_ref()?.minimum_attack_charge(n)))
+            .unwrap_or(0.0);
         let swap_key = swap_key(&stack, &patch);
         tracing::debug!(
             "held item components: attack_speed {attack_speed} ({} delay ticks), efficiency {efficiency}",
@@ -88,6 +116,9 @@ impl Interaction {
             tool,
             efficiency,
             attack_speed,
+            piercing,
+            piercing_sound: piercing_sound.flatten(),
+            minimum_attack_charge,
             swap_key,
         });
     }
@@ -151,6 +182,47 @@ impl LocalPlayer {
             .as_ref()
             .filter(|h| h.stack == *stack)
             .map_or(self.int.attrs.attack_speed, |h| h.attack_speed)
+    }
+
+    /// The held main-hand stack's piercing-weapon state (`ItemStack.has(PIERCING_WEAPON)`)
+    /// and its draw sound (`PiercingWeapon.makeSound`): the stack's own patch, else the
+    /// item's default. `None` when not a piercing weapon.
+    pub(crate) fn held_piercing(&self) -> Option<Option<&str>> {
+        let stack = self.main_hand();
+        self.int
+            .components
+            .as_ref()
+            .filter(|h| h.stack == *stack)
+            .and_then(|h| h.piercing.then_some(h.piercing_sound.as_deref()))
+    }
+
+    /// The held stack's `minecraft:minimum_attack_charge` (`Player.cannotAttackWithItem`):
+    /// 0 when the stack has none (or has not been decoded), as vanilla's `getOrDefault`.
+    pub(crate) fn held_minimum_attack_charge(&self) -> f32 {
+        let stack = self.main_hand();
+        self.int
+            .components
+            .as_ref()
+            .filter(|h| h.stack == *stack)
+            .map_or(0.0, |h| h.minimum_attack_charge)
+    }
+
+    /// `PiercingWeapon.makeSound`: the weapon's draw sound at the player, volume and pitch
+    /// unchanged (vanilla plays it through `Level.playSound` with 1.0, 1.0, PLAYERS source).
+    pub(super) fn piercing_sound(&mut self, sound: &str) {
+        if sound == "minecraft:intentionally_empty" {
+            return;
+        }
+        self.sound_out.push(crate::sound::SoundRequest::Play(
+            crate::sound::PlayRequest {
+                sound: crate::sound::SoundRef::Inline(sound.to_owned()),
+                category: 7, // SoundSource.PLAYERS
+                pos: crate::sound::SoundPos::Fixed(self.state.pos),
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 0,
+            },
+        ));
     }
 }
 

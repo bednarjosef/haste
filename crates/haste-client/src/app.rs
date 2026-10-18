@@ -1056,12 +1056,16 @@ fn frame_view<'w>(
     } else {
         (eye, look.0, look.1)
     };
+    // Vanilla `Camera.modifyFovBasedOnDeathOrFluid` uses `getFluidInCamera()` (the fluid at
+    // the camera position, the same value the fog uses), not the fluid at the player's eye.
+    let camera_fog = camera_fog_type(&world, &shared.data, pos);
+    let fluid_shrinks_fov = fluid_shrinks_fov(camera_fog);
     let fov_deg = frame_fov(
         options.fov as f32,
         view.fov_modifier_old,
         view.fov_modifier,
         partial,
-        view.eye_in_water || view.eye_in_lava,
+        fluid_shrinks_fov,
         view.death(),
         options.fov_effect_scale,
     );
@@ -1072,7 +1076,7 @@ fn frame_view<'w>(
         1.0,
         1.0,
         partial,
-        view.eye_in_water || view.eye_in_lava,
+        fluid_shrinks_fov,
         view.death(),
         options.fov_effect_scale,
     );
@@ -1137,8 +1141,8 @@ fn frame_view<'w>(
     // `Level.getThunderLevel` scales the thunder level by the rain level (a dry thunderstorm
     // cannot darken); the fog's thunder input is that product.
     let mut fog = fog_inputs(
+        camera_fog,
         &world,
-        &shared.data,
         &shared.biome_climates,
         pos,
         view,
@@ -1147,11 +1151,15 @@ fn frame_view<'w>(
     fog.thunder_level *= rain_level;
     let sky = SkyState {
         time_of_day: view.time_of_day,
+        game_time: view.world_age,
         rain: rain_level,
         thunder: thunder_level,
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
+        // The dimension's `visual/cloud_height` attribute: the overworld default; only
+        // sky dimensions draw clouds, and no synced source overrides it yet.
+        cloud_height: haste_render::clouds::CLOUD_HEIGHT,
         // `SkyRenderer.shouldRenderDarkDisc` reads the player's interpolated eye.
         dark_disc: haste_render::sky::dark_disc::should_render_dark_disc(
             game::interpolate(view.prev_eye, view.eye, partial).y,
@@ -1194,6 +1202,12 @@ fn frame_view<'w>(
     )
 }
 
+/// Vanilla `Camera.modifyFovBasedOnDeathOrFluid`: the FOV is shrunk only when the fluid at the
+/// camera (`Camera.getFluidInCamera`) is water or lava (not powder snow, not atmospheric).
+pub fn fluid_shrinks_fov(fog: FogType) -> bool {
+    matches!(fog, FogType::Water | FogType::Lava)
+}
+
 /// Vanilla `Camera.getFluidInCamera` -> `FogRenderer.getFogType`: the fluid at the camera
 /// block (water by its surface height, then lava), else powder snow. Vanilla probes the five
 /// near-plane points for lava and powder snow; Haste approximates them with the camera block
@@ -1230,8 +1244,8 @@ fn camera_fog_type(world: &World, data: &haste_data::GameData, pos: DVec3) -> Fo
 /// The `FogRenderer.setupFog`/`computeFogColor` inputs: the camera's fluid, the dimension
 /// defaults overlaid by the camera biome's attributes, and the player's per-tick effect state.
 fn fog_inputs(
+    fog_type: FogType,
     world: &World,
-    data: &haste_data::GameData,
     climates: &[haste_render::BiomeClimate],
     pos: DVec3,
     view: &game::ViewState,
@@ -1265,7 +1279,7 @@ fn fog_inputs(
         }
     }
     FogInputs {
-        fog_type: camera_fog_type(world, data, pos),
+        fog_type,
         dimension,
         water_fog_color,
         water_fog_start,
@@ -1585,6 +1599,8 @@ struct InputRouter {
     attack_clicks: u8,
     use_clicks: u8,
     pick_block: bool,
+    /// Ctrl held at the middle-click press (`pickBlockOrEntity`'s `hasControlDown`).
+    pick_block_ctrl: bool,
     drop_item: bool,
     drop_stack: bool,
     swap_offhand: bool,
@@ -1611,6 +1627,7 @@ impl Default for InputRouter {
             attack_clicks: 0,
             use_clicks: 0,
             pick_block: false,
+            pick_block_ctrl: false,
             drop_item: false,
             drop_stack: false,
             swap_offhand: false,
@@ -1738,7 +1755,10 @@ impl InputRouter {
                     self.use_clicks = self.use_clicks.saturating_add(1);
                 }
             }
-            2 if pressed => self.pick_block = true,
+            2 if pressed => {
+                self.pick_block = true;
+                self.pick_block_ctrl = self.mods.0;
+            }
             _ => {}
         }
         false
@@ -1872,6 +1892,10 @@ impl InputRouter {
                 .use_clicks
                 .saturating_add(std::mem::take(&mut self.use_clicks));
             i.pick_block |= std::mem::take(&mut self.pick_block);
+            if self.pick_block_ctrl {
+                i.pick_block_ctrl = true;
+                self.pick_block_ctrl = false;
+            }
             if let Some(ui) = ui {
                 // The action mappings' clicks (hotbar, drop, swap, jump), consumed once per
                 // frame and handed to the game thread through the shared input.
@@ -5617,6 +5641,15 @@ mod tests {
         let expected = 70.0 / ((1.0 - 500.0 / 500.5) * 2.0 + 1.0);
         assert!((first - expected).abs() < 1e-4, "{first} vs {expected}");
         assert!(first < 70.0);
+    }
+
+    #[test]
+    fn fluid_shrinks_fov_matches_vanilla_modify_fov() {
+        // Vanilla `Camera.modifyFovBasedOnDeathOrFluid`: only water and lava shrink the FOV.
+        assert!(fluid_shrinks_fov(FogType::Water));
+        assert!(fluid_shrinks_fov(FogType::Lava));
+        assert!(!fluid_shrinks_fov(FogType::PowderSnow));
+        assert!(!fluid_shrinks_fov(FogType::Atmospheric));
     }
 
     #[test]
