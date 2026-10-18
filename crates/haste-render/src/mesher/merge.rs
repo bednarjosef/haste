@@ -352,10 +352,28 @@ pub(super) fn flush_staged(staged: &mut [StagedQuad], sink: &mut MeshSink) {
     }
 }
 
-/// Emits one merged rectangle: the four corners of its member unit faces with
-/// the UVs stretched to repeat the sprite (the fragment shader wraps
+/// The largest boundary ring a merged rectangle can have: 2*(16+16) vertices
+/// at every unit boundary of its edges (a section is 16 cells wide).
+const MAX_RING: usize = 64;
+
+/// Emits one merged rectangle as a triangle fan over its boundary ring. The
+/// ring carries a vertex at every unit boundary the rectangle's edges cross:
+/// the quads next to an edge (unmerged unit faces, other rectangles, the
+/// neighbouring section's rectangles across a section boundary) all have
+/// their corners at unit boundaries, so no edge of the rectangle forms a
+/// T-junction with them — a T-junction's two sides rasterize the shared line
+/// from different vertex pairs, and the floating-point difference can open
+/// single-pixel cracks showing the background, which vanilla (one quad per
+/// block face, every edge one unit at most) never draws. A model quad with
+/// fractional corners (stairs, snow layers' sides) can still put a vertex
+/// strictly inside one unit segment of the ring — the same T-junction
+/// vanilla itself has between such a quad and a unit face, at the same
+/// one-unit scale, so nothing new is visible.
+///
+/// The vertices' UVs repeat the sprite (the fragment shader wraps
 /// sprite-local UVs with `fract`, so each block of the rectangle samples the
-/// same texels as the unit face did).
+/// same texels as the unit face did): a UV component that follows the u signs
+/// is `k` (or `len_u - k` when flipped) at integer offset `k` along u.
 fn emit_rect(r: &MergeRect, sink: &mut MeshSink) {
     let f = &r.key.face;
     let (ua, va) = (f.u_axis as usize, f.v_axis as usize);
@@ -364,38 +382,66 @@ fn emit_rect(r: &MergeRect, sink: &mut MeshSink) {
     // `base` carries): a full block's positive faces sit at 1.0, a snow
     // layer's top at 2/16, and so on.
     let height = f32::from_bits(f.plane).fract();
-    let mut positions = [[0f32; 3]; 4];
-    let mut uvs = [[0f32; 2]; 4];
-    for vi in 0..4 {
-        let (su, sv) = (f.corners[vi][0] as i32, f.corners[vi][1] as i32);
-        // The rectangle's corner in section-local block units: the low corner
-        // plus the per-vertex extent on each tangent axis; the normal axis
-        // keeps the fixed plane.
+    // The ring, as integer offsets (ku, kv) along the tangent axes from the
+    // rectangle's low corner: the four corners of the quad's vertex order
+    // with the unit offsets between them. Consecutive corners of a quad
+    // differ on one tangent axis; the offsets between their signs on that
+    // axis are the unit boundaries the edge crosses.
+    let mut ring = [(0i32, 0i32); MAX_RING];
+    let mut n = 0;
+    let push = |ring: &mut [(i32, i32); MAX_RING], n: &mut usize, ku: i32, kv: i32| {
+        if *n < MAX_RING {
+            ring[*n] = (ku, kv);
+            *n += 1;
+        }
+    };
+    for ci in 0..4 {
+        let (su, sv) = (f.corners[ci][0] as i32, f.corners[ci][1] as i32);
+        push(&mut ring, &mut n, su * r.len_u, sv * r.len_v);
+        let (tu, tv) = (
+            f.corners[(ci + 1) % 4][0] as i32,
+            f.corners[(ci + 1) % 4][1] as i32,
+        );
+        if su != tu && sv == tv {
+            // Along u: every unit offset strictly between the two corners.
+            let step = if tu > su { 1 } else { -1 };
+            let mut k = su * r.len_u + step;
+            while k != tu * r.len_u {
+                push(&mut ring, &mut n, k, sv * r.len_v);
+                k += step;
+            }
+        } else if sv != tv && su == tu {
+            let step = if tv > sv { 1 } else { -1 };
+            let mut k = sv * r.len_v + step;
+            while k != tv * r.len_v {
+                push(&mut ring, &mut n, su * r.len_u, k);
+                k += step;
+            }
+        }
+        // Corners differing on both axes would be a crossed quad, not a
+        // face; `merge_face` only sees real face quads, so this does not
+        // happen (and the corner itself is still pushed).
+    }
+    let mut positions = [[0f32; 3]; MAX_RING];
+    let mut uvs = [[0f32; 2]; MAX_RING];
+    for (i, &(ku, kv)) in ring.iter().take(n).enumerate() {
         let mut pos = r.base;
-        pos[ua] += su * r.len_u;
-        pos[va] += sv * r.len_v;
-        positions[vi] = pos.map(|c| c as f32);
-        positions[vi][n_axis] += height;
-        // The UV corner follows its own mapping: uv_c = (source corner sign
-        // XOR flip) scaled by the source axis's extent.
-        for (uv_c, [src, flip]) in uvs[vi].iter_mut().zip(f.uv_map) {
-            let (s, len) = if src == 0 {
-                (su, r.len_u)
-            } else {
-                (sv, r.len_v)
-            };
-            let flag = (s as u8) ^ flip;
-            *uv_c = f32::from(flag) * len as f32;
+        pos[ua] += ku;
+        pos[va] += kv;
+        positions[i] = pos.map(|c| c as f32);
+        positions[i][n_axis] += height;
+        for (uv_c, [src, flip]) in uvs[i].iter_mut().zip(f.uv_map) {
+            let (k, len) = if src == 0 { (ku, r.len_u) } else { (kv, r.len_v) };
+            *uv_c = if flip == 0 { k as f32 } else { (len - k) as f32 };
         }
     }
     let light = [r.key.light[0], r.key.light[1], r.key.light[2]];
-    let lights = [light; 4];
-    sink.push_quad(
+    sink.push_fan(
         layer_from_index(r.key.layer as usize),
         haste_assets::Direction::from_index(r.key.dir as usize),
-        &positions,
-        &uvs,
-        lights,
+        &positions[..n],
+        &uvs[..n],
+        light,
         r.key.tint,
         r.key.sprite,
     );
