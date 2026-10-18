@@ -153,7 +153,8 @@ impl NetDriver {
             }
             None => entities.tick(),
         }
-        self.session.end_tick(input, world, entities, ui, &mut self.out);
+        self.session
+            .end_tick(input, world, entities, ui, &mut self.out);
         self.flush()
     }
 

@@ -12,8 +12,8 @@ use super::action;
 impl LocalPlayer {
     /// `MultiPlayerGameMode.dropItem` (`Minecraft.handleKeybinds`' keyDrop loop, `all` =
     /// Ctrl held). The removal happens on the Java inventory — the one the HUD and screens
-    /// read — through `remove_from_selected`: vanilla `LocalPlayer.drop` runs
-    /// `Inventory.removeFromSelected` on the client inventory itself and the server does not
+    /// read — through `remove_from_selected`: vanilla runs `Inventory.removeFromSelected`
+    /// on the client inventory itself and the server does not
     /// resend the slot, so the Java count is the one the player sees (predicting on Rust's own
     /// copy left the hotbar stale). `remove_from_selected(all)` is the bridge: it removes on the
     /// Java inventory — the existing `InventorySync` mirrors the change back to Rust, so the two
@@ -45,7 +45,7 @@ impl LocalPlayer {
     /// The no-JVM prediction (vanilla `Inventory.removeFromSelected` on Rust's own hotbar copy),
     /// used when there is no live UI to mirror the Java change back. Returns whether the removed
     /// stack was empty.
-    fn predict_drop(&mut self, all: bool) -> bool {
+    pub(super) fn predict_drop(&mut self, all: bool) -> bool {
         let slot = self.held_slot.clamp(0, 8) as usize;
         let removed = self.int.hotbar[slot].clone();
         if all {

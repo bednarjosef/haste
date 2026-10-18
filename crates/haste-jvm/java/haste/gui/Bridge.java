@@ -473,7 +473,7 @@ public final class Bridge {
     }
 
     /**
-     * Removes from the selected hotbar slot (vanilla `LocalPlayer.drop` -> `Inventory.removeFromSelected`):
+     * Removes from the selected hotbar slot (vanilla `MultiPlayerGameMode.dropItem` -> `Inventory.removeFromSelected`):
      * one item, or the whole stack when {@code all}. The removal happens on the client inventory itself
      * (the one the HUD and screens read); the server does not echo it back, so `InventorySync` mirrors
      * the change to Rust. Returns whether the removed stack was empty (nothing left the slot).

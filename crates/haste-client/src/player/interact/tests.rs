@@ -312,7 +312,7 @@ impl Rig {
             entity_types: &self.types,
             border: self.border.as_ref(),
             warm_blocks: None,
-        ui: None,
+            ui: None,
         };
         let input = InputState {
             pitch: 90.0,
@@ -788,6 +788,7 @@ fn the_used_item_use_effects_feed_the_physics_state() {
         entity_types: &[],
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     r.p.apply_item_use_effects(Some(&env));
     assert!(!r.p.state.using_item);
@@ -1810,6 +1811,43 @@ fn drop_predicts_the_removal_and_swings_and_runs_independently() {
     assert!(out.is_empty(), "{out:?}");
 }
 
+/// The drop asks the Java inventory for the removal — the one the HUD and screens read —
+/// with `all`, and keeps vanilla's rules (`MultiPlayerGameMode.dropItem`): the packet always
+/// goes out, the main hand swings only when the removed stack was not empty. The closure
+/// stands in for the live UI bridge.
+#[test]
+fn drop_item_asks_the_java_inventory_and_swings_only_for_a_non_empty_removal() {
+    let mut r = Rig::new(GameMode::Survival);
+    let asked = std::cell::RefCell::new(Vec::new());
+    // A non-empty stack left the slot: asked with all=false, packet out, hand swings.
+    let mut out = Vec::new();
+    r.p.drop_item(
+        &|all| {
+            asked.borrow_mut().push(all);
+            false
+        },
+        false,
+        &mut out,
+    );
+    assert_eq!(*asked.borrow(), [false], "the Java removal is requested");
+    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
+    assert!(r.p.hand.is_swinging(), "a non-empty removal swings");
+    // Nothing left the slot: asked with all=true, the packet still goes out, no swing.
+    r.p.hand = crate::hand::Hand::new();
+    let mut out = Vec::new();
+    r.p.drop_item(
+        &|all| {
+            asked.borrow_mut().push(all);
+            true
+        },
+        true,
+        &mut out,
+    );
+    assert_eq!(*asked.borrow(), [false, true]);
+    assert_eq!(actions(&out), [(action::DROP_ALL_ITEMS, 0)]);
+    assert!(!r.p.hand.is_swinging(), "an empty removal does not swing");
+}
+
 /// A stack's own `piercing_weapon` patch: the item registry index 11 is `iron_spear`.
 fn spear_patch() -> bytes::Bytes {
     use haste_protocol::wire::Writer;
@@ -2233,7 +2271,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
-        ui: None,
+            ui: None,
         },
         None,
         &mut rowed,
@@ -2257,7 +2295,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
-        ui: None,
+            ui: None,
         },
         None,
         &mut Vec::new(),
@@ -2278,7 +2316,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
-        ui: None,
+            ui: None,
         },
         None,
         &mut out,
@@ -2307,7 +2345,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
-        ui: None,
+            ui: None,
         },
         None,
         &mut Vec::new(),
@@ -2326,7 +2364,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
-        ui: None,
+            ui: None,
         },
         None,
         &mut out,

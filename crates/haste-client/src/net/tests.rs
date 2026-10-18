@@ -373,6 +373,7 @@ fn block_events_drive_chest_lids() {
             &InputState::default(),
             &mut r.world,
             &r.entities,
+            None,
             &mut r.out,
         );
     };
@@ -487,6 +488,7 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &InputState::default(),
         &mut r.world,
         &r.entities,
+        None,
         &mut r.out,
     );
     assert_eq!(r.names(), ["client_tick_end"]);
@@ -499,6 +501,7 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &InputState::default(),
         &mut r.world,
         &r.entities,
+        None,
         &mut r.out,
     );
     assert_eq!(r.names(), ["client_tick_end"]);
@@ -506,6 +509,7 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &InputState::default(),
         &mut r.world,
         &r.entities,
+        None,
         &mut r.out,
     );
     assert_eq!(
@@ -526,6 +530,7 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &InputState::default(),
         &mut r.world,
         &r.entities,
+        None,
         &mut r.out,
     );
     assert_eq!(r.names(), ["client_tick_end"]);
@@ -537,6 +542,7 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &InputState::default(),
         &mut r.world,
         &r.entities,
+        None,
         &mut r.out,
     );
     assert_eq!(r.names(), ["client_tick_end"]);
@@ -544,6 +550,7 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &InputState::default(),
         &mut r.world,
         &r.entities,
+        None,
         &mut r.out,
     );
     // The relative teleport moved the player: the accept, then the new position.
@@ -589,6 +596,7 @@ fn respawn_resets_world_and_entities() {
         &InputState::default(),
         &mut r.world,
         &r.entities,
+        None,
         &mut r.out,
     );
     assert_eq!(r.names(), ["client_tick_end"]);
@@ -873,6 +881,7 @@ fn end_tick_once(r: &mut Rig) {
         &haste_core::input::InputState::default(),
         &mut world,
         &entities,
+        None,
         &mut out,
     );
     r.session.tick_camera(None, false);
@@ -1257,9 +1266,9 @@ fn the_mount_hud_reads_the_vehicles_health_and_the_charge() {
         ..Default::default()
     };
     r.session
-        .end_tick(&jump, &mut r.world, &r.entities, &mut Vec::new());
+        .end_tick(&jump, &mut r.world, &r.entities, None, &mut Vec::new());
     r.session
-        .end_tick(&jump, &mut r.world, &r.entities, &mut Vec::new());
+        .end_tick(&jump, &mut r.world, &r.entities, None, &mut Vec::new());
     let hud = r.session.mount_hud(&r.entities).expect("the mount HUD");
     assert_eq!(hud.jump_scale, 0.1, "jump scale after two held ticks");
     // A vehicle without health metadata (a minecart) never shows hearts.
@@ -1423,7 +1432,8 @@ fn riding_sends_rotation_and_input_only() {
     let mut out = Vec::new();
     let mut world = std::mem::take(&mut r.world);
     let entities = std::mem::take(&mut r.entities);
-    r.session.end_tick(&look, &mut world, &entities, &mut out);
+    r.session
+        .end_tick(&look, &mut world, &entities, None, &mut out);
     r.world = world;
     r.entities = entities;
     let names: Vec<&str> = out
@@ -1450,7 +1460,8 @@ fn riding_sends_rotation_and_input_only() {
     let mut out = Vec::new();
     let mut world = std::mem::take(&mut r.world);
     let entities = std::mem::take(&mut r.entities);
-    r.session.end_tick(&sneak, &mut world, &entities, &mut out);
+    r.session
+        .end_tick(&sneak, &mut world, &entities, None, &mut out);
     r.world = world;
     r.entities = entities;
     let input = out.iter().find_map(|p| match p {

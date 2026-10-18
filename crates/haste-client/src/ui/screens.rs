@@ -117,7 +117,7 @@ impl Ui {
     }
 
     /// Removes from the selected hotbar slot on the Java inventory (vanilla
-    /// `LocalPlayer.drop` -> `Inventory.removeFromSelected`): one item, or the whole stack when
+    /// `MultiPlayerGameMode.dropItem` -> `Inventory.removeFromSelected`): one item, or the whole stack when
     /// `all`. The removal happens on the client inventory itself — the one the HUD and screens
     /// read — and `InventorySync` mirrors the change back to Rust, so the two never disagree.
     /// Returns whether the removed stack was empty (nothing left the slot). `false` when there is
