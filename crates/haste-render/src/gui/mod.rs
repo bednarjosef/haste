@@ -141,6 +141,8 @@ pub struct GuiRenderer {
     vertices: Vec<GuiVertex>,
     batches: Vec<Batch>,
     entity_scratch: Vec<crate::entity::EntityVertex>,
+    translate: Vec<[f32; 2]>,
+    scissors: Vec<[f32; 4]>,
     rng: u32,
     /// The target is sRGB (no non-sRGB view available): the shader outputs linear colour.
     linear_output: bool,

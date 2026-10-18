@@ -407,6 +407,7 @@ impl Renderer {
             section_count: 24,
             view_distance: 32,
             draw_list: Vec::new(),
+            drain_buf: Vec::new(),
             layer_buckets: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             origins: Vec::new(),
             origin_buffer,
