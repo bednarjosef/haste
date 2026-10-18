@@ -212,3 +212,16 @@ pub fn equipment_by_slot(
     }
     (hands, equipment, head_item)
 }
+
+/// A tracked entity's synced equipment, resolved through the shared per-slot rules
+/// ([`equipment_by_slot`]).
+pub(crate) fn equipment_of(
+    e: &crate::store::Entity,
+    components: &haste_data::ItemComponents,
+) -> (
+    [Option<RegistryIndex>; 2],
+    Vec<haste_core::model::EquipmentPiece>,
+    Option<RegistryIndex>,
+) {
+    equipment_by_slot(&e.equipment, components)
+}

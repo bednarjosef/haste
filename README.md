@@ -68,7 +68,7 @@ downloaded or derived from Mojang's files stays in `cache/` (or `$HASTE_CACHE`).
 
 ## Progress
 
-**51 of 63 done, 12 partly done, 0 not started** (about 90 %, counting partly done as
+**53 of 63 done, 10 partly done, 0 not started** (about 92 %, counting partly done as
 half). The list is what a player needs to play Haste like the original game without noticing
 a difference; Phase 2 (mods) is not counted.
 
@@ -171,7 +171,7 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 </details>
 
 <details>
-<summary><b>Playing</b> — 6 of 8 done</summary>
+<summary><b>Playing</b> — 8 of 8 done</summary>
 
 - ✅ Walking, sprinting, sneaking, jumping, swimming, creative flight and fall damage, accepted by the vanilla server without corrections
 - ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar (mouse wheel and 1-9)
@@ -179,8 +179,8 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - ✅ Game modes: survival, creative, spectator (through walls) and adventure
 - ✅ Screenshot key (F2): saves to the screenshots folder
 - ✅ Elytra flight: gliding started from the game, firework boost (the server sees a normal glide)
-- 🟡 Riding: vanilla seat positions; steering boats, horses, pigs (carrot on a stick) and striders (warped fungus on a stick) like vanilla, boats and pigs checked against the server; striders on lava, the horse jump bar and the mount's health not yet
-- 🟡 Climbing ladders, vines and scaffolding: vanilla's climbing physics is in; connecting it to the game is in progress
+- ✅ Riding: vanilla seat positions; steering boats, horses, pigs (carrot on a stick) and striders (warped fungus on a stick, walking on lava) like vanilla, with the mount's hearts and the horse jump bar
+- ✅ Climbing ladders, vines and scaffolding: vanilla's climbing physics, with the climbable blocks taken from the server's block tags
 
 </details>
 

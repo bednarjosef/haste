@@ -334,38 +334,8 @@ impl Renderer {
         // reused draw list.
         let planes = Self::frustum_planes(&rot_view_proj);
         let cam = frame.camera.pos;
-        // Cave culling: the walk runs on a worker thread (vanilla's
-        // SectionOcclusionGraph full update runs on a background executor).
-        // Collect a finished mask first, then schedule a new walk when the
-        // camera moved or new sightline data arrived and none is in flight.
-        // Until the new mask arrives the previous one is drawn, plus newly
-        // uploaded sections next to visible ones (`bonus`).
-        if let Some(mask) = self.walk.poll() {
-            self.visible_mask = mask;
-            self.visible_for = self.scheduled_for.take();
-            self.walk_in_flight = false;
-            self.clear_bonus();
-        }
-        let cam_section = SectionPos::new(
-            (cam.x.floor() as i32) >> 4,
-            (cam.y.floor() as i32) >> 4,
-            (cam.z.floor() as i32) >> 4,
-        );
-        let need_walk = self.visible_for != Some((cam_section, self.view_distance))
-            || (self.vis_dirty && self.last_walk.elapsed() > std::time::Duration::from_millis(250));
-        if need_walk && !self.walk_in_flight {
-            self.walk.schedule(
-                cam_section,
-                self.view_distance,
-                self.section_count,
-                self.min_section,
-                cam,
-            );
-            self.scheduled_for = Some((cam_section, self.view_distance));
-            self.walk_in_flight = true;
-            self.vis_dirty = false;
-            self.last_walk = std::time::Instant::now();
-        }
+        self.update_mesh_gate(planes, cam, frame.camera.yaw, frame.camera.pitch);
+        self.update_occlusion_walk(cam);
         // Emit draws in the occlusion walk's visit (BFS) order — vanilla draws
         // its sections in `SectionOcclusionGraph`'s node order
         // (`addSectionsInFrustum` appends as the graph is visited), so the

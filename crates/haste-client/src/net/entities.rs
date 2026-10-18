@@ -46,6 +46,7 @@ impl Session {
                     self.entity_ids.remove(id);
                     self.fireworks.remove(id);
                     self.entity_attributes.remove(id);
+                    self.remote_use.remove(id);
                     if self.attached_firework == Some(*id) {
                         self.attached_firework = None;
                     }

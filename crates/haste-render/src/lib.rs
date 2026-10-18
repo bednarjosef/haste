@@ -50,6 +50,7 @@ pub use particles::{
     ParticleTypes, ParticleView, Particles, MAX_PARTICLES,
 };
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
+pub use renderer::SectionLoadState;
 pub use renderer::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState, ViewBob};
 pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;

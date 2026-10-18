@@ -17,7 +17,8 @@ use super::sky_sources;
 use super::storage::{light_dampening, Layer, Storage};
 
 /// Vanilla `LightEngine.hasDifferentLightProperties`: whether a state change can change
-/// light at all (dampening or emission differ; the shape-occlusion flags are not modelled).
+/// light at all (dampening or emission differ, or either state's shape can occlude light —
+/// the flag is `None` on old dumps, which keep the pre-shape approximation).
 pub(crate) fn light_properties_differ(
     data: &GameData,
     old: BlockStateId,
@@ -25,7 +26,9 @@ pub(crate) fn light_properties_differ(
 ) -> bool {
     new != old
         && (light_dampening(data, old) != light_dampening(data, new)
-            || data.light_emission(old) != data.light_emission(new))
+            || data.light_emission(old) != data.light_emission(new)
+            || data.shapes.use_shape_for_light_occlusion(new) == Some(true)
+            || data.shapes.use_shape_for_light_occlusion(old) == Some(true))
 }
 
 /// Recomputes the light for a changed block (the world already holds the new state) and
