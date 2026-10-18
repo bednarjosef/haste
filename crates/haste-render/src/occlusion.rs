@@ -4,14 +4,9 @@
 // SectionOcclusionGraph walk). See THIRD_PARTY.md.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::thread::JoinHandle;
 
-use ahash::AHashMap;
-use crossbeam_channel::{unbounded, Receiver, Sender};
 use glam::DVec3;
 use haste_core::{ChunkPos, SectionPos};
-use parking_lot::Mutex;
 
 /// The six section faces, ordinals matching vanilla Direction.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -297,12 +292,14 @@ impl Grid {
 /// Vanilla's `SectionOcclusionGraph` walk (Pomme compute_visible_mask): flood
 /// the section grid outward from the camera section, stepping into a neighbour
 /// only when the path isn't a backtrack and a sightline crosses the current
-/// section. Sections without visibility data are see-through, so the result
-/// only ever under-culls. Frustum culling is applied separately. Flat arrays
-/// instead of hash maps: a full walk at render distance 12 visits ~15k nodes.
+/// section. Each section's `VisibilitySet` comes from the caller (the grid
+/// builder in `walk`); sections the caller reports as opaque block the walk
+/// like vanilla's `CompiledSectionMesh.UNCOMPILED` does. Frustum culling is
+/// applied separately. Flat arrays instead of hash maps: a full walk at render
+/// distance 12 visits ~15k nodes.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_visible_mask(
-    section_vis: impl Fn(ChunkPos, i32) -> Option<VisibilitySet>,
+    section_vis: impl Fn(ChunkPos, i32) -> VisibilitySet,
     cam_col: ChunkPos,
     cam_si: i32,
     eye: DVec3,
@@ -348,7 +345,7 @@ pub fn compute_visible_mask(
         order.push(((x - cam_col.x + r) * w + (z - cam_col.z + r)) as u32 * h as u32 + si as u32);
         let source = grid.source[i];
         let cone = grid.cone[i] & !VISITED;
-        let vis = section_vis(ChunkPos::new(x, z), si).unwrap_or(VisibilitySet::all());
+        let vis = section_vis(ChunkPos::new(x, z), si);
         let distant = (x - cam_col.x).abs() > ADV_CULL_SECTION_DIST
             || (si - cam_si).abs() > ADV_CULL_SECTION_DIST
             || (z - cam_col.z).abs() > ADV_CULL_SECTION_DIST;
@@ -471,156 +468,9 @@ fn ray_occluded(
     (false, None)
 }
 
-/// Snapshot the shared section visibility sets into a dense grid for the walk:
-/// the walk reads each visited section's set once, and a slice index beats a
-/// hash probe per node. Sections without an entry are see-through (`all`).
-/// The map is copied into `entries` under the lock (a fast drain into the
-/// worker's reusable buffer) and the grid is built after it is released, so
-/// the render thread's per-upload lock never waits on the grid build.
-fn dense_visibility_grid(
-    vis: &Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>,
-    entries: &mut Vec<((ChunkPos, i32), VisibilitySet)>,
-    cam: ChunkPos,
-    r: i32,
-    h: i32,
-) -> Vec<VisibilitySet> {
-    entries.clear();
-    entries.extend(vis.lock().iter().map(|(k, v)| (*k, *v)));
-    let w = 2 * r + 1;
-    let mut dense = vec![VisibilitySet::all(); (w * w * h) as usize];
-    for ((c, si), v) in entries.iter() {
-        let dx = c.x - cam.x + r;
-        let dz = c.z - cam.z + r;
-        if dx < 0 || dz < 0 || dx >= w || dz >= w || *si < 0 || *si >= h {
-            continue;
-        }
-        dense[((dx * w + dz) * h + *si) as usize] = *v;
-    }
-    dense
-}
+mod walk;
 
-/// One walk request: the camera section and render distance the mask is
-/// computed for, plus the world vertical extent and the eye position. Runs on
-/// the worker: snapshot the visibility sets under the shared lock, then walk.
-#[derive(Clone, Copy)]
-struct WalkJob {
-    cam_section: SectionPos,
-    view_distance: i32,
-    section_count: i32,
-    min_section: i32,
-    eye: DVec3,
-}
-
-impl WalkJob {
-    fn run(
-        &self,
-        vis: &Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>,
-        entries: &mut Vec<((ChunkPos, i32), VisibilitySet)>,
-    ) -> VisibleMask {
-        let r = self.view_distance + 1;
-        let h = self.section_count;
-        let cam = ChunkPos::new(self.cam_section.x, self.cam_section.z);
-        let dense = dense_visibility_grid(vis, entries, cam, r, h);
-        let w = 2 * r + 1;
-        compute_visible_mask(
-            |c, si| {
-                let dx = c.x - cam.x + r;
-                let dz = c.z - cam.z + r;
-                if dx < 0 || dz < 0 || dx >= w || dz >= w || si < 0 || si >= h {
-                    return None;
-                }
-                Some(dense[((dx * w + dz) * h + si) as usize])
-            },
-            cam,
-            self.cam_section.y - self.min_section,
-            self.eye,
-            self.min_section * 16,
-            h,
-            r,
-        )
-    }
-}
-
-/// The section visibility walk, off the render thread. Vanilla runs the full
-/// `SectionOcclusionGraph` update on a background executor and keeps drawing
-/// the previous graph until the new one is swapped in; this does the same: the
-/// render thread only schedules a walk (`schedule`) and collects the finished
-/// mask (`poll`), never walking itself. One dedicated worker thread runs the
-/// walks serially, so at most one is in flight.
-pub struct AsyncOcclusionWalker {
-    done_rx: Receiver<VisibleMask>,
-    job_tx: Option<Sender<WalkJob>>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl AsyncOcclusionWalker {
-    /// Shares `vis` with the worker: the render thread inserts on upload, the
-    /// worker snapshots under the lock when a walk starts.
-    pub fn new(vis: Arc<Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>>) -> std::io::Result<Self> {
-        let (job_tx, job_rx) = unbounded::<WalkJob>();
-        let (done_tx, done_rx) = unbounded::<VisibleMask>();
-        let vis_worker = vis;
-        let worker = std::thread::Builder::new()
-            .name("haste-occlusion".into())
-            .spawn(move || {
-                // The walk's snapshot buffer, reused across jobs (no allocation per walk).
-                let mut entries: Vec<((ChunkPos, i32), VisibilitySet)> = Vec::new();
-                while let Ok(job) = job_rx.recv() {
-                    let mask = job.run(&vis_worker, &mut entries);
-                    if done_tx.send(mask).is_err() {
-                        break;
-                    }
-                }
-            })?;
-        Ok(Self {
-            done_rx,
-            job_tx: Some(job_tx),
-            worker: Some(worker),
-        })
-    }
-
-    /// Ask the worker to walk for `cam_section` / `view_distance`. Cheap: a
-    /// channel send; the render thread never walks.
-    pub fn schedule(
-        &self,
-        cam_section: SectionPos,
-        view_distance: i32,
-        section_count: i32,
-        min_section: i32,
-        eye: DVec3,
-    ) {
-        let job = WalkJob {
-            cam_section,
-            view_distance,
-            section_count,
-            min_section,
-            eye,
-        };
-        if let Some(tx) = &self.job_tx {
-            let _ = tx.send(job);
-        }
-    }
-
-    /// Collect the newest finished mask, if any. Non-blocking: a walk that is
-    /// not done yet simply keeps the previous mask.
-    pub fn poll(&self) -> Option<VisibleMask> {
-        let mut latest = None;
-        while let Ok(mask) = self.done_rx.try_recv() {
-            latest = Some(mask);
-        }
-        latest
-    }
-}
-
-impl Drop for AsyncOcclusionWalker {
-    fn drop(&mut self) {
-        // Drop the request channel first so the worker exits; join it.
-        self.job_tx.take();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
+pub use walk::{AsyncOcclusionWalker, EmptyColumns};
 
 /// Per-section visibility from a meshed snapshot's opacity grid, for the walk
 /// above. `snapshot` reads the section's own 16³ blocks.
