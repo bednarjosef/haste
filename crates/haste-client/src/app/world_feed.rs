@@ -84,6 +84,13 @@ pub struct WorldFeed {
     waiting: Vec<SectionPos>,
     /// The visible-set version `waiting` was last checked against.
     last_want_version: u64,
+    /// Whether the last promotion moved sections back into the queue (settled must
+    /// re-scan `waiting` then, and after every visible-set change).
+    promoted: bool,
+    /// The wanted-waiting scan's cached answer, with the version it was computed for
+    /// (`None`: the first call always scans).
+    wanted_waiting: bool,
+    wanted_waiting_version: Option<u64>,
     /// Chunks whose columns the renderer's empty-section map has been told about.
     noted_columns: HashSet<ChunkPos>,
     sort_needed: bool,
@@ -295,6 +302,7 @@ impl WorldFeed {
                 let pos = self.waiting.swap_remove(i);
                 self.queue.push(pos);
                 self.sort_needed = true;
+                self.promoted = true;
             } else {
                 i += 1;
             }
@@ -394,17 +402,28 @@ impl WorldFeed {
     /// count against a client-side count cannot work, because a section with blocks can still
     /// mesh to zero vertices (fully enclosed) and the renderer then keeps no entry for it.
     pub(crate) fn settled(
-        &self,
+        &mut self,
         stats: &FrameStats,
         quiet: Duration,
         renderer: &Renderer,
         camera: SectionPos,
         view_distance: i32,
     ) -> bool {
+        // The wanted-waiting scan walks the whole held-back list, so it is cached and
+        // only re-run when the answer can have changed: a new visible set, or a
+        // promotion having just moved sections (the next scan must not see them as
+        // still-held-back). Settle is queried every frame, including the windowed
+        // bench's measured ones.
+        let version = renderer.want_version();
+        if self.wanted_waiting_version != Some(version) || self.promoted {
+            self.promoted = false;
+            self.wanted_waiting_version = Some(version);
+            self.wanted_waiting = self.waiting.iter().any(|&p| renderer.wants_section(p));
+        }
         self.queue.is_empty()
             && stats.meshes_pending == 0
             && self.last_arrival.is_some_and(|t| t.elapsed() >= quiet)
             && renderer.occlusion_settled(camera, view_distance)
-            && self.waiting.iter().all(|&p| !renderer.wants_section(p))
+            && !self.wanted_waiting
     }
 }
