@@ -1,5 +1,7 @@
 //! Vanilla `BlockLightEngine.checkNode`: the block layer's reaction to one changed block.
-//! The propagation itself is shared (`engine.rs`); shape occlusion is not modelled.
+//! The propagation itself is shared (`engine.rs`), shape occlusion included.
+
+use haste_core::view::BlockPhysics;
 
 use super::engine::{decrease_all_directions, increase_light_from_emission, Queues, PULL_LIGHT_IN};
 use super::storage::{Layer, Storage};
@@ -12,7 +14,8 @@ pub(super) fn check_node(store: &mut Storage<'_>, queues: &mut Queues, node: u64
     if !store.storing(Layer::Block, node) {
         return;
     }
-    let emission = store.emission(node);
+    let state = store.state_at(node);
+    let emission = state.map_or(0, |s| store.game_data().light_emission(s));
     let old_level = store.stored_level(Layer::Block, node);
     if emission < old_level {
         store.set_stored_level(Layer::Block, node, 0);
@@ -21,6 +24,12 @@ pub(super) fn check_node(store: &mut Storage<'_>, queues: &mut Queues, node: u64
         queues.enqueue_decrease(node, PULL_LIGHT_IN);
     }
     if emission > 0 {
-        queues.enqueue_increase(node, increase_light_from_emission(emission));
+        queues.enqueue_increase(
+            node,
+            increase_light_from_emission(
+                emission,
+                state.is_none_or(|s| store.game_data().shapes.is_empty_shape(s)),
+            ),
+        );
     }
 }
