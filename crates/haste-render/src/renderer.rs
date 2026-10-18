@@ -1762,10 +1762,12 @@ impl Renderer {
             let mut vis = self.section_vis.lock();
             let had_vis = vis.remove(&(ChunkPos::new(pos.x, pos.z), si)).is_some();
             drop(vis);
+            // The bonus bit lives on the section record and goes with it (a stale
+            // `bonus_list` entry is skipped when the list is cleared).
             if let Some(old) = self.sections.remove(&pos) {
                 self.arenas.free(&old);
             }
-            if had_vis || self.bonus.remove(&(ChunkPos::new(pos.x, pos.z), si)) {
+            if had_vis {
                 self.vis_dirty = true;
             }
             return;
