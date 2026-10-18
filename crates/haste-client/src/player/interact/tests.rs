@@ -15,6 +15,7 @@ use haste_protocol::ClientboundPlay;
 use haste_protocol::ServerboundPlay;
 
 mod click_results;
+mod drop;
 mod use_item;
 
 const ME: EntityId = EntityId(7);
@@ -312,6 +313,7 @@ impl Rig {
             entity_types: &self.types,
             border: self.border.as_ref(),
             warm_blocks: None,
+            ui: None,
         };
         let input = InputState {
             pitch: 90.0,
@@ -787,6 +789,7 @@ fn the_used_item_use_effects_feed_the_physics_state() {
         entity_types: &[],
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     r.p.apply_item_use_effects(Some(&env));
     assert!(!r.p.state.using_item);
@@ -925,6 +928,7 @@ fn inventory_and_effects_from_packets() {
         entity_types: &[],
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!(
@@ -999,6 +1003,7 @@ fn held_stack_components_drive_mining_speed() {
         entity_types: &[],
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
@@ -1048,6 +1053,7 @@ fn use_duration_and_animation_come_from_the_item() {
         entity_types: &[],
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     let d = |i: u32| r.p.int.use_data(&item(i), env.data);
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
@@ -1062,70 +1068,6 @@ fn use_duration_and_animation_come_from_the_item() {
     // A tool is not used over time.
     assert_eq!(d(1), None);
     assert_eq!(d(3), None);
-}
-
-#[test]
-fn drop_item_key_sends_status_5_once_per_press() {
-    let mut r = Rig::new(GameMode::Survival);
-    let q = InteractInput {
-        drop_item: true,
-        ..Default::default()
-    };
-    let out = r.tick(q);
-    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
-    // Held, and on the tick after release: nothing more.
-    assert!(r.tick(q).is_empty());
-    assert!(r.tick(InteractInput::default()).is_empty());
-    let out = r.tick(q);
-    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
-}
-
-#[test]
-fn drop_stack_key_sends_status_4() {
-    let mut r = Rig::new(GameMode::Survival);
-    let out = r.tick(InteractInput {
-        drop_stack: true,
-        ..Default::default()
-    });
-    assert_eq!(actions(&out), [(action::DROP_ALL_ITEMS, 0)]);
-    assert!(r
-        .tick(InteractInput {
-            drop_stack: true,
-            ..Default::default()
-        })
-        .is_empty());
-}
-
-#[test]
-fn swap_offhand_key_sends_status_7_with_zeroed_pos() {
-    let mut r = Rig::new(GameMode::Survival);
-    let out = r.tick(InteractInput {
-        swap_offhand: true,
-        ..Default::default()
-    });
-    // Vanilla zeroes pos, face and sequence for these actions; the server updates the slots.
-    let sw: Vec<&sb::PlayerAction> = out
-        .iter()
-        .filter_map(|p| match p {
-            ServerboundPlay::PlayerAction(a) => Some(a),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        sw,
-        [&sb::PlayerAction {
-            status: action::SWAP_ITEM_WITH_OFFHAND,
-            pos: BlockPos::new(0, 0, 0),
-            face: 0,
-            sequence: 0,
-        }]
-    );
-    assert!(r
-        .tick(InteractInput {
-            swap_offhand: true,
-            ..Default::default()
-        })
-        .is_empty());
 }
 
 /// The `player_action` statuses this module sends, pinned to the declaration
@@ -1742,70 +1684,6 @@ fn spectator_use_on_a_block_sends_use_item_on_and_otherwise_nothing() {
         .all(|p| matches!(p, ServerboundPlay::Interact(i) if i.entity_id == 42)));
 }
 
-/// `MultiPlayerGameMode.dropItem` predicts the removal client-side
-/// (`Inventory.removeFromSelected`) and swings the main hand when the removed stack was not
-/// empty. `Minecraft.handleKeybinds`' keyDrop / keySwapOffhand loops run independently, all
-/// gated on `!player.isSpectator()` (not health).
-#[test]
-fn drop_predicts_the_removal_and_swings_and_runs_independently() {
-    let mut r = Rig::new(GameMode::Survival);
-    r.p.int.hotbar[0] = ItemStackData {
-        count: 3,
-        item: Some(RegistryIndex(3)),
-        components_raw: Default::default(),
-    };
-    // One item leaves the slot, the hand swings.
-    let out = r.tick(InteractInput {
-        drop_item: true,
-        ..Default::default()
-    });
-    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
-    assert_eq!(r.p.main_hand().count, 2, "the removal is predicted");
-    assert!(r.p.hand.is_swinging(), "a non-empty removal swings");
-    // The stack drop empties the slot.
-    let out = r.tick(InteractInput {
-        drop_stack: true,
-        ..Default::default()
-    });
-    assert_eq!(actions(&out), [(action::DROP_ALL_ITEMS, 0)]);
-    assert!(r.p.main_hand().is_empty());
-    // Dropping from an empty slot sends the packet but does not swing.
-    r.p.hand = crate::hand::Hand::new();
-    let out = r.tick(InteractInput {
-        drop_item: true,
-        ..Default::default()
-    });
-    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
-    assert!(!r.p.hand.is_swinging(), "an empty removal does not swing");
-
-    // All three in one tick (Q + Ctrl+Q + F): each loop runs, in vanilla's order.
-    let mut r = Rig::new(GameMode::Survival);
-    let out = r.tick(InteractInput {
-        drop_stack: true,
-        drop_item: true,
-        swap_offhand: true,
-        ..Default::default()
-    });
-    assert_eq!(
-        actions(&out),
-        [
-            (action::DROP_ALL_ITEMS, 0),
-            (action::DROP_ITEM, 0),
-            (action::SWAP_ITEM_WITH_OFFHAND, 0)
-        ]
-    );
-
-    // A spectator drops and swaps nothing.
-    let mut r = Rig::new(GameMode::Spectator);
-    let out = r.tick(InteractInput {
-        drop_stack: true,
-        drop_item: true,
-        swap_offhand: true,
-        ..Default::default()
-    });
-    assert!(out.is_empty(), "{out:?}");
-}
-
 /// A stack's own `piercing_weapon` patch: the item registry index 11 is `iron_spear`.
 fn spear_patch() -> bytes::Bytes {
     use haste_protocol::wire::Writer;
@@ -2109,6 +1987,7 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         entity_types: &r.types,
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     let input = InputState {
         pitch: 90.0,
@@ -2228,6 +2107,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+            ui: None,
         },
         None,
         &mut rowed,
@@ -2251,6 +2131,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+            ui: None,
         },
         None,
         &mut Vec::new(),
@@ -2271,6 +2152,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+            ui: None,
         },
         None,
         &mut out,
@@ -2299,6 +2181,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+            ui: None,
         },
         None,
         &mut Vec::new(),
@@ -2317,6 +2200,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+            ui: None,
         },
         None,
         &mut out,

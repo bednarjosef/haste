@@ -55,7 +55,9 @@ mod screens;
 mod tests;
 
 pub use self::input::bits;
+pub use self::input::feed_clicks;
 pub use self::packets::ui_handles;
+pub use hud::HudWarmup;
 
 /// Takes the packets a screen sent from an input event, at once (see
 /// [`Ui::send_screen_packets_now`]): the game thread sets this once it owns the connection;

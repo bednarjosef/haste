@@ -1,9 +1,10 @@
 use super::registry::level_height;
 use super::*;
 use haste_assets::Direction;
-use haste_core::view::BlockStateTable;
-use haste_core::BlockPos;
+use haste_core::view::{BlockStateTable, BlockView};
+use haste_core::{Aabb, BlockPos, ChunkPos, DVec3, SectionPos};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const STONE: BlockStateId = BlockStateId(1);
 /// State ids 10 + level: water; 30 + level: lava.
@@ -656,4 +657,316 @@ fn jar_fluid_sprites_are_in_the_atlas() {
         );
         assert!(r.sprite != 0 && w > 1 && h > 1);
     }
+}
+
+// ---------------------------------------------------------------- fluid/occlusion.rs
+
+/// An outline source for `FluidOccluders::from_outlines` (the unit-test stand-in for
+/// haste-data's per-state outline shapes).
+fn outline_table<'a>(outlines: &'a [&'a [Aabb]]) -> impl Fn(BlockStateId) -> &'a [Aabb] + 'a {
+    |s: BlockStateId| outlines.get(s.0 as usize).copied().unwrap_or(&[])
+}
+
+fn cube() -> Aabb {
+    Aabb {
+        min: DVec3::new(0.0, 0.0, 0.0),
+        max: DVec3::new(1.0, 1.0, 1.0),
+    }
+}
+
+fn bottom_slab_aabb() -> Aabb {
+    Aabb {
+        min: DVec3::new(0.0, 0.0, 0.0),
+        max: DVec3::new(1.0, 0.5, 1.0),
+    }
+}
+
+/// `BlockBehaviour.initCache`'s classification of a state's occlusion shape: full cubes
+/// occlude as `Shapes.block()` exactly when solid render (the `noOcclusion` family —
+/// glass, leaves, slime — is never solid render), empty shapes never occlude, and any
+/// other shape is the occluder as its boxes.
+#[test]
+fn occluder_table_classifies_outline_shapes() {
+    let full = [cube()];
+    let slab = [bottom_slab_aabb()];
+    let none: &[Aabb] = &[];
+    // 0: stone (full outline, solid render), 1: glass (full outline, not solid render),
+    // 2: bottom slab, 3: torch (empty outline).
+    let outlines: [&[Aabb]; 4] = [&full, &full, &slab, none];
+    let t = FluidOccluders::from_outlines(4, outline_table(&outlines), |s| s == BlockStateId(0));
+    assert!(matches!(
+        t.occluder(BlockStateId(0), || true),
+        Occluder::Full
+    ));
+    assert!(matches!(
+        t.occluder(BlockStateId(1), || false),
+        Occluder::Empty
+    ));
+    match t.occluder(BlockStateId(2), || false) {
+        Occluder::Boxes(boxes) => assert_eq!(boxes, &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]),
+        o => panic!("slab must occlude with its boxes, got {o:?}"),
+    }
+    assert!(matches!(
+        t.occluder(BlockStateId(3), || false),
+        Occluder::Empty
+    ));
+    // No data (the table is absent) and past-the-end ids: the caller's opaque flag
+    // decides, like the mesher did before shape data.
+    let absent = FluidOccluders::absent();
+    assert!(matches!(
+        absent.occluder(BlockStateId(0), || true),
+        Occluder::Full
+    ));
+    assert!(matches!(
+        absent.occluder(BlockStateId(0), || false),
+        Occluder::Empty
+    ));
+    assert!(matches!(
+        t.occluder(BlockStateId(99), || true),
+        Occluder::Full
+    ));
+    assert!(matches!(
+        t.occluder(BlockStateId(99), || false),
+        Occluder::Empty
+    ));
+}
+
+/// The mesher's fluid view: the same lines `FluidView::face_occluder` runs, over a test
+/// grid. Water beside a bottom slab keeps its whole side face when the slab covers only
+/// its lower half (vanilla's `Shapes.blockOccludes` is whole-face) and drops it when the
+/// slab covers the face entirely; the water inside a waterlogged bottom slab loses the
+/// bottom face to its own shape; glass never occludes.
+struct OccludedGrid<'a> {
+    grid: Grid,
+    occluders: &'a FluidOccluders,
+}
+
+impl FluidWorld for OccludedGrid<'_> {
+    fn state(&self, p: BlockPos) -> BlockStateId {
+        self.grid.state(p)
+    }
+    fn opaque(&self, p: BlockPos) -> bool {
+        self.grid.opaque(p)
+    }
+    fn solid(&self, p: BlockPos) -> bool {
+        self.grid.solid(p)
+    }
+    fn face_occluder(&self, p: BlockPos, _dir: Direction) -> Occluder<'_> {
+        let state = self.state(p);
+        self.occluders.occluder(state, || self.opaque(p))
+    }
+}
+
+#[test]
+fn mesher_view_culls_fluid_faces_against_partial_shapes() {
+    // Outline shapes by state id: 1 stone (full cube, solid render), 2 bottom slab,
+    // 3 glass (a full outline that never occludes: the `noOcclusion` family is not
+    // solid render), 4 the waterlogged bottom slab (water by the logged table below,
+    // slab outline). Water states are 10 + level as in `table`.
+    let full = [cube()];
+    let slab = [bottom_slab_aabb()];
+    let outlines: [&[Aabb]; 5] = [&full, &full, &slab, &full, &slab];
+    let occluders =
+        FluidOccluders::from_outlines(50, outline_table(&outlines), |s| s == BlockStateId(1));
+    let world = |neighbour: BlockStateId, fluid: BlockStateId| OccludedGrid {
+        grid: {
+            let mut g = Grid::default();
+            g.set(0, 0, 0, fluid);
+            g.set(0, -1, 0, BlockStateId(1));
+            // Walls around so the corner heights stay at the block's own height.
+            for (x, z) in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 1)] {
+                g.set(x, 0, z, BlockStateId(1));
+            }
+            g.set(1, 0, 0, neighbour);
+            g
+        },
+        occluders: &occluders,
+    };
+    let dirs = |g: &OccludedGrid, table: &FluidTable, state: BlockStateId| {
+        let f = table.fluid(state).unwrap();
+        let mut q = Vec::new();
+        fluid_quads(g, table, at(0, 0, 0), f, &mut q);
+        q.iter()
+            .map(|q| q.dir)
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    // A low flowing block (2/9 high) beside a bottom slab: the slab covers the whole
+    // east face, vanilla drops it (the stone walls take north/south/west and the
+    // bottom; the surface stays).
+    let low = world(BlockStateId(2), water(6));
+    let d = dirs(&low, &table(), water(6));
+    assert!(!d.contains(&Direction::East), "slab hides the low face");
+    assert!(!d.contains(&Direction::Down), "stone below");
+    assert!(d.contains(&Direction::Up));
+    // A source (8/9 high) keeps the whole face; the slab covers only its lower half.
+    let high = world(BlockStateId(2), water(0));
+    assert!(
+        dirs(&high, &table(), water(0)).contains(&Direction::East),
+        "source shows above the slab"
+    );
+    // Low water beside glass: a full outline that is not solid render never occludes.
+    let glass = world(BlockStateId(3), water(6));
+    assert!(
+        dirs(&glass, &table(), water(6)).contains(&Direction::East),
+        "glass never occludes"
+    );
+
+    // The water inside a waterlogged bottom slab (state 4 carries both the water and
+    // the slab's shape) loses its bottom face to its own shape. Open air around, so the
+    // side faces above the slab's half height stay.
+    let mut fluids = vec![None; 50];
+    fluids[4] = Some(FluidState {
+        fluid: Fluid::Water,
+        height: 8.0 / 9.0,
+    });
+    let logged_table = FluidTable::from_fluids(fluids);
+    let mut logged_grid = Grid::default();
+    logged_grid.set(0, 0, 0, BlockStateId(4));
+    let logged = OccludedGrid {
+        grid: logged_grid,
+        occluders: &occluders,
+    };
+    let d = dirs(&logged, &logged_table, BlockStateId(4));
+    assert!(!d.contains(&Direction::Down), "the slab covers the bottom");
+    assert!(d.contains(&Direction::Up));
+    assert!(d.contains(&Direction::North));
+}
+
+/// The real path with the cache: `FluidOccluders::from_shapes` over haste-data's oracle
+/// dump and the jar's baked models classifies vanilla's states (stone full, glass empty,
+/// slabs as their half-cube boxes), and the section mesher culls a low water face
+/// against a slab while keeping a source's face above it.
+#[test]
+#[ignore = "needs the client jar and datagen reports in the cache"]
+fn mesher_culls_fluid_faces_with_real_shapes() {
+    let jar = haste_core::paths::client_jar();
+    if !jar.exists() {
+        eprintln!("ignored: needs the client jar in the cache");
+        return;
+    }
+    let data = haste_data::GameData::load().unwrap();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3")
+            .unwrap();
+    let states = haste_assets::BlocksJsonStates::load(
+        &haste_core::paths::datagen_reports().join("blocks.json"),
+    )
+    .unwrap();
+    let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
+    let baked = haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+
+    let state = |name: &str, props: &[(&str, &str)]| -> BlockStateId {
+        (0..states.len() as u32)
+            .map(BlockStateId)
+            .find(|s| {
+                states.block_of(*s).path() == name
+                    && props
+                        .iter()
+                        .all(|(k, v)| states.property_value(*s, k) == Some(*v))
+            })
+            .unwrap_or_else(|| panic!("no state for {name} {props:?}"))
+    };
+    let occluders = FluidOccluders::from_shapes(&states, &data.shapes, &baked);
+    match occluders.occluder(state("oak_slab", &[("type", "bottom")]), || false) {
+        Occluder::Boxes(boxes) => assert_eq!(boxes, &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]),
+        o => panic!("bottom slab must occlude with its boxes, got {o:?}"),
+    }
+    assert!(matches!(
+        occluders.occluder(state("stone", &[]), || true),
+        Occluder::Full
+    ));
+    assert!(matches!(
+        occluders.occluder(state("glass", &[]), || false),
+        Occluder::Empty
+    ));
+
+    // Mesh a section with water beside a bottom slab on stone and count the water
+    // vertices on the shared plane: a level-6 block (2/9 high) loses the face, a source
+    // keeps it (the slab covers only its lower half).
+    let sprites = FluidSprites::from_atlas(&atlas);
+    let tables = crate::mesher::MeshTables::new(
+        Arc::new(crate::tint::TintTable::new(&states)),
+        Arc::new(crate::tint::BiomeColors::default()),
+        Arc::new(FluidTable::new(
+            &states,
+            &Fluids::vanilla(&sprites),
+            &FluidRules::vanilla(),
+            sprites,
+        )),
+        Arc::new(crate::mesher::AoTable::all_solid(states.len())),
+        Arc::new(occluders),
+    );
+    let west_face_vertices = |fluid_state: BlockStateId| -> usize {
+        struct OnePair {
+            floor: BlockStateId,
+            slab: BlockStateId,
+            fluid: BlockStateId,
+        }
+        impl BlockView for OnePair {
+            fn block_state(&self, p: BlockPos) -> BlockStateId {
+                match (p.x, p.y, p.z) {
+                    (0..=2, 0, 0..=2) => self.floor,
+                    (1, 1, 1) => self.fluid,
+                    (0, 1, 1) => self.slab,
+                    _ => BlockStateId::AIR,
+                }
+            }
+            fn is_chunk_loaded(&self, _: ChunkPos) -> bool {
+                true
+            }
+            fn sky_light(&self, _: BlockPos) -> u8 {
+                15
+            }
+            fn block_light(&self, _: BlockPos) -> u8 {
+                0
+            }
+            fn min_y(&self) -> i32 {
+                -64
+            }
+            fn height(&self) -> i32 {
+                384
+            }
+        }
+        let world = OnePair {
+            floor: state("stone", &[]),
+            // waterlogged=false: the plain slab, not its waterlogged twin (whose own
+            // water would take the same-fluid culling instead).
+            slab: state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]),
+            fluid: fluid_state,
+        };
+        let snapshot = crate::mesher::MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
+        let mesh = crate::mesher::mesh_section_with(
+            &snapshot,
+            &baked,
+            &atlas,
+            &tables,
+            SectionPos::new(0, 0, 0),
+        );
+        mesh.vertices
+            .iter()
+            // The fluid block sits at x = 1; only its west face plane (INSET inside
+            // the block) carries vertices there — models sit on the block boundary.
+            // Positions are u16-quantized (24 blocks over 65535), so compare with the
+            // quantization step's slack, well below INSET.
+            .filter(|v| {
+                let x = f32::from(v.pos[0]) / 65535.0 * crate::vertex::POS_RANGE
+                    - crate::vertex::POS_BIAS;
+                (x - (1.0 + INSET)).abs() < 5e-4
+            })
+            .count()
+    };
+    // Level 6 water (2/9 high): vanilla drops the face the slab covers.
+    assert_eq!(
+        west_face_vertices(state("water", &[("level", "6")])),
+        0,
+        "the slab covers a 2/9-high face entirely"
+    );
+    // A source (8/9 high): the face stays; the slab covers only its lower half. Both
+    // the front and the back quad are drawn (no overlay neighbour), so 8 vertices.
+    assert_eq!(
+        west_face_vertices(state("water", &[("level", "0")])),
+        8,
+        "a source keeps its side face above the slab"
+    );
 }

@@ -257,6 +257,11 @@ fn setup() -> Option<(
     .unwrap();
     let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
     let baked = haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+    // Real occlusion shapes for the lake's fluid faces when the game data is available;
+    // the bench needs the cache anyway (jar + reports), so this is the common path.
+    let occluders = haste_data::GameData::load()
+        .map(|data| fluid::FluidOccluders::from_shapes(&states, &data.shapes, &baked))
+        .unwrap_or_else(|_| fluid::FluidOccluders::absent());
     let tables = MeshTables::new(
         std::sync::Arc::new(tint::TintTable::new(&states)),
         std::sync::Arc::new(
@@ -281,6 +286,7 @@ fn setup() -> Option<(
         )),
         // The bench world is full cubes: AO treats them all as occluders.
         std::sync::Arc::new(haste_render::mesher::AoTable::all_solid(states.len())),
+        std::sync::Arc::new(occluders),
     );
     Some((states, baked, atlas, tables))
 }
@@ -304,9 +310,10 @@ fn mesh_hash(mesh: &haste_render::SectionMesh) -> u64 {
     };
     let mut h = DefaultHasher::new();
     mesh.vertices.len().hash(&mut h);
-    for (layer, indices) in &mesh.layers {
-        layer_index(*layer).hash(&mut h);
-        let mut triangles: Vec<u64> = indices
+    for l in &mesh.layers {
+        layer_index(l.layer).hash(&mut h);
+        let mut triangles: Vec<u64> = l
+            .indices
             .as_chunks::<3>()
             .0
             .iter()
@@ -368,7 +375,11 @@ fn mesher_output_stable() {
         );
         let mesh = mesh_section_with(&snapshot, &baked, &atlas, &tables, pos);
         mesh_hash(&mesh).hash(&mut hash);
-        quads += mesh.layers.iter().map(|(_, i)| i.len() / 6).sum::<usize>();
+        quads += mesh
+            .layers
+            .iter()
+            .map(|l| l.indices.len() / 6)
+            .sum::<usize>();
         vertices += mesh.vertices.len();
         for v in &mesh.vertices {
             sprites.0 = sprites.0.min(v.sprite);
@@ -383,7 +394,10 @@ fn mesher_output_stable() {
     // permeability test moved to the one-out cells (vanilla's side + normal)
     // and the zero-light fallback was gated off: the vertices next to
     // occluders change. Quad count, vertices and sprites are unchanged.
-    let expected: u64 = 16_624_786_452_542_720_925;
+    // Then the face-coverage cull (vanilla `Block.shouldRenderFace`'s shape
+    // comparison, mesher/culling.rs) removed the interior faces between
+    // partial blocks that cover each other (snow layers, slabs): fewer quads.
+    let expected: u64 = 3_174_783_879_967_708_120;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

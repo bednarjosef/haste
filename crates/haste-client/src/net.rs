@@ -56,6 +56,11 @@ pub struct Session {
     bell_states: Option<HashSet<BlockStateId>>,
     /// The decorated pot block states, for `block_event` action 1's wobble events.
     pot_states: Option<HashSet<BlockStateId>>,
+    /// The `minecraft:block_entity_type` registry id per block state whose block carries a
+    /// block entity (vanilla `BlockEntityTypes`' valid-block sets), filled from the game data
+    /// and the synced registry at join: a block update that places such a block creates its
+    /// block entity client-side, like vanilla `LevelChunk.setBlockState`.
+    block_entity_state_kinds: Option<HashMap<BlockStateId, u32>>,
     /// Bell rings waiting to be drawn, by block position: the click direction vanilla
     /// `BellBlockEntity.onHit` sends as the event's parameter.
     pub bells: HashMap<BlockPos, Option<Direction>>,
@@ -215,6 +220,7 @@ impl Session {
             lid_states: None,
             bell_states: None,
             pot_states: None,
+            block_entity_state_kinds: None,
             bells: HashMap::new(),
             pots: HashMap::new(),
             entity_ids: HashSet::new(),
@@ -446,8 +452,10 @@ impl Session {
             damage::hurt_to(self, old, h.health);
         }
         if player_packet {
-            for (pos, state) in self.player.take_world_edits() {
-                world.set_block(pos, state);
+            // The drain holds the player's borrow, so the edits apply from a collected copy.
+            let edits: Vec<_> = self.player.take_world_edits().collect();
+            for (pos, state) in edits {
+                self.set_block_with_block_entities(world, pos, state);
             }
             // The boat we steer is this side's authoritative instance of it (vanilla
             // `Entity.isLocalInstanceAuthoritative`): the entity the world draws sits where our
@@ -491,6 +499,7 @@ impl Session {
 }
 
 pub mod account;
+mod block_entity_types;
 mod block_events;
 mod chat;
 pub mod chat_session;
@@ -514,6 +523,7 @@ mod vehicle;
 mod weather;
 mod world;
 
+pub use block_entity_types::block_entity_type_path;
 pub use block_events::LidAnim;
 pub use counters::NetCounters;
 

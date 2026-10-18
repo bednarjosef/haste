@@ -141,3 +141,62 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   `ShaderDefines`). A mod pipeline with a known blend function maps correctly; the texture-name
   rule is only the fallback for a null pipeline. Additive pipelines (`GUI_TEXT_HIGHLIGHT`) still
   draw normal until the renderer gets an additive GUI blend.
+- **2026-10-18 Wrapped sprite UVs need continuous derivatives.** The greedy mesher stretches a
+  quad's sprite-local UV over the merged rectangle and `chunk.wgsl` wraps it per block with
+  `fract()`. Taking `dpdx`/`dpdy` of the wrapped atlas UV jumps a whole sprite at every block edge,
+  `textureSampleGrad` then picks the coarsest mip and draws the atlas-average grey as a 1-2 px line
+  on each edge (user bug "dashed lines on block edges"). The derivatives now come from the
+  continuous sprite UV scaled into atlas space. Vanilla never merges faces, so it has no wraps.
+- **2026-10-18 Face culling by neighbour coverage.** `mesher/culling.rs` culls a face when the
+  neighbour's opaque, flush, axis-aligned model quads cover it: the visible result of vanilla
+  `Block.shouldRenderFace`'s shape comparison (snow against snow, slab against slab), -28% quads
+  on the bench world. Vanilla compares occlusion shapes, not models; the oracle dump now carries
+  `occlusion` per state, and branch dump-occlusion-light moves the rule onto it.
+  `skipRendering` (glass against glass, iron bars) is not implemented yet.
+- **2026-10-18 The oracle dump carries occlusion and light per state.** `block_shapes.json` has
+  `occlusion` (`getOcclusionShape`), `light_dampening` and `propagates_skylight_down`; the light
+  engine and fluid occlusion should read them instead of name matching. `dump-server-oracles.sh`
+  removes its old outputs first (it waits for the files to appear, so a rerun over an existing
+  dump used to stop the server before it wrote anything).
+- **2026-10-18 The embedded JVM must be warm before the render thread calls it.** The 100-600 ms
+  frame hitches were the JVM's boot full GCs (code cache, metaspace thresholds) and first-frame
+  class loading, landing in the render thread's GUI calls right after the HUD went live. A fresh
+  HUD now renders warm-up frames on the game thread before it is published (`ui/hud.rs`
+  `HudWarmup`), and the packets that arrive meanwhile are handed over before it goes live.
+  `HASTE_JVM_GC_LOG=1` adds `-Xlog:gc`.
+- **2026-10-18 Mesh upload memory.** One `queue.write_buffer` per mesh left ~3 GB of driver
+  staging resident at render distance 32, and the unbounded mesh-result channel piled up the whole
+  view distance's meshes behind the upload budget (glibc arenas never shrink after that). Uploads
+  go through a `StagingBelt` with one encoder per frame, and the mesh backlog is capped at 3072
+  sections (`terrain_feed.rs`): RSS 4.1-4.8 GB -> ~1.0 GB (vanilla ~2 GB). GPU memory is still
+  ~2.8 GB because every section in view distance is meshed; vanilla meshes only visible sections
+  (`LevelExtractor`), branch mesh-visible-sections.
+- **2026-10-18 The "entities" GPU sub-pass was water.** The entities timestamp bracket stayed open
+  across the translucent terrain draws, so translucent read 0 and entities 2.5 ms at rd 32
+  (`timing.rs` `SubpassBrackets` now). Block entities also drew at any distance; vanilla's
+  `BlockEntityRenderer.shouldRender` limit (64 blocks, piston 68, beacon horizontal render
+  distance) is in `blockentity/view_distance.rs`.
+- **2026-10-18 Screenshots are opaque.** The framebuffer alpha behind leaves and water is 0.5;
+  vanilla `Screenshot.takeScreenshot` forces alpha 255 and so does Haste's readback now. Before,
+  images looked washed out over a light background.
+- **2026-10-18 Offscreen scripts and keys.** A `--script` client drops keys pressed before the
+  JVM's KeyMappings exist; scripts that hold keys start with `wait_until settled`.
+- **2026-10-18 GPU sub-pass timestamps are expensive on RADV.** Writing the 16 inside-pass
+  timestamps every frame cost ~2.5 ms of GPU time at rd 32 (Radeon 860M); the sub-pass brackets
+  are now sampled every 64th frame (`timing.rs` `SUBPASS_SAMPLE_FRAMES`), and a bracket counts as
+  run only when its timestamp was written. The frame at rd 32 is vertex/draw-bound, not
+  fragment-bound (13x fewer pixels cut GPU time by 23%): grouping draws by arena (2761 -> 649
+  calls) and skipping back-facing face-direction groups per section (-30% quads) took the frame
+  from 11.6 to 6.4 ms. Phase 2 note: a section layer's draws are per face direction
+  (`LayerDraw.dir`, 6 = whole layer, used by translucent to keep emission order).
+- **2026-10-18 Ctrl state in the JVM.** Vanilla polls the live keyboard for `hasControlDown()`
+  when a click is consumed (`Minecraft.handleKeybinds` drop: one item or the stack). In Haste the
+  JVM keeps the SDL keymods of the last key event, also with no screen open
+  (`ClientImpl.ctrlDown()`); later "Ctrl held at the consume" reads use it.
+- **2026-10-18 Reported "holes" in the held block were texels.** The grey spots on a held dirt
+  block are dirt.png's own grey pebbles over grey ground; an offscreen test now checks that a
+  held block draws as a solid cube (`haste-render/tests/held_block_offscreen.rs`).
+- **2026-10-18 Vanilla reference runs have clouds off.** `scripts/vanilla-options.sh` sets
+  `renderClouds:"false"` (clouds drift, so shots would not compare). Haste ignores the cloud
+  option and always draws fancy clouds (brief cloud-option); benches against vanilla are not
+  like-for-like until it honours `Options.cloudStatus`.

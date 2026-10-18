@@ -3,8 +3,9 @@
 
 use super::*;
 
+mod memory;
 mod offscreen;
-mod window;
+pub(super) mod window;
 pub use offscreen::bench;
 pub use window::bench_window;
 pub(super) use window::WindowBench;

@@ -18,7 +18,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
-    renderer.set_ao_shapes(&shared.data.blocks, &shared.data.shapes);
+    renderer.set_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
@@ -130,39 +130,22 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             .as_ref()
             .map(|ui| ui.jvm_memory())
             .unwrap_or_default();
-        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
-        let rss_kb = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("VmHWM"))
-                    .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
-            })
-            .unwrap_or_default();
+        let mib = memory::mib;
+        let rss_kb = memory::peak_rss_kib();
         // smaps_rollup for the live (settled) picture: anonymous vs file-backed pages.
-        let rollup = std::fs::read_to_string("/proc/self/smaps_rollup")
-            .map(|s| {
-                let f = |key: &str| {
-                    s.lines()
-                        .find(|l| l.starts_with(key))
-                        .and_then(|l| l.split_whitespace().nth(1))
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .unwrap_or(0)
-                };
-                (f("Rss:"), f("Pss_Anon:"), f("Pss_File:"))
-            })
-            .unwrap_or((0, 0, 0));
+        let rollup = memory::smaps_rollup_kib();
         println!(
             "bench memory: peak RSS {rss_kb} kB ({:.1} MiB), {arenas} arenas ({:.1} MiB vertex+index, {:.1} used), {sections} resident sections",
-            rss_kb.parse::<f64>().unwrap_or(0.0) / 1024.0,
+            mib(rss_kb * 1024),
             mib(arena_bytes),
             mib(arena_used),
         );
         println!(
-            "bench memory: settled Rss {:.1} MiB (Pss_Anon {:.1}, Pss_File {:.1})",
+            "bench memory: settled Rss {:.1} MiB (Pss_Anon {:.1}, Pss_File {:.1}), gpu resident {:.1} MiB",
             mib(rollup.0 * 1024),
             mib(rollup.1 * 1024),
             mib(rollup.2 * 1024),
+            mib(memory::gpu_resident_bytes()),
         );
         println!(
             "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",

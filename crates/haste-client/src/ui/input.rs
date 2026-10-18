@@ -23,12 +23,32 @@ pub mod bits {
     pub const C_DROP: i32 = 1 << 9;
     pub const C_SWAP_OFFHAND: i32 = 1 << 10;
     pub const C_JUMP: i32 = 1 << 11;
+    /// The drop click consumed while Ctrl is held: the whole stack leaves the slot (vanilla
+    /// `Minecraft.handleKeybinds` passes `hasControlDown()` to `dropItem`).
+    pub const C_DROP_STACK: i32 = 1 << 12;
+}
+
+/// Feeds the action-mapping click bits ([`Ui::consume_clicks`]) into the shared interact
+/// input: the hotbar picks, the drop (one item, or the whole stack when Ctrl was held at the
+/// click) and the off-hand swap. The jump click is not an interact field: the caller routes
+/// it to its own press logic.
+pub fn feed_clicks(c: i32, i: &mut haste_core::input::InteractInput) {
+    for slot in 0..9 {
+        if c & (bits::C_HOTBAR_0 << slot) != 0 {
+            i.hotbar = Some(slot as u8);
+        }
+    }
+    i.drop_item |= c & bits::C_DROP != 0;
+    i.drop_stack |= c & bits::C_DROP_STACK != 0;
+    i.swap_offhand |= c & bits::C_SWAP_OFFHAND != 0;
 }
 impl Ui {
     /// A game key event (no screen open, SDL3 scancode) mirrored into the vanilla `KeyMapping`s,
     /// vanilla's `KeyboardHandler.keyPress` (press sets the down state and counts a click).
-    pub fn game_key(&self, scancode: i32, pressed: bool) {
-        self.gui().game_key(scancode, pressed);
+    /// `mods` is the SDL keymod state, kept current in Java for the Ctrl-at-consume reads
+    /// (the drop's one-item-or-stack).
+    pub fn game_key(&self, scancode: i32, pressed: bool, mods: i32) {
+        self.gui().game_key(scancode, pressed, mods);
     }
 
     /// A game mouse button (no screen open, vanilla numbering) mirrored into the vanilla
@@ -43,8 +63,8 @@ impl Ui {
         self.gui().game_input()
     }
 
-    /// Consumes the action `KeyMapping` clicks (hotbar, drop, swap offhand, jump) since the last
-    /// call as a [`bits`] mask, one bit per click.
+    /// Consumes the action `KeyMapping` clicks (hotbar, drop, drop stack, swap offhand, jump)
+    /// since the last call as a [`bits`] mask, one bit per click.
     pub fn consume_clicks(&self) -> i32 {
         self.gui().consume_clicks()
     }
@@ -63,8 +83,9 @@ impl Ui {
         }
         // No screen: vanilla's `KeyboardHandler.keyPress` sets the `KeyMapping`s (`handlesGameInput`),
         // including the HUD's own keys, which are KeyMappings in vanilla too. The client reads the
-        // movement and action mappings back through `game_input`/`consume_clicks`.
-        gui.game_key(key, pressed);
+        // movement and action mappings back through `game_input`/`consume_clicks`; the keymod
+        // state travels along, so Java can read Ctrl where vanilla polls the live keyboard.
+        gui.game_key(key, pressed, mods);
         if key == keys::TAB {
             self.shared.tab_down.store(pressed, Ordering::Relaxed);
             gui.set_tab_list_visible(pressed);
@@ -145,3 +166,6 @@ impl Ui {
         true
     }
 }
+
+#[cfg(test)]
+mod tests;

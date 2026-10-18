@@ -133,6 +133,10 @@ pub struct InteractEnv<'a> {
     /// The `#strider_warm_blocks` resolution for the strider the player steers (synced block
     /// tags + the data's block table); `None` without a tag sync yet.
     pub warm_blocks: Option<&'a dyn crate::item_based_steering::WarmBlocks>,
+    /// The live HUD and screens (the JVM), when one is up. The drop predicts the removal on the
+    /// Java inventory through it (vanilla's `LocalPlayer.drop`), which the HUD reads;
+    /// `None` before the JVM is ready or when it failed to start.
+    pub ui: Option<&'a crate::ui::Ui>,
 }
 
 /// Interaction state of the local player.

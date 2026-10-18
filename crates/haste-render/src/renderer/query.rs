@@ -57,6 +57,13 @@ impl Renderer {
         (arenas, bytes, used, self.sections.len())
     }
 
+    /// Sections meshed but not yet uploaded (pending snapshots, queued results and
+    /// in-flight jobs), plus the dirty sections held back by back-pressure: the feed
+    /// settles only when everything the game thread marked has been meshed and uploaded.
+    pub fn meshes_pending(&self) -> usize {
+        self.mesher.pending_len() + self.mesh_carry.len()
+    }
+
     /// CPU-side memory diagnostics for the bench's memory line: the block atlas's
     /// retained mip chain, the baked block models and the mesher's pending queue.
     pub fn cpu_memory(&self) -> RendererCpuMemory {
