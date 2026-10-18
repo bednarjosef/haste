@@ -11,18 +11,18 @@
 
 pub mod component;
 pub mod components;
+pub mod nbt;
 pub mod particle;
 pub mod positions;
 pub mod primitives;
 pub mod slot;
 pub mod strings;
+pub mod text_component;
 pub mod varint;
 
 use bytes::Bytes;
 use haste_core::{Component, DVec3, Identifier};
 use uuid::Uuid;
-
-use crate::nbt::{NbtCompound, NbtTag};
 
 /// Vanilla's default maximum string length, in UTF-16 code units.
 pub const MAX_STRING: usize = 32767;
@@ -221,73 +221,6 @@ impl<'a> Reader<'a> {
         Ok(self.take(bits.div_ceil(8))?.to_vec())
     }
 
-    /// Length in bytes of the network NBT value at the cursor (type id byte +
-    /// payload, no root name).
-    fn nbt_len(&self) -> DecodeResult<usize> {
-        use crate::nbt::deserializer::NbtReadHelper;
-        let all = self.buf;
-        let mut cursor = std::io::Cursor::new(all);
-        let mut helper = crate::nbt::deserializer::NbtReadHelperJava::new(&mut cursor);
-        let id = helper.get_u8()?;
-        NbtTag::skip_data(&mut helper, id)?;
-        let used = cursor.position() as usize;
-        if used > all.len() {
-            return Err(DecodeError::Eof {
-                needed: used,
-                remaining: all.len(),
-            });
-        }
-        Ok(used)
-    }
-
-    /// One network NBT value, kept as raw bytes. A lone `TAG_End` is the
-    /// single byte `[0]`.
-    pub fn nbt_raw(&mut self) -> DecodeResult<Bytes> {
-        let n = self.nbt_len()?;
-        let s = self.take(n)?;
-        Ok(self.to_bytes(s))
-    }
-
-    /// One network NBT value, parsed. `None` for `TAG_End`.
-    pub fn nbt_tag(&mut self) -> DecodeResult<Option<NbtTag>> {
-        use crate::nbt::deserializer::NbtReadHelper;
-        let n = self.nbt_len()?;
-        let s = self.take(n)?;
-        let mut cursor = std::io::Cursor::new(s);
-        let mut helper = crate::nbt::deserializer::NbtReadHelperJava::new(&mut cursor);
-        let id = helper.get_u8()?;
-        if id == crate::nbt::END_ID {
-            return Ok(None);
-        }
-        Ok(Some(NbtTag::deserialize_data(&mut helper, id)?))
-    }
-
-    /// Network NBT that must be a compound (or `TAG_End` for none).
-    pub fn nbt_compound(&mut self) -> DecodeResult<Option<NbtCompound>> {
-        match self.nbt_tag()? {
-            None => Ok(None),
-            Some(NbtTag::Compound(c)) => Ok(Some(c)),
-            Some(other) => Err(DecodeError::Invalid(format!(
-                "expected NBT compound, got tag id {}",
-                other.get_type_id()
-            ))),
-        }
-    }
-
-    /// Text Component (network NBT form).
-    pub fn component(&mut self) -> DecodeResult<Component> {
-        match self.nbt_tag()? {
-            None => Ok(Component::default()),
-            Some(tag) => component::from_nbt(&tag),
-        }
-    }
-
-    /// JSON Text Component (a string holding JSON).
-    pub fn json_component(&mut self) -> DecodeResult<Component> {
-        let s = self.string_max(MAX_JSON_COMPONENT)?;
-        component::from_json_str(&s)
-    }
-
     /// Reads a value with its canonical encoding.
     pub fn read<T: Wire>(&mut self) -> DecodeResult<T> {
         T::read(self)
@@ -354,36 +287,6 @@ impl Writer {
             self.buf.extend_from_slice(&l.to_le_bytes()[..take]);
         }
     }
-    /// One network NBT value (`None` writes `TAG_End`).
-    pub fn nbt_tag(&mut self, tag: Option<&NbtTag>) {
-        match tag {
-            None | Some(NbtTag::End) => self.u8(crate::nbt::END_ID),
-            Some(t) => {
-                let mut w = crate::nbt::serializer::NbtWriteHelperJava::new(&mut self.buf);
-                // Writing into a Vec only fails for strings over 65535 bytes,
-                // which we never build; treat it as a programming error.
-                t.clone()
-                    .serialize(&mut w)
-                    .expect("NBT serialisation into a Vec");
-            }
-        }
-    }
-    /// Network NBT compound.
-    pub fn nbt_compound(&mut self, c: Option<&NbtCompound>) {
-        match c {
-            None => self.u8(crate::nbt::END_ID),
-            Some(c) => self.nbt_tag(Some(&NbtTag::Compound(c.clone()))),
-        }
-    }
-    /// Text Component in network NBT form.
-    pub fn component(&mut self, c: &Component) {
-        let tag = component::to_nbt(c);
-        self.nbt_tag(Some(&tag));
-    }
-    /// JSON Text Component.
-    pub fn json_component(&mut self, c: &Component) {
-        self.string(&component::to_json_string(c));
-    }
     /// Writes a value with its canonical encoding.
     pub fn write<T: Wire>(&mut self, v: &T) {
         v.write(self)
@@ -422,23 +325,6 @@ impl<T: Wire> Codec<T> for Native {
     }
 }
 
-impl Wire for Component {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        r.component()
-    }
-    fn write(&self, w: &mut Writer) {
-        w.component(self)
-    }
-}
-/// Network NBT; `TAG_End` decodes to `NbtTag::End`.
-impl Wire for NbtTag {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(r.nbt_tag()?.unwrap_or(NbtTag::End))
-    }
-    fn write(&self, w: &mut Writer) {
-        w.nbt_tag(Some(self))
-    }
-}
 /// Prefixed Optional.
 impl<T: Wire> Wire for Option<T> {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
