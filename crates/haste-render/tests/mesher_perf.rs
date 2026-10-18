@@ -417,7 +417,12 @@ fn mesher_output_stable() {
     // empty shapes and non-adjacent flowers both culling rules agree, so the
     // occlusion-based rules (mesher/face_occlusion.rs, fluid/occlusion.rs) keep
     // the same quads and vertices as the model rules.
-    let expected: u64 = 9_991_751_837_968_507_622;
+    // Then the merged-quad T-junction fix (merge.rs, 2026-10-19): every merged
+    // rectangle became a triangle fan over a boundary ring with a vertex at
+    // every unit boundary, so no edge runs past a neighbouring quad's corner.
+    // Same quads where rectangles are 1x1, more triangles and vertices for
+    // larger rectangles: 676827 -> 1364030 quads, 2707308 -> 4081714 vertices.
+    let expected: u64 = 5_545_496_350_574_509_459;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

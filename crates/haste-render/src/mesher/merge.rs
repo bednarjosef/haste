@@ -431,8 +431,16 @@ fn emit_rect(r: &MergeRect, sink: &mut MeshSink) {
         positions[i] = pos.map(|c| c as f32);
         positions[i][n_axis] += height;
         for (uv_c, [src, flip]) in uvs[i].iter_mut().zip(f.uv_map) {
-            let (k, len) = if src == 0 { (ku, r.len_u) } else { (kv, r.len_v) };
-            *uv_c = if flip == 0 { k as f32 } else { (len - k) as f32 };
+            let (k, len) = if src == 0 {
+                (ku, r.len_u)
+            } else {
+                (kv, r.len_v)
+            };
+            *uv_c = if flip == 0 {
+                k as f32
+            } else {
+                (len - k) as f32
+            };
         }
     }
     let light = [r.key.light[0], r.key.light[1], r.key.light[2]];

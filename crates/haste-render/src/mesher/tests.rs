@@ -168,9 +168,11 @@ fn jar_mesh_flat_stone_section() {
     // Vertices packed, sprite ids resolved from the atlas.
     assert!(mesh.vertices.iter().all(|v| v.sprite != 0));
     // Greedy merge: the uniform-light top and bottom faces each merge into
-    // one 16x16 quad (UVs repeat 16x, the format's repeat limit), the
-    // light-graded side faces stay per block: 1 + 1 + 64 = 66.
-    assert_eq!(total_quads, 66, "merged flat stone section");
+    // one 16x16 rectangle, emitted as a fan over a boundary ring with a
+    // vertex at every unit boundary (merge.rs, the T-junction fix): a
+    // 2*(16+16)-vertex ring is 62 triangles = 31 quads each. The
+    // light-graded side faces stay per block: 31 + 31 + 64 = 126.
+    assert_eq!(total_quads, 126, "merged flat stone section");
     // UVs are sprite-local: 0 at the low corner, up to 16 repeats (the
     // fixed-point format's TERRAIN_UV_MAX_REPEAT) at the far corner.
     assert!(mesh
@@ -208,15 +210,18 @@ fn jar_mesh_flat_stone_section() {
     );
     // Greedy merge: unmerged this scene would draw 256 top + 256 bottom +
     // 256 side + 256 overlay quads (1024). The uniform-light faces merge: top
-    // and bottom to one quad each, and each edge's y=1..3 side and overlay
-    // faces to one 16x3 rect (their face-adjacent cells are lit, so vanilla
-    // LightCoordsUtil.smoothBlend's dark-neighbour substitution makes their
-    // light uniform — the y=0 row below them is sky-0 in FlatWorld). Only the
-    // y=0 side faces are light-graded — their face-adjacent cells sit at sky
-    // 0 with lit cells one row up, so the corner blend differs per vertex —
-    // and stay per block: 2 + 4 edges * 2 merged + 4 edges * 16 * 2 = 138.
+    // and bottom to one rectangle each (a 2*(16+16)-vertex fan ring, 62
+    // triangles = 31 quads each, merge.rs's T-junction fix), and each edge's
+    // y=1..3 side and overlay faces to one 16x3 rect (their face-adjacent
+    // cells are lit, so vanilla LightCoordsUtil.smoothBlend's dark-neighbour
+    // substitution makes their light uniform — the y=0 row below them is
+    // sky-0 in FlatWorld; a 2*(16+3)-vertex ring is 36 triangles = 18 quads).
+    // Only the y=0 side faces are light-graded — their face-adjacent cells
+    // sit at sky 0 with lit cells one row up, so the corner blend differs per
+    // vertex — and stay per block: 31*2 + 4 edges * 2 * 18 + 4 edges * 16 * 2
+    // = 334.
     assert_eq!(
-        quads, 138,
+        quads, 334,
         "uniform-light faces merge, graded side faces stay per block"
     );
 }

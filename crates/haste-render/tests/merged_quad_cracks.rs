@@ -192,18 +192,18 @@ fn render(
 /// Pixels that differ between the merged and the unmerged render AND show
 /// the background through the merged one: the crack signature (the sky or
 /// clear colour where the unmerged mesh, like vanilla, draws terrain). The
-/// per-row sky reference is sampled from a column beyond the field's side
-/// edge, which is sky at the scanned rows. Small colour deltas without the
-/// background showing (mip-wrap residuals at the sprite tiling boundary)
-/// are a different issue and do not count.
+/// sky at noon is blue-dominant and no terrain colour is (grass is green,
+/// dirt and stone are red-dominant), so a blue-dominant merged pixel is the
+/// background showing through. Small colour deltas without the background
+/// showing (mip-wrap residuals at the sprite tiling boundary) are a
+/// different issue and do not count.
 fn fault_pixels(merged: &image::RgbaImage, plain: &image::RgbaImage) -> Vec<(u32, u32)> {
-    let sky_col = 20;
+    let sky_like = |p: &image::Rgba<u8>| p.0[2] as i32 >= p.0[0] as i32 + 30 && p.0[2] > 100;
     let mut out = Vec::new();
     for y in 0..H {
-        let sky = *merged.get_pixel(sky_col, y);
         for x in 0..W {
             let m = merged.get_pixel(x, y);
-            if diff(m, plain.get_pixel(x, y)) > DIFF_THRESHOLD && diff(m, &sky) <= 8 {
+            if diff(m, plain.get_pixel(x, y)) > DIFF_THRESHOLD && sky_like(m) {
                 out.push((x, y));
             }
         }
@@ -258,7 +258,10 @@ fn merged_quad_edges_do_not_crack() {
         let merged = render(&mut renderer, &field, camera(pitch), true, name);
         let plain = render(&mut renderer, &field, camera(pitch), false, name);
         let faults = fault_pixels(&merged, &plain);
-        eprintln!("{name} view (pitch {pitch}): {} differing pixels", faults.len());
+        eprintln!(
+            "{name} view (pitch {pitch}): {} differing pixels",
+            faults.len()
+        );
         // Per-row fault count and longest horizontal run: cracks are thin
         // horizontal lines (many rows, short runs), holes are blobs.
         let mut row_stats: Vec<(u32, u32, u32)> = Vec::new(); // (row, count, max run)
@@ -271,7 +274,11 @@ fn merged_quad_edges_do_not_crack() {
             }
             let entry = row_stats.last_mut().unwrap();
             entry.1 += 1;
-            run = if run == 0 || faults.contains(&(x - 1, y)) { run + 1 } else { 1 };
+            run = if run == 0 || faults.contains(&(x - 1, y)) {
+                run + 1
+            } else {
+                1
+            };
             entry.2 = entry.2.max(run);
         }
         for (y, n, run) in row_stats.iter().take(25) {
