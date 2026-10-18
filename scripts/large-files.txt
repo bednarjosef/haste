@@ -6,7 +6,7 @@ crates/haste-assets/src/item.rs 754
 crates/haste-assets/src/model.rs 669
 crates/haste-assets/src/packstack.rs 723
 crates/haste-client/src/ambient_particles.rs 626
-crates/haste-client/src/app.rs 4909
+crates/haste-client/src/app.rs 4413
 crates/haste-client/src/boat.rs 871
 crates/haste-client/src/net/tests.rs 1788
 crates/haste-client/src/player/interact/tests.rs 2245
@@ -46,4 +46,4 @@ crates/haste-setup/src/install.rs 919
 crates/haste-setup/src/options.rs 705
 crates/haste-setup/src/servers.rs 664
 crates/haste-world/src/palette.rs 1033
-crates/haste-world/src/world.rs 663
+crates/haste-world/src/world.rs 621

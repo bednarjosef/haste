@@ -57,6 +57,7 @@ mod tests;
 pub use self::input::bits;
 pub use self::input::feed_clicks;
 pub use self::packets::ui_handles;
+pub use hud::HudWarmup;
 
 /// The HUD and the vanilla screens of one client. See the module documentation.
 #[derive(Clone)]
