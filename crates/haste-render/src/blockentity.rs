@@ -58,7 +58,7 @@ pub use beacon::{
 pub use bell::{bell_shake_rotation, bell_texture};
 pub use book::{book_openness, book_texture};
 #[cfg(test)]
-use chest::local_month_day;
+use chest::{chest_model, local_month_day};
 pub use chest::{chest_open_curve, chest_texture, xmas_textures, ChestHalf, ChestMaterial};
 pub use conduit::{
     conduit_bob, conduit_cage_texture, conduit_eye_texture, conduit_shell_texture, conduit_spin,
@@ -389,7 +389,7 @@ pub(crate) fn emit_block_entity(
         | BlockEntityKind::DecoratedPot
         | BlockEntityKind::Conduit => {}
         BlockEntityKind::Chest(_material) => {
-            chest::submit(out, inst, camera, rect, light, emit_part);
+            chest::submit(out, inst, camera, rect, light);
         }
         BlockEntityKind::Shulker(_color) => {
             shulker::submit(out, inst, camera, rect, light, emit_part);

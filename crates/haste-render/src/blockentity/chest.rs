@@ -3,16 +3,20 @@
 // (`SpecialDates.isExtendedChristmas`), the model per half (`ChestModel`) and the lid pose
 // (`ChestModel.setupAnim` through the lid angle curve `1 - (1 - open)^3`).
 //
-// Haste cube y is the vanilla `addBox` y negated (see the parent module's doc); the root
-// matrix ends with the y mirror that undoes it.
+// Vanilla's chest layer (`ChestModel.createSingleBodyLayer` and friends) is an *object* model
+// (y up, world aligned: the block entity pose stack carries no y flip), so the cubes below are
+// vanilla's `addBox` values unchanged and go through the object emitter (`emit_object_part`, the
+// faithful port of `ModelPart.Cube`), never the entity emitter (y down). The root carries only
+// vanilla's `ChestRenderer.createModelTransformation` plus the 1/16.
 
 use std::sync::OnceLock;
 
 use glam::{Mat4, Vec3};
-use haste_core::model::{Cube, CubeModel, ModelPart, PoseOverrides};
+use haste_core::model::{Cube, CubeModel, ModelPart};
 use haste_core::{parts, BlockPos, Direction, Identifier};
 
-use super::{to_y_rot, BlockEntityInstance, EmitPart};
+use super::object::emit_object_part;
+use super::{to_y_rot, BlockEntityInstance};
 use crate::entity::EntityVertex;
 
 /// Which half of a double chest a block is (vanilla `ChestType`).
@@ -105,9 +109,9 @@ pub fn chest_texture(material: ChestMaterial, half: ChestHalf) -> &'static Ident
     &table[material as usize * 3 + half as usize]
 }
 
-/// Vanilla `ChestModel.createSingleBodyLayer` and friends (26.3), one model per chest half.
-/// Haste cube y is the vanilla `addBox` y negated (see the module doc); part pivots likewise.
-fn chest_model(half: ChestHalf) -> CubeModel {
+/// Vanilla `ChestModel.createSingleBodyLayer` and friends (26.3), one model per chest half, the
+/// cubes as vanilla's `addBox` values (object convention, y up; see the module doc).
+pub(super) fn chest_model(half: ChestHalf) -> CubeModel {
     // (bottom x, width) and the lock's x span per half: single 1..15, right 1..16 (east hidden),
     // left 0..15 (west hidden). Vanilla hides the touching face; drawing it is invisible (it
     // lies between the two halves) and saves a per-face flag in the shared `Cube` type.
@@ -142,7 +146,7 @@ fn chest_model(half: ChestHalf) -> CubeModel {
             visible: true,
             cubes: Vec::new(),
             children: vec![
-                // bottom: addBox(x, 0, 1, w, 10, 14), texOffs(0, 19)
+                // bottom: addBox(x, 0, 1, w, 10, 14), texOffs(0, 19), PartPose.ZERO
                 ModelPart {
                     name: "bottom".into(),
                     id: parts::intern("bottom"),
@@ -150,31 +154,31 @@ fn chest_model(half: ChestHalf) -> CubeModel {
                     rotation: Vec3::ZERO,
                     visible: true,
                     cubes: vec![cube(
-                        Vec3::new(x, -10.0, 1.0),
+                        Vec3::new(x, 0.0, 1.0),
                         Vec3::new(w, 10.0, 14.0),
                         [0, 19],
                     )],
                     children: Vec::new(),
                 },
-                // lid: addBox(x, 0, 0, w, 5, 14) at PartPose.offset(0, 9, 1), texOffs(0, 0)
+                // lid: addBox(x, 0, 0, w, 5, 14), texOffs(0, 0), PartPose.offset(0, 9, 1)
                 ModelPart {
                     name: "lid".into(),
                     id: parts::LID,
-                    pivot: Vec3::new(0.0, -9.0, 1.0),
+                    pivot: Vec3::new(0.0, 9.0, 1.0),
                     rotation: Vec3::ZERO,
                     visible: true,
                     cubes: vec![cube(
-                        Vec3::new(x, -5.0, 0.0),
+                        Vec3::new(x, 0.0, 0.0),
                         Vec3::new(w, 5.0, 14.0),
                         [0, 0],
                     )],
                     children: Vec::new(),
                 },
-                // lock: addBox(lock_x, -2, 14, lock_w, 4, 1) at PartPose.offset(0, 9, 1), texOffs(0, 0)
+                // lock: addBox(lock_x, -2, 14, lock_w, 4, 1), texOffs(0, 0), PartPose.offset(0, 9, 1)
                 ModelPart {
                     name: "lock".into(),
                     id: parts::LOCK,
-                    pivot: Vec3::new(0.0, -9.0, 1.0),
+                    pivot: Vec3::new(0.0, 9.0, 1.0),
                     rotation: Vec3::ZERO,
                     visible: true,
                     cubes: vec![cube(
@@ -202,15 +206,14 @@ fn chest_models() -> &'static [CubeModel; 3] {
 }
 
 /// Vanilla `ChestRenderer.createModelTransformation`: rotate by `-toYRot(facing)` about the
-/// block's centre column (0.5, 0, 0.5), with the chest model's y-up-to-entity-convention mirror
-/// (see the module doc) folded in at the end.
+/// block's centre column (0.5, 0, 0.5), then the model's 1/16 units to blocks. No y flip: the
+/// chest is an object model (y up, see the module doc).
 fn chest_root(pos: BlockPos, facing: Direction, camera: glam::DVec3) -> Mat4 {
     let p = pos.as_dvec3() - camera;
     Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.0, 0.5))
         * Mat4::from_rotation_y((-to_y_rot(facing)).to_radians())
         * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5))
-        * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0) / 16.0)
-        * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))
+        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
 }
 
 /// Vanilla `ChestRenderer.submit`'s lid angle curve: `1 - (1 - open)^3`.
@@ -219,14 +222,14 @@ pub fn chest_open_curve(open: f32) -> f32 {
 }
 
 /// Poses one chest into `out` (the `emit_block_entity` chest arm): the model of its half with
-/// the lid and lock swung by the open angle.
+/// the lid and lock swung by the open angle, through the object emitter (y up, see the module
+/// doc).
 pub(super) fn submit(
     out: &mut Vec<EntityVertex>,
     inst: &BlockEntityInstance,
     camera: glam::DVec3,
     rect: [u32; 4],
     light: (u8, u8),
-    emit_part: EmitPart,
 ) {
     let models = chest_models();
     let model = &models[match inst.half {
@@ -235,26 +238,12 @@ pub(super) fn submit(
         ChestHalf::Right => 2,
     }];
     let open = chest_open_curve(inst.open.end.max(inst.open.start));
-    // The lid and lock rotate by the open angle around their shared pivot (vanilla
-    // `ChestModel.setupAnim`; the sign is the y mirror's, see the module doc).
-    let mut pose = PoseOverrides::default();
-    pose.set_rotation(
-        parts::LID,
-        Vec3::new(open * std::f32::consts::FRAC_PI_2, 0.0, 0.0),
-    );
-    pose.set_rotation(
-        parts::LOCK,
-        Vec3::new(open * std::f32::consts::FRAC_PI_2, 0.0, 0.0),
-    );
+    // Vanilla `ChestModel.setupAnim`: the lid and lock rotate by `-(open * PI/2)` about x around
+    // their shared pivot.
+    let rot = Vec3::new(-open * std::f32::consts::FRAC_PI_2, 0.0, 0.0);
+    let pose = [("lid", rot), ("lock", rot)];
+    let root = chest_root(inst.pos, inst.facing, camera);
     for part in &model.root.children {
-        emit_part(
-            out,
-            model,
-            part,
-            &pose,
-            chest_root(inst.pos, inst.facing, camera),
-            rect,
-            light,
-        );
+        emit_object_part(out, model, part, &pose, root, rect, Vec3::ZERO, light);
     }
 }
