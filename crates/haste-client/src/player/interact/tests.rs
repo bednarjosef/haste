@@ -8,7 +8,11 @@ use haste_physics::testing::TestWorld;
 use super::*;
 use super::pick::is_pickable;
 use super::use_item::UseAnimation;
+use haste_core::game::GameMode;
+use haste_core::view::BlockView;
 use haste_protocol::ClientboundPlay;
+use haste_protocol::ServerboundPlay;
+use haste_protocol::packets::play::serverbound as sb;
 
 const ME: EntityId = EntityId(7);
 const STONE: BlockStateId = BlockStateId(1);
