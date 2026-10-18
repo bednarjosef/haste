@@ -119,18 +119,28 @@ fn metadata_pose_sets_height() {
 fn metadata_flags_byte() {
     let mut s = store();
     s.spawn(&spawn(1, DVec3::ZERO));
-    // flags: 0x02 crouching | 0x10 invisible | 0x40 glowing
+    // flags: 0x02 crouching | 0x20 invisible (Entity.FLAG_INVISIBLE = 5; 0x10 is swimming)
+    // | 0x40 glowing
     s.set_metadata(
         EntityId(1),
         &[MetadataEntry {
             index: 0,
-            value: MetadataValue::Byte(0x02 | 0x10 | 0x40),
+            value: MetadataValue::Byte(0x02 | 0x20 | 0x40),
         }],
     );
     let e = s.get(EntityId(1)).unwrap();
     assert!(e.metadata.shared.crouching);
     assert!(e.metadata.shared.invisible);
     assert!(e.metadata.shared.glowing);
+    // The swimming bit (0x10, Entity.FLAG_SWIMMING) is not invisibility.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 0,
+            value: MetadataValue::Byte(0x10),
+        }],
+    );
+    assert!(!s.get(EntityId(1)).unwrap().metadata.shared.invisible);
     // Raw entries are kept per index and later updates replace them.
     s.set_metadata(
         EntityId(1),
@@ -141,6 +151,33 @@ fn metadata_flags_byte() {
     );
     assert!(!s.get(EntityId(1)).unwrap().metadata.shared.crouching);
     assert_eq!(s.get(EntityId(1)).unwrap().metadata.iter().count(), 1);
+}
+
+#[test]
+fn render_instances_carries_invisible() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 0,
+            value: MetadataValue::Byte(0x20),
+        }],
+    );
+    let mut out: Vec<EntityInstance> = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(out.len(), 1);
+    assert!(out[0].invisible, "the shared flag reaches the renderer");
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 0,
+            value: MetadataValue::Byte(0),
+        }],
+    );
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert!(!out[0].invisible);
 }
 
 #[test]
