@@ -140,8 +140,10 @@ public final class Bridge {
             s.resize(width, height);
         }
         GfxImpl.begin(width, height);
+        // vanilla advances the frame timer every frame (Minecraft.renderFrame), in a world or not: the
+        // title panorama spins by its real-time delta
+        Delta.frame(partial);
         if (Mirror.inWorld()) {
-            Delta.frame(partial);
             Proxies.hud.extractRenderState(Proxies.graphics, Delta.INSTANCE);
             GfxImpl.POSE.reset();
         }
@@ -153,7 +155,7 @@ public final class Bridge {
             Proxies.hud.extractDebugOverlay(Proxies.graphics);
         }
         GfxImpl.end();
-        return GuiBatch.frame(GfxImpl.cursor, GfxImpl.blurAfter);
+        return GuiBatch.frame(GfxImpl.cursor, GfxImpl.blurAfter, GfxImpl.panorama, GfxImpl.panoramaSpin);
     }
 
     /** One 20 Hz client tick: the HUD (chat fade, titles, overlay message), the chat queue and the open screen. */
@@ -237,6 +239,17 @@ public final class Bridge {
     public void setTabListVisible(boolean visible) {
         Proxies.options.keyPlayerList.setDown(visible);
         Proxies.hud.getTabList().setVisible(visible);
+    }
+
+    /**
+     * The player started riding (vanilla ClientPacketListener.handleSetEntityPassengersPacket, on
+     * the foot-to-riding transition): the "mount.onboard" overlay message with the bound sneak
+     * key's name, exactly the component vanilla builds. No cushion seating exists in Haste, so
+     * "mount.sit" never applies.
+     */
+    public void showMountMessage() {
+        net.minecraft.network.chat.Component shiftKey = Proxies.options.keyShift.getTranslatedKeyMessage();
+        Proxies.hud.setOverlayMessage(net.minecraft.network.chat.Component.translatable("mount.onboard", shiftKey), false);
     }
 
     /**

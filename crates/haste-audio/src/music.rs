@@ -110,8 +110,16 @@ impl MusicSituation {
 pub enum MusicCommand {
     /// Start the music event (a sound event name like `minecraft:music.game`).
     Play(String),
-    /// Stop the current music (a replacing situation change).
+    /// Stop the current music (a replacing situation change, or the fade reaching zero).
     Stop,
+}
+
+/// One step of the music fade, vanilla's `MusicManager.fadePlaying` outcome.
+enum FadeStep {
+    /// Still fading; the music source's new gain.
+    Fading(f32),
+    /// The gain reached zero: the track stops (vanilla's `stopPlaying`).
+    Stopped,
 }
 
 /// A small deterministic xorshift RNG, so the random pauses replay exactly for a fixed seed.
@@ -163,6 +171,10 @@ pub struct MusicManager {
     next_song_delay: i32,
     /// The event of the track we started and believe is playing (vanilla's `currentMusic`).
     current: Option<String>,
+    /// Vanilla's `currentGain`: the music source's fade gain, eased toward the target
+    /// volume every tick while they differ, applied through
+    /// `SoundEngine.updateCategoryVolume(MUSIC, gain)`.
+    current_gain: f32,
     /// The `music_frequency` option's cap in ticks (`MusicFrequency.DEFAULT`: 20 minutes).
     max_frequency: u32,
     /// Ticks this manager has run, for the diagnostic log (which track started when).
@@ -184,6 +196,7 @@ impl MusicManager {
             situation: MusicSituation::Menu,
             next_song_delay: STARTING_DELAY,
             current: None,
+            current_gain: 1.0,
             max_frequency: DEFAULT_MAX_FREQUENCY,
             ticks: 0,
         }
@@ -214,14 +227,45 @@ impl MusicManager {
 
     /// One game tick (20 Hz). `is_playing` tells whether the music this manager started is
     /// still playing; while something plays, nothing new is started. `rng` drives the random
-    /// pauses (a fixed seed replays exactly).
+    /// pauses (a fixed seed replays exactly). `music_volume` is the target the fade eases
+    /// the music gain toward (vanilla's `Minecraft.getMusicVolume`: the camera's
+    /// `MUSIC_VOLUME` environment attribute, 1.0 outside the biomes that lower it), and
+    /// `apply_gain` receives each new fade gain, to hand to the sound engine the way
+    /// vanilla's `MusicManager.fadePlaying` calls
+    /// `SoundEngine.updateCategoryVolume(MUSIC, gain)`.
     ///
-    /// Vanilla's `MusicManager.tick` order of steps: a replacing situation stops the playing
-    /// track; a track that is no longer playing picks a fresh pause; the situation's maximum
-    /// caps the countdown; the countdown ticks down and starts the track when it reaches zero.
-    pub fn tick(&mut self, rng: &mut MusicRng, is_playing: bool) -> Option<MusicCommand> {
+    /// Vanilla's `MusicManager.tick` order of steps: the fade runs first (and may stop the
+    /// track); a replacing situation stops the playing track; a track that is no longer
+    /// playing picks a fresh pause; the situation's maximum caps the countdown; the
+    /// countdown ticks down and starts the track when it reaches zero.
+    pub fn tick(
+        &mut self,
+        rng: &mut MusicRng,
+        is_playing: bool,
+        music_volume: f32,
+        mut apply_gain: impl FnMut(f32),
+    ) -> Option<MusicCommand> {
         self.ticks += 1;
         let spec = self.situation.music();
+        // The fade (vanilla's `fadePlaying`): while a track plays and the gain is not at
+        // the target, ease toward it; a gain that reaches zero stops the track (and the
+        // next track fades back in from there).
+        if self.current.is_some() && self.current_gain != music_volume {
+            match self.fade_step(music_volume) {
+                FadeStep::Fading(gain) => apply_gain(gain),
+                FadeStep::Stopped => {
+                    self.current = None;
+                    self.next_song_delay =
+                        self.get_next_song_delay(&spec, rng).min(i32::MAX as u32) as i32 + 100;
+                    tracing::info!(
+                        "music: tick {}: faded out (situation {:?})",
+                        self.ticks,
+                        self.situation
+                    );
+                    return Some(MusicCommand::Stop);
+                }
+            }
+        }
         if let Some(current) = self.current.clone() {
             if is_playing {
                 // The track is still playing: a situation with replacing music stops it and
@@ -270,6 +314,32 @@ impl MusicManager {
         rng.range(0, spec.min_delay / 2).min(i32::MAX as u32) as i32
     }
 
+    /// One step of the fade toward `volume`, vanilla's `MusicManager.fadePlaying`:
+    /// rising gains creep up by at most 0.005 a tick, falling ones shrink by 3 % a tick;
+    /// a gain that reaches (or sits within 1e-4 of) the target snaps to it. Reaching
+    /// zero stops the track (the caller's `stopPlaying`).
+    fn fade_step(&mut self, volume: f32) -> FadeStep {
+        if self.current_gain < volume {
+            // Rising: at most half a percent of full volume per tick, never more than
+            // 0.005, so a track comes back in over seconds.
+            self.current_gain += self.current_gain.clamp(5.0e-4, 0.005);
+            if self.current_gain > volume {
+                self.current_gain = volume;
+            }
+        } else {
+            self.current_gain = 0.03 * volume + 0.97 * self.current_gain;
+            if (self.current_gain - volume).abs() < 1.0e-4 || self.current_gain < volume {
+                self.current_gain = volume;
+            }
+        }
+        self.current_gain = self.current_gain.clamp(0.0, 1.0);
+        if self.current_gain <= 1.0e-4 {
+            FadeStep::Stopped
+        } else {
+            FadeStep::Fading(self.current_gain)
+        }
+    }
+
     /// A fresh pause after a track ended: vanilla's
     /// `MusicFrequency.getNextSongDelay(music, random)` with the DEFAULT frequency — the
     /// music's own range with both ends capped by the option's maximum.
@@ -281,220 +351,4 @@ impl MusicManager {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Ticks with `is_playing` until the manager plays something; returns (ticks taken, event).
-    fn until_play(
-        manager: &mut MusicManager,
-        rng: &mut MusicRng,
-        is_playing: bool,
-    ) -> (usize, String) {
-        for tick in 1..=60_000usize {
-            match manager.tick(rng, is_playing) {
-                Some(MusicCommand::Play(event)) => return (tick, event),
-                Some(MusicCommand::Stop) => panic!("unexpected Stop"),
-                None => {}
-            }
-        }
-        panic!("no Play within 60000 ticks");
-    }
-
-    /// Ticks until the manager returns anything but `None`.
-    fn until_command(
-        manager: &mut MusicManager,
-        rng: &mut MusicRng,
-        is_playing: bool,
-    ) -> MusicCommand {
-        for _ in 1..=60_000usize {
-            if let Some(command) = manager.tick(rng, is_playing) {
-                return command;
-            }
-        }
-        panic!("no command within 60000 ticks");
-    }
-
-    #[test]
-    fn starts_with_vanillas_starting_delay() {
-        // Vanilla's `nextSongDelay` starts at 100 ticks, so the first track of a session plays
-        // within 5 seconds — not after a track's long random pause.
-        let mut manager = MusicManager::new();
-        let mut rng = MusicRng::new(1);
-        let (ticks, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.menu");
-        assert_eq!(
-            ticks, STARTING_DELAY as usize,
-            "the first track starts after the starting delay"
-        );
-    }
-
-    #[test]
-    fn delays_follow_the_musics_constants() {
-        // After a track ends, the next one follows the situation's own range (the `Musics`
-        // constants), capped by the DEFAULT music frequency (20 minutes = 24000 ticks).
-        let mut manager = MusicManager::new();
-        manager.set_situation(MusicSituation::Game);
-        let mut rng = MusicRng::new(2);
-        let (_, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.game");
-        // The track plays for a while and then ends.
-        for _ in 0..100 {
-            assert_eq!(manager.tick(&mut rng, true), None);
-        }
-        let (ticks, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.game");
-        assert!(
-            (12_000..=24_000).contains(&ticks),
-            "game delay {ticks} outside 12000..=24000"
-        );
-    }
-
-    #[test]
-    fn no_second_track_while_ours_plays() {
-        let mut manager = MusicManager::new();
-        manager.set_situation(MusicSituation::Game);
-        let mut rng = MusicRng::new(3);
-        let (_, event) = until_play(&mut manager, &mut rng, false);
-        // while our track plays, no second one starts (vanilla's nextSongDelay stays at
-        // Integer.MAX_VALUE while the current music is active)
-        for _ in 0..60_000 {
-            assert_eq!(manager.tick(&mut rng, true), None);
-        }
-        assert_eq!(manager.playing_event(), Some(event.as_str()));
-    }
-
-    #[test]
-    fn end_music_replaces_the_current_track() {
-        // `Musics.END` replaces the current music: the playing track is stopped first.
-        let mut manager = MusicManager::new();
-        manager.set_situation(MusicSituation::Game);
-        let mut rng = MusicRng::new(4);
-        let (_, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.game");
-        for _ in 0..10 {
-            assert_eq!(manager.tick(&mut rng, true), None);
-        }
-        manager.set_situation(MusicSituation::End);
-        assert_eq!(
-            until_command(&mut manager, &mut rng, true),
-            MusicCommand::Stop
-        );
-        // The replacement gets a short countdown (vanilla: nextInt(0, minDelay / 2)).
-        let (ticks, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.end");
-        assert!(
-            ticks <= 3_000,
-            "end music followed within minDelay/2 ticks, took {ticks}"
-        );
-    }
-
-    #[test]
-    fn game_to_creative_keeps_current_track() {
-        // `Musics.CREATIVE` does not replace the current music: the track keeps playing and the
-        // next one comes with the in-game delays.
-        let mut manager = MusicManager::new();
-        manager.set_situation(MusicSituation::Game);
-        let mut rng = MusicRng::new(5);
-        let (_, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.game");
-        for _ in 0..10 {
-            assert_eq!(manager.tick(&mut rng, true), None);
-        }
-        manager.set_situation(MusicSituation::Creative);
-        for _ in 0..100 {
-            assert_eq!(manager.tick(&mut rng, true), None);
-        }
-        let (ticks, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.creative");
-        assert!(
-            (12_000..=24_000).contains(&ticks),
-            "creative delay {ticks} outside 12000..=24000"
-        );
-    }
-
-    #[test]
-    fn a_switching_biome_situation_caps_the_countdown() {
-        // The situation's own maximum caps the running countdown every tick (vanilla's
-        // `nextSongDelay = Math.min(nextSongDelay, music.maxDelay())`), so a track of a biome
-        // with a short range starts within that range.
-        let mut manager = MusicManager::new();
-        manager.set_situation(MusicSituation::Game);
-        let mut rng = MusicRng::new(6);
-        assert_eq!(manager.tick(&mut rng, false), None);
-        manager.set_situation(MusicSituation::Biome {
-            event: "minecraft:music.cherry_grove".to_owned(),
-            min_delay: 10,
-            max_delay: 40,
-            replace: false,
-        });
-        let (ticks, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.cherry_grove");
-        assert!(
-            ticks <= 40,
-            "clamped countdown should fire within 40 ticks, took {ticks}"
-        );
-    }
-
-    #[test]
-    fn dragon_and_credits_play_at_once_and_replace() {
-        for situation in [MusicSituation::Dragon, MusicSituation::Credits] {
-            let mut manager = MusicManager::new();
-            manager.set_situation(situation.clone());
-            let mut rng = MusicRng::new(7);
-            assert_eq!(
-                manager.tick(&mut rng, false),
-                Some(MusicCommand::Play(situation.music().event)),
-                "{situation:?} has no delay"
-            );
-        }
-    }
-
-    #[test]
-    fn fixed_seed_is_deterministic() {
-        fn script(seed: u64) -> Vec<MusicCommand> {
-            let mut manager = MusicManager::new();
-            let mut rng = MusicRng::new(seed);
-            let mut commands = Vec::new();
-            let mut playing = false;
-            manager.set_situation(MusicSituation::Game);
-            for step in 0..30_000u32 {
-                if step == 25_000 {
-                    manager.set_situation(MusicSituation::Menu);
-                }
-                match manager.tick(&mut rng, playing) {
-                    Some(command @ MusicCommand::Play(_)) => {
-                        playing = true;
-                        commands.push(command);
-                    }
-                    Some(command @ MusicCommand::Stop) => {
-                        playing = false;
-                        commands.push(command);
-                    }
-                    None => {
-                        // The current track ends after a while.
-                        if playing && step % 700 == 0 {
-                            playing = false;
-                        }
-                    }
-                }
-            }
-            commands
-        }
-        let run = script(1234);
-        assert!(!run.is_empty());
-        assert_eq!(run, script(1234));
-    }
-
-    #[test]
-    fn the_track_event_is_followed_not_the_situation() {
-        let mut manager = MusicManager::new();
-        manager.set_situation(MusicSituation::Game);
-        let mut rng = MusicRng::new(8);
-        let (_, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(manager.playing_event(), Some(event.as_str()));
-        for _ in 0..10 {
-            assert_eq!(manager.tick(&mut rng, true), None);
-        }
-        assert_eq!(manager.playing_event(), Some(event.as_str()));
-    }
-}
+mod tests;

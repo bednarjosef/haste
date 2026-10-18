@@ -128,6 +128,9 @@ pub struct InteractEnv<'a> {
     /// The world border (`useItemOn` fails without a packet outside it, `startDestroyBlock`
     /// returns false). `None` is the effectively unlimited default — no border packet yet.
     pub border: Option<&'a crate::world_border::WorldBorder>,
+    /// The `#strider_warm_blocks` resolution for the strider the player steers (synced block
+    /// tags + the data's block table); `None` without a tag sync yet.
+    pub warm_blocks: Option<&'a dyn crate::item_based_steering::WarmBlocks>,
 }
 
 /// Interaction state of the local player.

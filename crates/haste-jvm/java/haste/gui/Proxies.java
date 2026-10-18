@@ -31,6 +31,9 @@ public final class Proxies {
     public static SoundManager sound;
     public static GuiGraphicsExtractor graphics;
     public static LocalPlayer player;
+    /** The vehicle we ride, while it is a living entity (vanilla {@code Entity.getVehicle}; a
+     * horse-family proxy — Haste's one mount proxy, see NOTES.md "Mount HUD"). */
+    public static net.minecraft.world.entity.animal.equine.Horse mount;
     public static Inventory inventory;
     public static net.minecraft.world.entity.EntityEquipment equipment;
     public static net.minecraft.client.multiplayer.ClientLevel level;
@@ -117,6 +120,15 @@ public final class Proxies {
             throw new IllegalStateException("defining the player's entity data", e);
         }
         set(minecraft, "player", LocalPlayer.class, player);
+        // the mount proxy (a living vehicle: its health feeds the HUD's vehicle hearts). Like the
+        // player, the type and dimensions its constructor would set, from the horse's registry entry
+        // (the proxy never runs it)
+        mount = make(net.minecraft.world.entity.animal.equine.Horse.class);
+        var horseType = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getValue(
+            net.minecraft.resources.Identifier.withDefaultNamespace("horse"));
+        set(mount, "type", net.minecraft.world.entity.EntityType.class, horseType);
+        set(mount, "dimensions", net.minecraft.world.entity.EntityDimensions.class, horseType.getDimensions());
+        set(mount, "eyeHeight", float.class, horseType.getDimensions().eyeHeight());
         camera = make(net.minecraft.client.Camera.class);
         set(minecraft, "gameRenderer", net.minecraft.client.renderer.GameRenderer.class, make(net.minecraft.client.renderer.GameRenderer.class));
         minecraft.level = level;

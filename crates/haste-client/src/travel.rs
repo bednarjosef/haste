@@ -3,9 +3,9 @@
 //! ridden animals this client steers (the horse family, the pig, the strider); each module owns
 //! its own input shaping and speed (`getRiddenInput`, `getRiddenSpeed`).
 use glam::DVec3;
-use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
-use haste_core::Aabb;
-use haste_physics::collision::collide_with_step;
+use haste_core::view::{BlockPhysics, BlockView, CollisionShapes, FluidKind};
+use haste_core::{Aabb, BlockPos};
+use haste_physics::collision::{collide_with_step, COLLISION_EPSILON};
 
 /// Vanilla `LivingEntity.travelInAir`: the air drag applied to the horizontal velocity.
 pub const HORIZONTAL_DRAG: f32 = 0.91;
@@ -35,6 +35,108 @@ pub trait RiddenAnimal {
     fn on_ground(&self) -> bool;
     fn set_on_ground(&mut self, g: bool);
     fn set_collisions(&mut self, horizontal: bool, vertical: bool);
+    /// The fluid the animal walks on instead of through, as vanilla `LivingEntity.canStandOnFluid`
+    /// answers it (`Strider`: lava). `None` (the default, vanilla's `false`) falls through fluids.
+    fn stands_on_fluid(&self) -> Option<FluidKind> {
+        None
+    }
+}
+
+/// How many fluid surface cells one sweep can stand on: the animal's box spans at most a 3x3
+/// footprint at these speeds, and only surface cells count (a cell with the same fluid above
+/// is a column the animal is inside, never a floor), so 16 is beyond reach; a longer fall
+/// simply stops collecting past it.
+const FLUID_FLOOR_CELLS: usize = 16;
+
+/// The fluid surface boxes the sweep must treat as ground, vanilla
+/// `LiquidBlock.getCollisionShape` for every fluid cell the swept region touches, with the
+/// moving animal as the collision context:
+/// - only a *source* cell (the `LEVEL == 0` test; our fluid heights make a source surface
+///   8/9, flowing lower, and a falling cell always has the same fluid above, caught next),
+/// - with no same fluid directly above (`EntityCollisionContext.canStandOnFluid`: standing on
+///   the surface, not inside a column),
+/// - and only while the animal's feet are already above the cell's liquid column
+///   (`EntityCollisionContext.isAbove`): the column is half a block
+///   (`LivingEntity.getLiquidCollisionShape`, `Block.column(16, 0, 8)`).
+///
+/// Returns the boxes (world space) and how many filled.
+fn fluid_floors(
+    a: &dyn RiddenAnimal,
+    movement: DVec3,
+    step_height: f64,
+    world: &dyn BlockView,
+    blocks: &dyn BlockPhysics,
+    stands_on: FluidKind,
+) -> ([Aabb; FLUID_FLOOR_CELLS], usize) {
+    let mut floors = [Aabb {
+        min: DVec3::ZERO,
+        max: DVec3::ZERO,
+    }; FLUID_FLOOR_CELLS];
+    let mut n = 0;
+    // The region the sweep collides for (the box stretched over the movement, raised by the
+    // step height), like vanilla's `expandTowards` collider gathering.
+    let mut region = stretch(&a.aabb(), movement);
+    if step_height > 0.0 {
+        region.max.y = region.max.y.max(a.aabb().max.y + step_height);
+    }
+    let (x0, x1) = (
+        (region.min.x - COLLISION_EPSILON).floor() as i32,
+        (region.max.x + COLLISION_EPSILON).floor() as i32,
+    );
+    let (z0, z1) = (
+        (region.min.z - COLLISION_EPSILON).floor() as i32,
+        (region.max.z + COLLISION_EPSILON).floor() as i32,
+    );
+    let (y0, y1) = (
+        (region.min.y - COLLISION_EPSILON).floor() as i32,
+        (region.max.y + COLLISION_EPSILON).floor() as i32,
+    );
+    let bottom = a.pos().y;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            for z in z0..=z1 {
+                let pos = BlockPos::new(x, y, z);
+                let state = world.block_state(pos);
+                let Some(fluid) = blocks.fluid(state) else {
+                    continue;
+                };
+                if fluid.kind != stands_on {
+                    continue;
+                }
+                // `state.getValue(LEVEL) != 0`: only a source collides.
+                if (fluid.height - 8.0 / 9.0).abs() > 1.0e-6 {
+                    continue;
+                }
+                // `canStandOnFluid(fluidAbove, fluid)`: the same fluid above means a column.
+                let above = world.block_state(pos.add(0, 1, 0));
+                if blocks.fluid(above).is_some_and(|f| f.kind == stands_on) {
+                    continue;
+                }
+                // `isAbove(shape, pos, true)`: the feet over the column's half-block top.
+                if bottom <= y as f64 + 0.5 - 1.0e-5 {
+                    continue;
+                }
+                let o = pos.as_dvec3();
+                floors[n] = Aabb {
+                    min: o,
+                    max: DVec3::new(o.x + 1.0, o.y + 0.5, o.z + 1.0),
+                };
+                n += 1;
+                if n == FLUID_FLOOR_CELLS {
+                    return (floors, n);
+                }
+            }
+        }
+    }
+    (floors, n)
+}
+
+/// The box stretched over a movement (the region a sweep gathers colliders from).
+fn stretch(aabb: &Aabb, m: DVec3) -> Aabb {
+    Aabb {
+        min: aabb.min + m.min(DVec3::ZERO),
+        max: aabb.max + m.max(DVec3::ZERO),
+    }
 }
 
 /// Vanilla `Entity.getBlockPosBelowThatAffectsMyMovement` = `getOnPos(0.500001)`: the block
@@ -75,7 +177,24 @@ pub fn travel_in_air(
     };
     move_relative(a, acceleration, input, yaw);
     let motion = a.delta();
-    let moved = collide_with_step(a.aabb(), motion, a.step_height(), on_ground, world, shapes);
+    // The fluid the animal walks on gives the surface a collision box (vanilla
+    // `LiquidBlock.getCollisionShape`, part of the sweep's collider gathering like any block
+    // shape); without one the plain sweep runs.
+    let moved = match a.stands_on_fluid() {
+        Some(stands_on) => {
+            let (floors, n) = fluid_floors(a, motion, a.step_height(), world, blocks, stands_on);
+            haste_physics::collision::collide_with_step_and(
+                a.aabb(),
+                motion,
+                a.step_height(),
+                on_ground,
+                world,
+                shapes,
+                &floors[..n],
+            )
+        }
+        None => collide_with_step(a.aabb(), motion, a.step_height(), on_ground, world, shapes),
+    };
     a.add_pos(moved);
     let x_collision = moved.x != motion.x;
     let z_collision = moved.z != motion.z;

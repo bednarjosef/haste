@@ -286,6 +286,7 @@ impl Rig {
             entities: &self.entities,
             entity_types: &self.types,
             border: self.border.as_ref(),
+            warm_blocks: None,
         };
         let input = InputState {
             pitch: 90.0,
@@ -838,6 +839,7 @@ fn inventory_and_effects_from_packets() {
         entities: &[],
         entity_types: &[],
         border: None,
+        warm_blocks: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!(
@@ -911,6 +913,7 @@ fn held_stack_components_drive_mining_speed() {
         entities: &[],
         entity_types: &[],
         border: None,
+        warm_blocks: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
@@ -959,6 +962,7 @@ fn use_duration_and_animation_come_from_the_item() {
         entities: &[],
         entity_types: &[],
         border: None,
+        warm_blocks: None,
     };
     let d = |i: u32| r.p.int.use_data(&item(i), env.data);
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
@@ -1831,6 +1835,18 @@ fn a_spear_stabs_instead_of_attacking_or_breaking() {
         components_raw: spear_patch(),
     };
     r.p.int.prepare(data());
+    // With the game data the spear carries `minimum_attack_charge` 1.0
+    // (`Player.cannotAttackWithItem`): charge the attack fully first.
+    for _ in 0..40 {
+        r.p.hand.tick(
+            0.0,
+            (0.0, 90.0),
+            true,
+            false,
+            crate::hand::HeldStack::of(None),
+            4.0,
+        );
+    }
     let out = r.tick(ATTACK);
     assert_eq!(
         actions(&out),
@@ -2083,6 +2099,7 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         entities: &r.entities,
         entity_types: &r.types,
         border: None,
+        warm_blocks: None,
     };
     let input = InputState {
         pitch: 90.0,
@@ -2201,6 +2218,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entities: &r.entities,
             entity_types: &r.types,
             border: None,
+            warm_blocks: None,
         },
         None,
         &mut rowed,
@@ -2223,6 +2241,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entities: &r.entities,
             entity_types: &r.types,
             border: None,
+            warm_blocks: None,
         },
         None,
         &mut Vec::new(),
@@ -2242,6 +2261,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entities: &r.entities,
             entity_types: &r.types,
             border: None,
+            warm_blocks: None,
         },
         None,
         &mut out,
@@ -2269,6 +2289,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entities: &r.entities,
             entity_types: &r.types,
             border: None,
+            warm_blocks: None,
         },
         None,
         &mut Vec::new(),
@@ -2286,6 +2307,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entities: &r.entities,
             entity_types: &r.types,
             border: None,
+            warm_blocks: None,
         },
         None,
         &mut out,

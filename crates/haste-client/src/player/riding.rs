@@ -265,6 +265,7 @@ impl LocalPlayer {
             world: ctx.world,
             shapes: ctx.shapes,
             blocks: ctx.blocks,
+            warm_blocks: ctx.warm_blocks,
         };
         let controlled = self.steered_by_item().is_some();
         let Some(animal) = &mut self.item_steered else {
