@@ -6,6 +6,7 @@ pub mod animation;
 pub mod avatar;
 pub mod decoration;
 pub mod dims;
+pub mod item_entity;
 pub mod lerp;
 pub mod local_player;
 pub mod metadata;

@@ -24,6 +24,19 @@ public final class Bridge {
     private int pressedButton = -1;
     private double lastX, lastY;
 
+    /** Vanilla's MouseHandler.LastClick record: time (Util.getMillis), screen, button. */
+    private static final class LastClick {
+        final long time;
+        final Object screen;
+        final int button;
+        LastClick(long time, Object screen, int button) {
+            this.time = time;
+            this.screen = screen;
+            this.button = button;
+        }
+    }
+    private LastClick lastClick;
+
     private Bridge() {}
 
     /** How long vanilla's bootstrap took (ms). */
@@ -109,6 +122,7 @@ public final class Bridge {
         this.pressedButton = -1;
         this.lastX = 0.0;
         this.lastY = 0.0;
+        this.lastClick = null;
         MouseImpl.pressed = -1;
         MouseImpl.x = 0.0;
         MouseImpl.y = 0.0;
@@ -148,7 +162,7 @@ public final class Bridge {
             GfxImpl.POSE.reset();
         }
         s = ClientImpl.screen;
-        if (s != null) s.extractRenderStateWithTooltipAndSubtitles(Proxies.graphics, (int) mouseX, (int) mouseY, partial);
+        if (s != null) s.extractRenderStateWithTooltipAndSubtitles(Proxies.graphics, (int) mouseX, (int) mouseY, Delta.INSTANCE.getGameTimeDeltaTicks());
         // vanilla Gui.extractRenderState draws the F3 debug overlay after the screen (unless the debug
         // options screen is up, which draws its own copy); it is the topmost HUD element.
         if (!(s instanceof net.minecraft.client.gui.screens.debug.DebugOptionsScreen)) {
@@ -367,13 +381,44 @@ public final class Bridge {
         boolean r;
         if (pressed) {
             pressedButton = button;
-            r = s.mouseClicked(e, false);
+            // vanilla MouseHandler.onButton: double click when the previous click this screen
+            // accepted was < 250 ms ago, on the same screen object, with the same button.
+            s.afterMouseAction();
+            long currentTime = net.minecraft.util.Util.getMillis();
+            r = s.mouseClicked(e, isDoubleClick(s, button, currentTime));
+            if (r) recordClick(s, button, currentTime);
         } else {
             pressedButton = -1;
             r = s.mouseReleased(e);
         }
         InventorySync.sync();
         return r;
+    }
+
+    /** Whether {@code screen/button/now} is a double click under the vanilla rule (no mutation). */
+    private boolean isDoubleClick(Object screen, int button, long now) {
+        return this.lastClick != null
+            && now - this.lastClick.time < 250L
+            && this.lastClick.screen == screen
+            && this.lastClick.button == button;
+    }
+
+    /** Records a click that the screen accepted, as vanilla does only on a true result. */
+    private void recordClick(Object screen, int button, long now) {
+        this.lastClick = new LastClick(now, screen, button);
+    }
+
+    /** Self-test of the vanilla double-click rule on explicit times; true when every case holds. */
+    public static boolean doubleClickRuleSelfTest() {
+        Bridge b = new Bridge();
+        Object s = new Object();
+        if (b.isDoubleClick(s, 1, 1000)) return false; // no accepted click yet (a rejected click records nothing)
+        b.recordClick(s, 1, 1000);
+        if (!b.isDoubleClick(s, 1, 1100)) return false; // 100 ms later: double
+        if (b.isDoubleClick(s, 1, 1250)) return false; // 250 ms is not < 250
+        if (b.isDoubleClick(s, 2, 1100)) return false; // other button
+        if (b.isDoubleClick(new Object(), 1, 1100)) return false; // other screen
+        return true;
     }
 
     public boolean scroll(double x, double y, double dx, double dy) {

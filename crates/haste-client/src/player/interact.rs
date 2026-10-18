@@ -47,17 +47,20 @@ use haste_physics::mining::{BlockTags, ToolTable};
 use super::LocalPlayer;
 
 mod attack;
+mod consume_effects;
 mod destroy;
+mod drop;
 mod effects;
 mod held_item;
 mod packets;
 mod pick;
+mod place;
 mod step;
 mod use_item;
 use effects::EffectIds;
 pub(crate) use effects::{LightmapEffectIds, MovementEffectIds};
 pub use pick::Target;
-pub use use_item::UsingItem;
+pub use use_item::{UseAnimation, UsingItem};
 // `player/tests.rs` calls it as `interact::swap_key`.
 #[cfg(test)]
 pub(crate) use held_item::swap_key;
@@ -112,7 +115,8 @@ impl Default for InteractAttributes {
     }
 }
 
-/// What the interaction step reads besides the world: game data and nearby entity boxes.
+/// What the interaction step reads besides the world: game data, nearby entity boxes and
+/// the world border.
 pub struct InteractEnv<'a> {
     pub data: &'a haste_data::GameData,
     /// Hit boxes of the entities that can be targeted (not ourselves).
@@ -123,6 +127,9 @@ pub struct InteractEnv<'a> {
     /// (`docs/INTERFACES.md`: `entity_box` carries the entity_type name); the picker only reads
     /// it.
     pub entity_types: &'a [RegistryIndex],
+    /// The world border (`useItemOn` fails without a packet outside it, `startDestroyBlock`
+    /// returns false). `None` is the effectively unlimited default — no border packet yet.
+    pub border: Option<&'a crate::world_border::WorldBorder>,
     /// The `#strider_warm_blocks` resolution for the strider the player steers (synced block
     /// tags + the data's block table); `None` without a tag sync yet.
     pub warm_blocks: Option<&'a dyn crate::item_based_steering::WarmBlocks>,
@@ -136,7 +143,7 @@ pub struct Interaction {
     pub target: Option<Target>,
     pub attrs: InteractAttributes,
     /// Block being broken, its face and the held item it started with, progress 0..1.
-    destroying: Option<(BlockPos, Direction, ItemStackData)>,
+    pub(crate) destroying: Option<(BlockPos, Direction, ItemStackData)>,
     progress: f32,
     /// Vanilla `MultiPlayerGameMode.destroyTicks`: how many `continueDestroyBlock` calls have
     /// added progress to the current break (the press tick's `continueAttack` counts, so a
@@ -159,6 +166,8 @@ pub struct Interaction {
     /// `minecraft:consumable` component's `use_duration`/`use_animation` (or the item class's
     /// own), ticked down each game tick. Set together with `is_using_item`.
     using: Option<UsingItem>,
+    /// The consumable's per-tick sound state (`Consumable.emitParticlesAndSounds`).
+    pub(crate) consume: consume_effects::ConsumeEffects,
     /// The hand of a use the server's synced flags started that we have not started
     /// locally yet (`LivingEntity.onSyncedDataUpdated` reads the held item then; we do it on
     /// the next tick, when the game data is at hand).
@@ -209,6 +218,12 @@ pub struct Interaction {
     recent: Vec<BlockPos>,
     /// The screen the last use opened (see [`UsedScreen`]), until the game thread takes it.
     used_screen: Option<UsedScreen>,
+    /// Whether a screen is open (the game thread sets it from the UI). While one is,
+    /// vanilla skips `Minecraft.handleKeybinds` entirely (`Minecraft.tick` only runs it
+    /// with no screen, and pins `missTime` to 10000): no clicks, no held use, no
+    /// continueAttack — a running break and an item use hang until the screen closes
+    /// (`KeyMapping.releaseAll` ran at the open, so the close tick releases and aborts).
+    pub(crate) screen_open: bool,
 }
 
 /// A screen a use opened (vanilla opens these in `MultiPlayerGameMode.performUseItemOn` /
@@ -397,6 +412,14 @@ impl LocalPlayer {
     /// This tick's mouse buttons and hotbar selection (applied inside the next tick).
     pub fn set_interact(&mut self, input: InteractInput) {
         self.int.input = input;
+    }
+
+    /// Whether a screen is open this tick (the game thread reads it off the UI). While one
+    /// is, `Minecraft.handleKeybinds` does not run: the clicks, the held use,
+    /// `continueAttack` (so a running break hangs) and the keybind-driven pick and drop
+    /// are all skipped until the screen closes.
+    pub fn set_screen_open(&mut self, open: bool) {
+        self.int.screen_open = open;
     }
 
     /// Whether we are scoping with a spyglass this tick: vanilla's `Player.isScoping` (using an

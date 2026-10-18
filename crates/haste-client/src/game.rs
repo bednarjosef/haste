@@ -29,6 +29,7 @@ mod hud;
 mod input;
 mod level;
 mod particles;
+pub(crate) mod pickup;
 mod player_model;
 mod run;
 mod shared;
@@ -98,6 +99,8 @@ fn tick_once(
     // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
     // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
     let tick_moved = level::tick(driver, shared, &input)?;
+    // The pickup particles the tick produced or advanced, published to the render thread.
+    pickup::publish(driver, shared);
     // The player's own block sounds this tick (footsteps, mining, placing), played through
     // the same output the packets went through above.
     sound::play_own_sounds(driver, shared);
@@ -134,6 +137,7 @@ fn tick_once(
     // them); the interaction step above ran the attacks and uses that started the swings. In
     // spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
     let first_person = view::tick_hand(driver, shared, tick_moved);
+    hud::publish_attack_indicator(driver, shared);
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);

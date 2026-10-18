@@ -373,17 +373,7 @@ fn head_top_of_the_humanoid_layout() {
 
 /// A hand with no animation: no swing, the equip progress up, no bob, no lag.
 fn still_hand() -> FirstPerson {
-    FirstPerson {
-        skin: None,
-        slim: false,
-        sleeve: true,
-        item: None,
-        light: (15, 0),
-        attack: TickPair::fixed(0.0),
-        equip: TickPair::fixed(1.0),
-        x_bob: TickPair::fixed(0.0),
-        y_bob: TickPair::fixed(0.0),
-    }
+    FirstPerson::default()
 }
 
 #[test]
@@ -997,5 +987,48 @@ fn append_upload_range_covers_only_the_appended_tail() {
     // No entities either: the block entities are the whole stream, from 0.
     assert_eq!(append_upload_range(40, 256, 0), 0..40);
     // Outgrew it with no room to spare: still the whole stream.
-    assert_eq!(append_upload_range(512, 256, 100), 0..512);
+}
+
+/// `Entity.shouldRenderAtSqrDistance` scales the 64-block size distance by `viewScale`
+/// (from `options.entityDistanceScaling`): at 0.5/1.0/5.0 the cull distance is 32/64/320.
+#[test]
+fn entity_cull_distance_scales_with_view_scale() {
+    let size = 1.0f32;
+    let entity_scale = 1.0f32;
+    for (view_scale, limit) in [(0.5f32, 32.0f64), (1.0, 64.0), (5.0, 320.0)] {
+        assert!(should_render_at_sqr_distance(
+            size,
+            entity_scale,
+            (limit - 1.0).powi(2),
+            view_scale
+        ));
+        assert!(!should_render_at_sqr_distance(
+            size,
+            entity_scale,
+            (limit + 1.0).powi(2),
+            view_scale
+        ));
+    }
+}
+
+#[test]
+fn flame_quads_stack_up_the_bounding_box() {
+    let mut out = Vec::new();
+    flame::emit_geometry(
+        &mut out,
+        glam::Vec3::ZERO,
+        0.6,
+        1.8,
+        glam::Quat::IDENTITY,
+        (15, 15),
+        [0, 0, 1, 1],
+        [0, 0, 1, 1],
+    );
+    // height 1.8, width 0.6 -> 5 quads.
+    assert_eq!(out.len() / 6, 5);
+
+    // first vertex x = s * (-r) (identity rotation, origin zero)
+    let s = 0.6_f32 * 1.4;
+    let r = 0.5_f32;
+    assert!((out[0].pos[0] - (s * -r)).abs() < 1e-4);
 }

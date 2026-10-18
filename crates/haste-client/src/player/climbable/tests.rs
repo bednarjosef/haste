@@ -208,6 +208,7 @@ fn pushing_into_a_ladder_climbs_only_with_the_synced_tag() {
         data,
         entities: &[],
         entity_types: &[],
+        border: None,
         warm_blocks: None,
     };
     let forward = InputState {

@@ -11,6 +11,8 @@ use haste_core::view::BlockView;
 use haste_core::{BlockPos, Direction, RegistryIndex};
 use haste_protocol::haste_core::game::GameMode;
 
+use crate::player::interact::UseAnimation;
+
 use super::camera::eye_in_lava;
 use super::weather::{biome_has_precipitation, rain_fog_sky_light};
 
@@ -74,6 +76,9 @@ pub struct ViewState {
     pub water_vision: f32,
     /// Whether we are a spectator (`Entity.isSpectator`), for the lava/powder-snow fog.
     pub spectator: bool,
+    /// The player's bounding box (`getBbWidth`, `getBbHeight` for the current pose), for the
+    /// third-person flames.
+    pub bb: (f32, f32),
     /// Whether we have fire resistance, for the lava fog distance.
     pub fire_resistance: bool,
     /// `BossHealthOverlay.shouldCreateWorldFog()`, for the thick boss fog.
@@ -159,6 +164,13 @@ pub struct FirstPersonView {
     pub item: Option<RegistryIndex>,
     /// (sky light, block light) at the eye position, `FirstPerson::light`'s order.
     pub light: (u8, u8),
+    /// The main hand is using an EAT/DRINK consumable with ticks left
+    /// (`LivingEntity.isUsingItem` + `getUseItemRemainingTicks` + `getUseAnimation`).
+    pub use_eat: bool,
+    /// `LivingEntity.getUseItemRemainingTicks` while a use runs (0 otherwise).
+    pub use_remaining: i32,
+    /// `Item.getUseDuration` of the item being used (0 otherwise).
+    pub use_duration: i32,
     /// Swing progress 0..1 over the swing's ticks (0 when the hand does not swing).
     pub attack: (f32, f32),
     /// Equip progress: 1 held, 0 while the item switches.
@@ -189,6 +201,9 @@ impl FirstPersonView {
         FirstPersonView {
             item,
             light: (world.sky_light(p), block_light),
+            use_eat: false,
+            use_remaining: 0,
+            use_duration: 0,
             attack: (0.0, 0.0),
             equip: (1.0, 1.0),
             x_bob: (0.0, 0.0),
@@ -219,6 +234,9 @@ impl FirstPersonView {
             sleeve,
             item: self.item,
             light: self.light,
+            use_eat: self.use_eat,
+            use_remaining: self.use_remaining,
+            use_duration: self.use_duration,
             attack: pair(self.attack),
             equip: pair(self.equip),
             x_bob: pair(self.x_bob),
@@ -257,12 +275,21 @@ pub(super) fn tick_hand(
             matches!(p.state.pose, haste_physics::Pose::Swimming),
             p.held_stack(),
             attack_speed,
+            p.hands_busy(),
         );
         let eye = p.camera(1.0).0;
         let hand = &p.hand;
         let mut fp =
             FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item(), on_fire);
         fp.with_hand(hand);
+        // `FirstPersonHandsAndItems.extractRenderState`: the use state the EAT/DRINK
+        // transform reads. Only the main hand is modelled, so an off-hand use is not
+        // distinguished (a later task).
+        fp.use_eat = p.is_using_item()
+            && p.use_item_remaining() > 0
+            && matches!(p.use_animation(), UseAnimation::Eat | UseAnimation::Drink);
+        fp.use_remaining = p.use_item_remaining();
+        fp.use_duration = p.use_duration();
         Some(fp)
     };
     first_person
@@ -299,6 +326,10 @@ pub(super) fn publish(
     view.has_position = s.player.has_position;
     view.feet = feet;
     view.pose = player_pose(s);
+    view.bb = (
+        s.player.attrs.box_width() as f32,
+        s.player.attrs.height_for(s.player.state.pose) as f32,
+    );
     let lm = &s.lightmap;
     view.lightmap_flicker = lm.flicker;
     view.lightmap_night_vision = lm.night_vision;

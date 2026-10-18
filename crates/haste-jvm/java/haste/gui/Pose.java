@@ -67,4 +67,13 @@ public final class Pose extends Matrix3x2fStack {
 
     public float tx() { return m20(); }
     public float ty() { return m21(); }
+
+    /**
+     * The pose's linear part (the scale a screen applied, e.g. {@code SignEditScreen}'s 3.9, or the
+     * recipe book's squeeze) applied to a local point. The translation is emitted separately as
+     * TRANSLATE_PUSH, so a draw's position is {@code linear(point) + translate}. Without this the
+     * scale was dropped and the sign board drew at its unscaled 24x26 texture size.
+     */
+    public int scaleX(int x, int y) { return Math.round(m00() * x + m10() * y); }
+    public int scaleY(int x, int y) { return Math.round(m01() * x + m11() * y); }
 }

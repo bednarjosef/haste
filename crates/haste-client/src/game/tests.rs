@@ -60,6 +60,7 @@ fn the_view_carries_the_hand_animation_to_the_renderer() {
             false,
             crate::hand::HeldStack::of(None),
             4.0,
+            false,
         );
     }
     v.with_hand(&hand);
@@ -86,6 +87,7 @@ fn the_view_carries_the_hand_animation_to_the_renderer() {
         false,
         crate::hand::HeldStack::of(None),
         4.0,
+        false,
     );
     let mut next = v;
     next.with_hand(&hand);

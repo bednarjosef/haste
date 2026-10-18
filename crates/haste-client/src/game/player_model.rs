@@ -132,12 +132,18 @@ fn player_instance(
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        // `Entity.displayFireAnimation`: on fire and not a spectator.
+        display_fire: view.screen.on_fire && !view.spectator,
+        width: view.bb.0,
+        height: view.bb.1,
         is_discrete: model.metadata.shared.crouching,
         // `EntityAttachment.NAME_TAG` AT_HEIGHT fallback = the player's 1.8 bb height.
         name_tag_y: 1.8,
         // Our own model flashes red and tips over in third person like any entity
         // (`hurt_strength`, and the death tilt inside `body_transform`).
         hurt: haste_entity::store::hurt_strength(model),
+        // Full sky until the frame pass samples the world (`EntityInstance::sample_light`).
+        light: (15, 0),
         overlays: Default::default(),
         item: None,
         decoration: None,

@@ -75,6 +75,15 @@ pub(super) const SKY_COLOR_NIGHT: [(i32, [f32; 3]); 4] = [
     (22330, [0.0, 0.0, 0.0]),
 ];
 
+/// Cloud colour night multiplier (timeline `cloud_color` MULTIPLY_ARGB track: white by
+/// day, the bluish (0.1, 0.1, 0.15) at night, same tick shape as the fog multiplier).
+pub(super) const CLOUD_COLOR_NIGHT: [(i32, [f32; 3]); 4] = [
+    (133, [1.0, 1.0, 1.0]),
+    (11867, [1.0, 1.0, 1.0]),
+    (13670, [0.1, 0.1, 0.15]),
+    (22330, [0.1, 0.1, 0.15]),
+];
+
 /// Sunrise/sunset colour (timeline `sunrise_sunset_color` track, ARGB as floats). The
 /// int constants are vanilla's packed ARGB keyframe values.
 pub(super) const SUNRISE_SUNSET_COLOR: [(i32, [f32; 4]); 32] = [
