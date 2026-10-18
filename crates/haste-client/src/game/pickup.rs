@@ -78,6 +78,10 @@ fn instance(p: &PickupParticle, partial: f32) -> EntityInstance {
         shadow_radius: 0.0,
         shadow_strength: 0.75,
         invisible: false,
+        // The flying copy draws without flames; the box only sizes them.
+        display_fire: false,
+        width: 0.25,
+        height: 0.25,
         is_discrete: false,
         name_tag_y: 0.0,
         hurt: 0.0,
