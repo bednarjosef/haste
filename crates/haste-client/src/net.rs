@@ -40,6 +40,8 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// Vanilla `LivingEntity.damageCooldownTime` per hit (the HUD heart blink's window).
+const DAMAGE_COOLDOWN_TICKS: u32 = 20;
 /// The server's correction of the vehicle we steer is only taken when it moved the boat this far
 /// (vanilla `ClientPacketListener.handleMoveVehicle` compares the distance to 1.0E-5).
 const VEHICLE_CORRECTION_EPSILON: f64 = 1.0e-5;
@@ -1085,6 +1087,15 @@ pub struct Session {
     /// (vanilla's `hurtDir`, the `hurt_animation` packet's yaw).
     pub hurt_ticks: u32,
     pub hurt_dir: f32,
+    /// Vanilla `LivingEntity.damageCooldownTime` (20 per hit, 10 on a heal): the HUD heart
+    /// blink's gate (`Hud.extractPlayerHealth` blinks while it is positive), ticked down in
+    /// `end_tick`.
+    pub damage_cooldown: u32,
+    /// The hurt sounds' random (vanilla's per-entity `RandomSource`): hurt pitch and sound
+    /// variant seeds.
+    hurt_rng: haste_audio::random::LegacyRandom,
+    /// Entity types whose hurt sound fell back to the generic one (log once per type).
+    unknown_hurt_types: HashSet<String>,
     /// Ticks since the local player died (vanilla's `deathTime`, 0 while alive).
     pub death_ticks: u32,
     /// Ticks the current use item has been held (vanilla's `getTicksUsingItem`), and the held
@@ -1187,6 +1198,14 @@ impl Session {
             old_fov_modifier: 0.0,
             hurt_ticks: 0,
             hurt_dir: 0.0,
+            damage_cooldown: 0,
+            hurt_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
+            unknown_hurt_types: HashSet::new(),
             death_ticks: 0,
             use_ticks: 0,
             use_item: None,
@@ -1869,7 +1888,53 @@ impl Session {
                 }
             }
             P::DamageEvent(d) => {
-                entities.mark_hurt(EntityId(d.entity_id));
+                // Vanilla `ClientPacketListener.handleDamageEvent` ->
+                // `LivingEntity.handleDamageEvent`: the hurt animation runs (hurtTime 10,
+                // the red flash for others, the camera tilt for us), the damage cooldown
+                // starts (the HUD heart blink's gate) and the victim's hurt sound plays.
+                let id = EntityId(d.entity_id);
+                entities.mark_hurt(id);
+                let own_hit = id == own;
+                if own_hit {
+                    self.hurt_ticks = HURT_TILT_TICKS;
+                    self.damage_cooldown = DAMAGE_COOLDOWN_TICKS;
+                }
+                // The victim's type: ours from the login (we are not in the entity
+                // store), others' from their spawn's registry index.
+                let name = if own_hit {
+                    Some("minecraft:player")
+                } else {
+                    entities
+                        .entity_type(id)
+                        .and_then(|k| self.entity_type_names.get(k.0 as usize))
+                        .map(|n| n.as_str())
+                };
+                if !own_hit {
+                    if let Some(name) = name {
+                        if damage::mob_hurt_sound(name).is_none()
+                            && self.unknown_hurt_types.insert(name.to_owned())
+                        {
+                            tracing::info!(
+                                "unknown entity type {name}; its hurt sound is the generic one"
+                            );
+                        }
+                    }
+                }
+                // The synced data byte at index 16: the baby flag, or the cube mobs' size.
+                let data16 = entities.metadata_value(id, 16).and_then(|v| match v {
+                    MetadataValue::Byte(b) => Some(*b),
+                    _ => None,
+                });
+                let effects = damage::damage_effects_id(d.source_type, regs);
+                self.sound_requests.push(damage::hurt_request(
+                    &mut self.hurt_rng,
+                    name,
+                    &effects,
+                    data16,
+                    d.entity_id,
+                    own_hit,
+                    self.player.state.pos,
+                ));
             }
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
@@ -2388,6 +2453,7 @@ impl NetDriver {
 pub mod account;
 mod block_events;
 pub mod chat_session;
+pub(crate) mod damage;
 pub(crate) mod pack_prompt;
 mod vehicle;
 
