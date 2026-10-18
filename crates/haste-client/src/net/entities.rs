@@ -177,6 +177,9 @@ impl Session {
             P::SwingAnimation(s) => {
                 entities.swing(EntityId(s.entity_id), s.hand, s.animation, s.duration)
             }
+            // The item pickup animation (vanilla `handleTakeItemEntity`): the sound, the
+            // particle and the stack shrink / entity removal all live in the pickup module.
+            P::TakeItemEntity(t) => self.take_item_entity(t, entities),
             P::SetEntityMotion(m) => entities.set_velocity(EntityId(m.entity_id), m.velocity),
             P::HurtAnimation(h) => {
                 entities.mark_hurt(EntityId(h.entity_id));
