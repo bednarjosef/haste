@@ -13,7 +13,7 @@ use haste_core::model::{
     ModelPart, PaintingDecoration, PoseOverrides,
 };
 use haste_core::parts::{self, PartId};
-use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::view::BlockView;
 use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;

@@ -3,7 +3,7 @@
 // particle and entity preparation, and the per-tick setters.
 use std::sync::Arc;
 
-use haste_core::view::BlockView;
+use haste_core::view::{BlockView, CollisionShapes};
 
 use super::{Camera, FrameInput, LightmapFrame, Renderer, SpinWarp};
 
@@ -37,7 +37,7 @@ impl Renderer {
     pub fn sample_world(
         &mut self,
         world: &dyn BlockView,
-        shapes: &dyn haste_core::view::CollisionShapes,
+        shapes: &haste_data::BlockShapes,
         frame: &FrameInput,
     ) {
         self.prepare_shadows(world, shapes, frame);
@@ -135,7 +135,7 @@ impl Renderer {
     pub fn prepare_shadows(
         &mut self,
         world: &dyn BlockView,
-        shapes: &dyn haste_core::view::CollisionShapes,
+        shapes: &haste_data::BlockShapes,
         frame: &FrameInput,
     ) {
         // `Level.getSkyDarken` = (int)(15 - SKY_LIGHT_LEVEL) off the day timeline; skyless
