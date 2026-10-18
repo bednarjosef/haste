@@ -166,8 +166,13 @@ impl LocalPlayer {
         out: &mut Vec<ServerboundPlay>,
     ) {
         if self.int.destroying.is_none() {
+            // The delay is set even when the use cannot run (vanilla sets rightClickDelay
+            // before the isHandsBusy check). The using-item gate is handleKeybinds' (the
+            // click loop and the held repeat in interact_step); this one is
+            // `LocalPlayer.isHandsBusy` — rowing (a movement key held while controlling a
+            // boat): no use at all.
             self.int.use_delay = USE_DELAY;
-            if !self.int.is_using_item {
+            if !self.int.is_using_item && !self.hands_busy {
                 for hand in 0..=1 {
                     // `MultiPlayerGameMode.useItem` answers spectator with a Pass before it sends
                     // anything: no `use_item` packet and no use. `useItemOn`'s packet still

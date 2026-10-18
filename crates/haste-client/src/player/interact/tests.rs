@@ -2155,3 +2155,127 @@ fn a_screen_open_leaves_the_break_hanging_until_it_closes() {
     assert_eq!(actions(&out), [(action::RELEASE_USE_ITEM, 0)]);
     assert!(!r.p.is_using_item());
 }
+
+/// `LocalPlayer.isHandsBusy` is rowing — a movement key held while controlling a boat
+/// (`rideTick` sets it; the passenger tick runs after the key handling, so a key takes
+/// effect from the next tick). While it is, `Minecraft.startAttack` and `startUseItem` do
+/// nothing: no swing, no packet. In any other vehicle (or not rowing) the click works.
+#[test]
+fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    let boat_env = crate::boat::BoatEnv {
+        world: &r.w,
+        shapes: &data().shapes,
+        blocks: data(),
+    };
+    let boat = crate::boat::Boat::new(DVec3::new(0.5, 70.0, 0.5), 0.0, (1.375, 0.5625), &boat_env);
+    r.p.set_vehicle(
+        Some(EntityId(3)),
+        haste_entity::riding::SeatPoint::ZERO,
+        Some(boat),
+        None,
+        None,
+    );
+    // The press tick: rideTick runs after the key handling (vanilla's order), so the click
+    // still works while the row starts.
+    r.p.set_interact(ATTACK);
+    let mut rowed = Vec::new();
+    r.p.tick_interact(
+        &InputState {
+            forward: true,
+            pitch: 90.0,
+            ..Default::default()
+        },
+        &r.w,
+        &InteractEnv {
+            data: data(),
+            entities: &r.entities,
+            entity_types: &r.types,
+        },
+        None,
+        &mut rowed,
+    );
+    assert!(
+        rowed.iter().any(|p| matches!(p, ServerboundPlay::Punch(_))),
+        "the press tick still swings: {rowed:?}"
+    );
+    // Release the attack (still rowing), then a fresh click: hands busy, nothing goes out.
+    r.p.set_interact(InteractInput::default());
+    r.p.tick_interact(
+        &InputState {
+            forward: true,
+            pitch: 90.0,
+            ..Default::default()
+        },
+        &r.w,
+        &InteractEnv {
+            data: data(),
+            entities: &r.entities,
+            entity_types: &r.types,
+        },
+        None,
+        &mut Vec::new(),
+    );
+    // Fresh click while rowing: no punch, no use, nothing the keys did.
+    r.p.set_interact(ATTACK);
+    let mut out = Vec::new();
+    r.p.tick_interact(
+        &InputState {
+            forward: true,
+            pitch: 90.0,
+            ..Default::default()
+        },
+        &r.w,
+        &InteractEnv {
+            data: data(),
+            entities: &r.entities,
+            entity_types: &r.types,
+        },
+        None,
+        &mut out,
+    );
+    assert!(
+        !out.iter().any(|p| matches!(
+            p,
+            ServerboundPlay::Punch(_)
+                | ServerboundPlay::PlayerAction(_)
+                | ServerboundPlay::UseItem(_)
+                | ServerboundPlay::UseItemOn(_)
+        )),
+        "no attack or use while rowing: {out:?}"
+    );
+    // The keys released (the boat drifts, hands free): a fresh click swings again.
+    r.p.set_interact(InteractInput::default());
+    r.p.tick_interact(
+        &InputState {
+            pitch: 90.0,
+            ..Default::default()
+        },
+        &r.w,
+        &InteractEnv {
+            data: data(),
+            entities: &r.entities,
+            entity_types: &r.types,
+        },
+        None,
+        &mut Vec::new(),
+    );
+    r.p.set_interact(ATTACK);
+    let mut out = Vec::new();
+    r.p.tick_interact(
+        &InputState {
+            pitch: 90.0,
+            ..Default::default()
+        },
+        &r.w,
+        &InteractEnv {
+            data: data(),
+            entities: &r.entities,
+            entity_types: &r.types,
+        },
+        None,
+        &mut out,
+    );
+    assert!(matches!(out[0], ServerboundPlay::Punch(_)), "{out:?}");
+}

@@ -24,9 +24,10 @@ impl LocalPlayer {
         if self.int.miss_time > 0 {
             return false;
         }
-        // player.isHandsBusy() (an item in use, or dying) blocks the swing; item use is gated
-        // separately in handleKeybinds.
-        if self.int.is_using_item {
+        // `LocalPlayer.isHandsBusy` — rowing (a movement key held while controlling a boat;
+        // `rideTick` sets it): the click is dropped, no swing. Item use is gated separately,
+        // in handleKeybinds' using-item branch.
+        if self.hands_busy {
             return false;
         }
         // `Minecraft.startAttack`'s spectator branch comes before the swing: an entity under

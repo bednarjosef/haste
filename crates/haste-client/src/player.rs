@@ -297,6 +297,10 @@ pub struct LocalPlayer {
     water_vision_time: i32,
     /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
     pub(crate) int: interact::Interaction,
+    /// Vanilla `LocalPlayer.handsBusy` (`isHandsBusy`): true while rowing — a movement key
+    /// held while controlling a boat (`rideTick` sets it each passenger tick, clears it on
+    /// dismount). While it is, `Minecraft.startAttack` and `startUseItem` do nothing.
+    hands_busy: bool,
     /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
     /// progress and bob, filled for the render state at the end of each tick.
     pub hand: hand::Hand,
@@ -354,6 +358,7 @@ impl LocalPlayer {
             jump_held: false,
             water_vision_time: 0,
             int: interact::Interaction::default(),
+            hands_busy: false,
             hand: hand::Hand::new(),
         };
         p.state.on_ground = true;
