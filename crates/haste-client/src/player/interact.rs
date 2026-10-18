@@ -54,14 +54,14 @@ mod packets;
 mod pick;
 mod step;
 mod use_item;
+pub(crate) use effects::{LightmapEffectIds, MovementEffectIds};
 pub use pick::Target;
 pub use use_item::UsingItem;
-pub(crate) use effects::{LightmapEffectIds, MovementEffectIds};
 // Re-exported for `player/tests.rs` (`interact::swap_key`); the parent itself no longer
 // calls it since `refresh_components` moved to `held_item`.
+use effects::EffectIds;
 #[allow(unused_imports)]
 pub(crate) use held_item::swap_key;
-use effects::EffectIds;
 use held_item::HeldItem;
 
 /// Ticks between two broken blocks while attack stays held (`destroyDelay`).

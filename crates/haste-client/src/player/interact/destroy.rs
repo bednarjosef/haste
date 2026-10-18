@@ -5,11 +5,11 @@
 
 use glam::DVec3;
 use haste_core::game::GameMode;
+use haste_core::view::BlockPhysics;
 use haste_core::view::BlockView;
 use haste_core::{BlockPos, BlockStateId, Direction, RegistryIndex};
 use haste_physics::mining::MiningParams;
 use haste_physics::raycast::BlockHit;
-use haste_core::view::BlockPhysics;
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ServerboundPlay;
 

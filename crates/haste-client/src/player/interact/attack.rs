@@ -2,13 +2,13 @@
 //! the one-click attack (entity: `MultiPlayerGameMode.attack`; block: start breaking; nothing:
 //! a miss) and the held-button repeat that keeps breaking.
 
-use haste_core::view::{BlockPhysics, BlockView};
 use haste_core::game::GameMode;
+use haste_core::view::{BlockPhysics, BlockView};
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ServerboundPlay;
 
 use super::super::LocalPlayer;
-use super::{Target, InteractEnv, DESTROY_DELAY, MISS_TIME};
+use super::{InteractEnv, Target, DESTROY_DELAY, MISS_TIME};
 
 impl LocalPlayer {
     /// `Minecraft.startAttack`: one left click. Returns vanilla's `endAttack` — the block broke

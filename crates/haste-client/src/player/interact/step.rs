@@ -2,10 +2,10 @@
 //! crosshair target, then `Minecraft.handleKeybinds` (the click loops, the held use,
 //! `continueAttack`, `missTime`--), pick block, and drop / off-hand swap.
 
+use haste_core::game::GameMode;
 use haste_core::input::InteractInput;
 use haste_core::view::BlockView;
 use haste_core::BlockPos;
-use haste_core::game::GameMode;
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ServerboundPlay;
 
