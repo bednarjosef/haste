@@ -127,13 +127,14 @@ fn texel_rows_unpads_rows() {
     let mut data = row.to_vec();
     data.resize(stride, 0);
     let out = texel_rows_to_rgba(&data, 3, 1, stride, false);
-    assert_eq!(out, row.to_vec());
+    // The colour is kept and the alpha forced opaque (vanilla `Screenshot.takeScreenshot`).
+    assert_eq!(out, vec![1, 2, 3, 255, 5, 6, 7, 255, 9, 10, 11, 255]);
 }
 
 #[test]
 fn texel_rows_swap_bgra() {
     // Two BGRA pixels in one padded row: r and b swap per pixel.
-    let row = [10u8, 20, 30, 255, 40, 50, 60, 255];
+    let row = [10u8, 20, 30, 255, 40, 50, 60, 128];
     let stride = 16;
     let mut data = row.to_vec();
     data.resize(stride, 0);
