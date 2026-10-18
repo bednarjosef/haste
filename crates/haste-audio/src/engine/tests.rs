@@ -498,6 +498,38 @@ fn zero_volume_music_starts_silently() {
 }
 
 #[test]
+fn a_stereo_file_plays_unpositioned() {
+    // OpenAL plays a multi-channel buffer as-is, ignoring the source position: a stereo
+    // sound (music, records) plays at full gain, centred, even when it was given a
+    // position far to the side and out of range.
+    let mut engine = SilentEngine::new();
+    engine.set_listener(DVec3::ZERO, 0.0, 0.0);
+    engine.play(
+        &variant("sounds/music/game/calm1.ogg", 16),
+        SoundSource::Record,
+        Some(DVec3::new(100.0, 0.0, 0.0)),
+        1.0,
+        1.0,
+        Arc::from("minecraft:music_disc.cat"),
+    );
+    engine.set_stereo(0);
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    // Full gain, centred: no distance falloff, no panning.
+    assert!((l - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "l {l}");
+    assert!((r - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "r {r}");
+    // The volume still applies (the play volume, the source volume).
+    engine.set_volume(SoundSource::Record, 0.5);
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!(
+        ((l * l + r * r).sqrt() - 0.5).abs() < 1e-5,
+        "norm {}",
+        (l * l + r * r).sqrt()
+    );
+}
+
+#[test]
 fn master_source_takes_the_master_volume_once() {
     // Options.getFinalSoundSourceVolume: the master source's own volume is the master
     // volume, every other source's is master * source, and SoundEngine clamps it to 0..=1.

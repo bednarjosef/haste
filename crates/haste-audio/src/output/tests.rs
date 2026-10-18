@@ -41,6 +41,22 @@ fn cached_samples_average_channels_to_mono() {
 }
 
 #[test]
+fn stereo_samples_pass_through_interleaved_and_untouched() {
+    // A multi-channel file plays as-is, as OpenAL plays multi-channel buffers: the
+    // samples keep their order and their channel count (no downmix to mono).
+    let decoded = sound(vec![0.2, 0.6, 0.4, 0.8], 2);
+    let stereo = StereoSamples::new(&decoded);
+    assert_eq!(stereo.channels().get(), 2);
+    assert_eq!(stereo.sample_rate().get(), 44_100);
+    let mut stereo = stereo;
+    assert_eq!(stereo.next(), Some(0.2));
+    assert_eq!(stereo.next(), Some(0.6));
+    assert_eq!(stereo.next(), Some(0.4));
+    assert_eq!(stereo.next(), Some(0.8));
+    assert_eq!(stereo.next(), None);
+}
+
+#[test]
 fn decode_rejects_non_vorbis_bytes() {
     // A tiny valid Ogg Vorbis file cannot be produced without an encoder dependency
     // (rodio only decodes), so the decode-worker test covers the rejection path; the

@@ -239,7 +239,7 @@ impl SoundSystem {
         self.incoming.clear();
         self.output.drain_controls(&mut self.incoming);
         let mut next_incoming = 0;
-        for sounded in &mut self.sounded {
+        for (i, sounded) in self.sounded.iter_mut().enumerate() {
             if sounded.controls.is_some() {
                 continue;
             }
@@ -248,8 +248,14 @@ impl SoundSystem {
                 .get(next_incoming)
                 .is_some_and(|c| c.id == sounded.id)
             {
-                sounded.controls = Some(self.incoming[next_incoming].clone());
+                let controls = self.incoming[next_incoming].clone();
                 next_incoming += 1;
+                if controls.stereo {
+                    // The worker decoded a multi-channel file: OpenAL plays such a
+                    // buffer unpositioned, so the sound stops attenuating and panning.
+                    self.engine.set_stereo(i);
+                }
+                sounded.controls = Some(controls);
             }
         }
         // Anything still queued belongs to a sound this side no longer tracks (stopped
@@ -279,7 +285,13 @@ impl SoundSystem {
                     continue;
                 }
                 if let Some((left, right)) = gains.next() {
-                    *control.gains.lock().unwrap() = (left, right);
+                    if control.stereo {
+                        // Unpositioned multi-channel playback: the engine's two gains are
+                        // equal; the player's volume carries them both.
+                        player.set_volume(left);
+                    } else {
+                        *control.gains.lock().unwrap() = (left, right);
+                    }
                 }
                 if let Some(pitch) = pitches.next() {
                     player.set_speed(pitch);

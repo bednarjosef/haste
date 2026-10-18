@@ -131,6 +131,11 @@ struct PlayingSound {
     /// 0.5..=2.0.
     pitch: f32,
     attenuation_distance: u32,
+    /// Whether the sound's file has more than one channel, as the decoder found. OpenAL
+    /// plays a multi-channel buffer as-is, unpositioned (no distance, no panning), so a
+    /// stereo file (music, records) is global even when the server sent a position; the
+    /// output stage reports the channel count once the worker has decoded the file.
+    stereo: bool,
     /// (left, right) gains as of the last `tick()`.
     gains: (f32, f32),
 }
@@ -193,6 +198,7 @@ impl SilentEngine {
             volume: volume * variant.volume,
             pitch: clamp_pitch(pitch * variant.pitch),
             attenuation_distance: variant.attenuation_distance,
+            stereo: false,
             gains: (0.0, 0.0),
         });
         if started_silently {
@@ -241,21 +247,37 @@ impl SilentEngine {
         self.sounds.remove(index);
     }
 
+    /// Mark the sound at `index` (play order) as stereo (its file has more than one
+    /// channel). The output stage calls this when the worker has decoded the file and
+    /// found several channels; from then on the sound ignores its position, as OpenAL
+    /// plays multi-channel buffers unpositioned.
+    pub fn set_stereo(&mut self, index: usize) {
+        if let Some(sound) = self.sounds.get_mut(index) {
+            sound.stereo = true;
+        }
+    }
+
     /// Recompute the (left, right) gains of every playing sound from the current
     /// listener and source volumes.
     pub fn tick(&mut self) {
         for sound in &mut self.sounds {
             let effective = self.volumes.effective(sound.source);
-            let (gain, pan) = match sound.pos {
-                Some(pos) => (
-                    attenuation(
-                        (pos - self.listener.position).length(),
-                        sound.volume,
-                        sound.attenuation_distance,
-                    ) * effective,
-                    pan(&self.listener, pos),
-                ),
-                None => (sound.volume.min(1.0) * effective, 0.0),
+            // A stereo file plays unpositioned, as OpenAL plays multi-channel buffers:
+            // full gain, centred, wherever it was asked to play.
+            let (gain, pan) = if sound.stereo {
+                (sound.volume.min(1.0) * effective, 0.0)
+            } else {
+                match sound.pos {
+                    Some(pos) => (
+                        attenuation(
+                            (pos - self.listener.position).length(),
+                            sound.volume,
+                            sound.attenuation_distance,
+                        ) * effective,
+                        pan(&self.listener, pos),
+                    ),
+                    None => (sound.volume.min(1.0) * effective, 0.0),
+                }
             };
             sound.gains = stereo_gains(gain, pan);
         }
