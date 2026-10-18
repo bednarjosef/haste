@@ -70,6 +70,8 @@ pub struct MeshTables {
     pub fluids: Arc<crate::fluid::FluidTable>,
     /// AO occluder test per state (vanilla collision-shape rule).
     pub ao: Arc<AoTable>,
+    /// Fluid face-occlusion shapes per state (vanilla occlusion shape).
+    pub fluid_occluders: Arc<crate::fluid::FluidOccluders>,
     /// Set identity for the mesher's per-state cache: a fresh value per
     /// constructed set (monotonic counter), so a new Renderer's tables
     /// never alias a previous set's pointer identities after a reconnect.
@@ -87,12 +89,14 @@ impl MeshTables {
         colors: Arc<crate::tint::BiomeColors>,
         fluids: Arc<crate::fluid::FluidTable>,
         ao: Arc<AoTable>,
+        fluid_occluders: Arc<crate::fluid::FluidOccluders>,
     ) -> MeshTables {
         MeshTables {
             tints,
             colors,
             fluids,
             ao,
+            fluid_occluders,
             generation: TABLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -106,6 +110,8 @@ impl Default for MeshTables {
             Arc::new(crate::fluid::FluidTable::empty()),
             // No shape data known: no state occludes AO (flat lighting).
             Arc::new(AoTable::all_solid(0)),
+            // No shape data known: fluid faces fall back to full-if-opaque.
+            Arc::new(crate::fluid::FluidOccluders::absent()),
         )
     }
 }

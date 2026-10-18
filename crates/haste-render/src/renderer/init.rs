@@ -299,8 +299,10 @@ impl Renderer {
                 crate::fluid::FluidSprites::from_atlas(&*atlas),
             )),
             // No shape data at construction (the caller installs it with
-            // `set_ao_shapes`): no state occludes AO until then.
+            // `set_shapes`): no state occludes AO until then.
             Arc::new(crate::mesher::AoTable::all_solid(0)),
+            // Fluid faces fall back to full-if-opaque until then.
+            Arc::new(crate::fluid::FluidOccluders::absent()),
         ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
@@ -401,6 +403,8 @@ impl Renderer {
             arenas,
             section_vis,
             visible_mask: Default::default(),
+            camera_spectator: false,
+            cull_sections: true,
             visible_for: None,
             scheduled_for: None,
             walk_in_flight: false,
@@ -414,6 +418,7 @@ impl Renderer {
             view_distance: 32,
             draw_list: Vec::new(),
             drain_buf: Vec::new(),
+            mesh_carry: Vec::new(),
             layer_buckets: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             origins: Vec::new(),
             origin_buffer,

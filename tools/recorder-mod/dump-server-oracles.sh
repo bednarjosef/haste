@@ -58,6 +58,8 @@ PROPS
 
 echo "== run server (dumps on first tick, then stops)"
 mkdir -p "$OUT"
+# The wait below looks for the three files, so the previous run's copies must go first.
+rm -f "$OUT/block_shapes.json" "$OUT/entity_dimensions.json" "$OUT/block_properties.json"
 cd "$SRV"
 "$JDK/java" -Xms512M -Xmx1G -Dhaste.oracle.out="$OUT" -jar fabric-server-launch.jar nogui > "$SRV/oracle-run.log" 2>&1 &
 SERVER_PID=$!

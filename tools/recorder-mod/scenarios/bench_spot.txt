@@ -1,8 +1,10 @@
-# Windowed frame-time reference for scripts/bench-vs-vanilla.sh: the fps_idle spot and view,
-# HUD on, the world fully built, then every frame's time for 30 s (FrameTimes), written to
+# Windowed frame-time reference for scripts/bench-vs-vanilla.sh: a spectator above the forest
+# island north-east of spawn (the script substitutes its own spot into the tp line), HUD on,
+# the world fully built, then every frame's time for 30 s (FrameTimes), written to
 # cache/oracle/26.3/bench/vanilla.json (the script copies it after each run).
 cmd time set 6000
-cmd tp @s 9.5 71 6.5 0 10
+cmd gamemode spectator
+cmd tp @s 144.5 100 -191.5 180 15
 wait 40
 wait_world
 wait 100

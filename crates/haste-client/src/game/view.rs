@@ -365,7 +365,14 @@ pub(super) fn publish(
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.world_age = s.world_age;
     view.has_sky = s.dimension.has_skylight;
-    view.block_target = s.player.target();
+    view.block_target = if s.player.game_mode == GameMode::Spectator {
+        // Vanilla `GameRenderer.shouldRenderBlockOutline`: a spectator draws no block outline.
+        // (Its exception — a `MenuProvider` or portal target — needs a client-side table of
+        // menu blocks, which Haste does not have yet; see player/spectator.rs.)
+        None
+    } else {
+        s.player.target()
+    };
     view.eye_in_water = s.player.state.eyes_in_water;
     view.eye_in_lava = eye_in_lava(&shared.world.read(), &shared.data, eye);
     // The fog environment's player state (vanilla `FogRenderer.setupFog` reads these off the
@@ -423,6 +430,7 @@ pub(super) fn publish(
         nausea: s.player.int.nausea_blend_pair(),
         spinning_time: screen.spinning_time(),
         spinning_speed: screen.spinning_speed(),
+        spectator: view.spectator,
     };
     drop(view);
     feet
