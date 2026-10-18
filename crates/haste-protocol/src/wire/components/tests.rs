@@ -38,6 +38,7 @@ fn tables() -> ProtocolTables {
         (13, "minecraft:mystery"),
         (14, "minecraft:minimum_attack_charge"),
         (15, "minecraft:piercing_weapon"),
+        (16, "minecraft:consumable"),
     ])
 }
 
@@ -253,4 +254,91 @@ fn unknown_layouts_and_ids_fail() {
     // A truncated enchantment list (count 2, one entry).
     let body = patch(&[(8, &[2, 0, 3])], &[]);
     assert!(read_patch(&body, &tables).is_err());
+}
+
+/// A `minecraft:consumable` body as vanilla's `Consumable.STREAM_CODEC` writes it:
+/// seconds, animation, the sound holder, the particle flag, then the effect count.
+fn w_consumable(
+    w: &mut Writer,
+    seconds: f32,
+    animation: i32,
+    sound: &IdOr<SoundEvent>,
+    particles: bool,
+) {
+    w.f32(seconds);
+    w.var_int(animation);
+    w.write(sound);
+    w.bool(particles);
+    w.len_prefix(0); // no on_consume_effects
+}
+
+/// A consumable whose sound is a registry id, with no consume effects.
+#[test]
+fn consumable_reads_the_patch_component() {
+    let tables = tables();
+    let mut c = Writer::new();
+    w_consumable(&mut c, 3.2, 2, &IdOr::Id(15), false);
+    let body = patch(&[(16, &c.buf)], &[]);
+    let parsed = read_patch(&body, &tables).unwrap();
+    let consumable = parsed.consumable().unwrap();
+    assert_eq!(consumable.consume_seconds, 3.2);
+    assert_eq!(consumable.animation, 2); // drink
+    assert_eq!(consumable.sound, IdOr::Id(15));
+    assert!(!consumable.has_consume_particles);
+    assert!(!parsed.removes_consumable());
+}
+
+/// A consumable with an inline sound (fixed range present), two `on_consume_effects`
+/// (an apply_effects and a play_sound), a component before it and one after: the effects
+/// are consumed by their codecs without desyncing the stream.
+#[test]
+fn consumable_inline_sound_and_consume_effects() {
+    let tables = tables();
+    let mut c = Writer::new();
+    c.f32(0.1);
+    c.var_int(1); // eat
+    c.var_int(0); // inline sound event
+    c.identifier(&Identifier::minecraft("mob.goat.cheer"));
+    c.bool(true);
+    c.f32(64.0); // fixed range
+    c.bool(true); // has_consume_particles
+    c.len_prefix(2); // two on_consume_effects
+    c.var_int(0); // apply_effects
+    c.len_prefix(1); // one MobEffectInstance
+    c.var_int(3); // effect id
+    c.var_int(0); // amplifier
+    c.var_int(200); // duration
+    c.bool(false); // ambient
+    c.bool(true); // show particles
+    c.bool(true); // show icon
+    c.bool(false); // no hidden effect
+    c.f32(1.0); // probability
+    c.var_int(4); // play_sound
+    c.identifier(&Identifier::minecraft("entity.generic.drink"));
+    c.bool(false); // no fixed range
+    let body = patch(&[(3, &[9]), (16, &c.buf), (5, &[3])], &[]);
+    let parsed = read_patch(&body, &tables).unwrap();
+    assert_eq!(parsed.damage(), Some(9));
+    let consumable = parsed.consumable().unwrap();
+    assert_eq!(consumable.consume_seconds, 0.1);
+    assert_eq!(
+        consumable.sound,
+        IdOr::Inline(SoundEvent {
+            name: Identifier::minecraft("mob.goat.cheer"),
+            fixed_range: Some(64.0),
+        })
+    );
+    assert!(consumable.has_consume_particles);
+    // The component after the consumable read too: the effects consumed their bytes.
+    assert_eq!(parsed.repair_cost(), Some(3));
+}
+
+/// A removed `minecraft:consumable` makes the stack not consumable.
+#[test]
+fn removed_consumable_is_reported() {
+    let tables = tables();
+    let body = patch(&[], &[16]);
+    let parsed = read_patch(&body, &tables).unwrap();
+    assert!(parsed.removes_consumable());
+    assert_eq!(parsed.consumable(), None);
 }

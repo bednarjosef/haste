@@ -6,7 +6,8 @@
 //! (resolved through `minecraft:data_component_type` in
 //! [`ProtocolTables`]). [`read_patch`] walks that slice once and decodes the
 //! components game logic asks about (how damaged a tool is, its durability,
-//! its enchantments, its custom name, what it mines); every other component
+//! its enchantments, its custom name, what it mines, how it is consumed);
+//! every other component
 //! goes through [`skip_component`] and is kept raw as
 //! [`ItemComponent::Other`], so unknown and mod-added components do not fail
 //! as long as their layout is known.
@@ -19,7 +20,7 @@
 use bytes::Bytes;
 use haste_core::Component;
 
-use super::slot::{component_name, skip_component};
+use super::slot::{component_name, skip_component, skip_consume_effect};
 use super::{DecodeError, DecodeResult, IdOr, IdSet, Reader, SoundEvent, Wire, MAX_LIST};
 use crate::packets::ids::ProtocolTables;
 
@@ -71,6 +72,7 @@ fn read_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<ItemComponent>
         "tool" => ItemComponent::Tool(read_tool(r)?),
         "minimum_attack_charge" => ItemComponent::MinimumAttackCharge(r.f32()?),
         "piercing_weapon" => ItemComponent::PiercingWeapon(read_piercing_weapon(r)?),
+        "consumable" => ItemComponent::Consumable(read_consumable(r)?),
         // Layout known, value not modelled: keep it as written.
         _ => {
             let start = r.peek_rest();
@@ -128,6 +130,26 @@ fn read_piercing_weapon(r: &mut Reader<'_>) -> DecodeResult<PiercingWeapon> {
         dismounts: r.bool()?,
         sound: r.option(SoundEvent::read)?,
         hit_sound: r.option(SoundEvent::read)?,
+    })
+}
+
+/// `consumable` (vanilla `Consumable.STREAM_CODEC`): the use duration, the
+/// animation played while it runs, and the sound and particles the use emits
+/// (`Item.getUseDuration`/`getUseAnimation`, `ItemStack.onUseTick`). The
+/// `on_consume_effects` run server-side only (vanilla `Consumable.onConsume`
+/// guards them with `!level.isClientSide`), so the list is consumed by its
+/// codec but not modelled.
+fn read_consumable(r: &mut Reader<'_>) -> DecodeResult<Consumable> {
+    let consume_seconds = r.f32()?;
+    let animation = r.var_int()?;
+    let sound = IdOr::<SoundEvent>::read(r)?;
+    let has_consume_particles = r.bool()?;
+    r.list(MAX_LIST, skip_consume_effect)?;
+    Ok(Consumable {
+        consume_seconds,
+        animation,
+        sound,
+        has_consume_particles,
     })
 }
 
@@ -247,6 +269,21 @@ impl ComponentPatch {
             _ => None,
         })
     }
+
+    /// `minecraft:consumable` the patch adds, if any (the stack's own component,
+    /// overriding the item's default).
+    pub fn consumable(&self) -> Option<&Consumable> {
+        self.added.iter().find_map(|c| match c {
+            ItemComponent::Consumable(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Whether the patch removes `minecraft:consumable` (the stack is not
+    /// consumable, whatever the item's default).
+    pub fn removes_consumable(&self) -> bool {
+        self.removed.iter().any(|n| n == "minecraft:consumable")
+    }
 }
 
 /// One added data component with its decoded value.
@@ -278,6 +315,8 @@ pub enum ItemComponent {
     MinimumAttackCharge(f32),
     /// `piercing_weapon`.
     PiercingWeapon(PiercingWeapon),
+    /// `consumable`: how the stack is used and what using it emits.
+    Consumable(Consumable),
     /// Any other component: its type name as a registry id and its data as
     /// written (skipped by `slot::skip_component`).
     Other {
@@ -332,6 +371,23 @@ pub struct PiercingWeapon {
     pub sound: Option<SoundEvent>,
     /// The hit sound (`weapon.makeHitSound`).
     pub hit_sound: Option<SoundEvent>,
+}
+
+/// `consumable` (vanilla `Consumable`): how long a stack is used for and what
+/// using it emits — `consume_seconds`, the `ItemUseAnimation` id, the sound
+/// (a `minecraft:sound_event` registry id or an inline event) and the
+/// particle flag. `on_consume_effects` is not carried (server-side only).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Consumable {
+    /// `consume_seconds`: the use duration in seconds (`consume_ticks` is
+    /// `consume_seconds * 20`).
+    pub consume_seconds: f32,
+    /// `ItemUseAnimation` id (`eat` by default).
+    pub animation: i32,
+    /// The sound the use emits (`Holder<SoundEvent>`: registry id or inline).
+    pub sound: IdOr<SoundEvent>,
+    /// `has_consume_particles`: whether the use spawns item particles.
+    pub has_consume_particles: bool,
 }
 
 /// `rarity`: vanilla's four values; ids are the wire's VarInt.

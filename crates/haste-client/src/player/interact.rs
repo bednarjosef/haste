@@ -47,6 +47,7 @@ use haste_physics::mining::{BlockTags, ToolTable};
 use super::LocalPlayer;
 
 mod attack;
+mod consumable;
 mod consume_effects;
 mod destroy;
 mod drop;

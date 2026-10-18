@@ -76,7 +76,8 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "minecraft:mob_effect": {{"entries": {{{}}}}},
                     "minecraft:data_component_type": {{"entries": {{{}}}}},
                     "minecraft:enchantment": {{"entries": {{{}}}}},
-                    "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
+                    "minecraft:entity_type": {{"entries": {{{}}}}},
+                    "minecraft:sound_event": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
                 entries(&[
                     "air",
@@ -102,12 +103,8 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "nausea",
                     "darkness",
                 ]),
-                entries(&[
-                    "tool",
-                    "enchantments",
-                    "piercing_weapon",
-                    "minimum_attack_charge",
-                ]),
+                entries(&["tool", "enchantments", "piercing_weapon", "minimum_attack_charge",
+                    "consumable"]),
                 entries(&["efficiency", "sharpness"]),
                 entries(&[
                     "item",
@@ -124,6 +121,7 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "shulker_bullet",
                     "villager",
                 ]),
+                entries(&["entity.generic.eat", "entity.generic.drink"]),
             ),
         )
         .unwrap();
@@ -799,6 +797,7 @@ fn the_used_item_use_effects_feed_the_physics_state() {
         duration: 32,
         remaining: 32,
         animation: UseAnimation::Eat,
+        consumable: None,
     });
     r.p.apply_item_use_effects(Some(&env));
     assert!(r.p.state.slow_using_item);
@@ -809,6 +808,7 @@ fn the_used_item_use_effects_feed_the_physics_state() {
         duration: 72000,
         remaining: 72000,
         animation: UseAnimation::Spear,
+        consumable: None,
     });
     r.p.apply_item_use_effects(Some(&env));
     assert!(r.p.state.using_item);
@@ -1043,7 +1043,11 @@ fn use_duration_and_animation_come_from_the_item() {
         warm_blocks: None,
         ui: None,
     };
-    let d = |i: u32| r.p.int.use_data(&item(i), env.data);
+    let d = |i: u32| {
+        r.p.int
+            .use_data(&item(i), env.data)
+            .map(|u| (u.duration, u.animation))
+    };
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
     assert_eq!(d(5), Some((72000, UseAnimation::Bow)));
     assert_eq!(d(6), Some((72000, UseAnimation::Crossbow)));
