@@ -1,11 +1,11 @@
 //! Vertex output: the quads of a fluid block, face culling and occlusion, flow-direction UVs
-//! and the overlay sprite (vanilla's `LiquidBlockRenderer.tesselate`).
+//! and the overlay sprite (vanilla's `FluidRenderer.tesselate`).
 
 use haste_assets::Direction;
 use haste_core::BlockPos;
 
 use crate::fluid::geometry::{
-    corner_heights, flow_direction, should_render_backward_up_face, INSET, MAX_FLUID_HEIGHT,
+    corner_heights, fluid_flow, should_render_backward_up_face, INSET, MAX_FLUID_HEIGHT,
 };
 use crate::fluid::registry::{FluidState, FluidTable, FluidWorld};
 use crate::fluid_occlusion::is_face_occluded;
@@ -58,11 +58,20 @@ pub fn fluid_quads(
     // Faces are culled against the neighbour's occlusion shape (`isFaceOccludedByNeighbor`):
     // the bottom with vanilla's MAX_FLUID_HEIGHT, the top with the lowest corner (a full
     // block above hides only a full-height surface), each side with its higher corner.
+    // The bottom and the sides also go through `shouldRenderFace`, whose
+    // `isFaceOccludedBySelf` drops faces the fluid block's own state covers (the water
+    // surface inside a waterlogged top slab or stair).
     let occluded = |q: BlockPos, dir: Direction, height: f32| {
         is_face_occluded(dir, height, world.face_occluder(q, dir))
     };
+    let self_occluded = |dir: Direction| {
+        let opp = dir.opposite();
+        is_face_occluded(opp, 1.0, world.face_occluder(p, opp))
+    };
     let below = p.add(0, -1, 0);
-    let render_down = !same(below) && !occluded(below, Direction::Down, MAX_FLUID_HEIGHT);
+    let render_down = !same(below)
+        && !self_occluded(Direction::Down)
+        && !occluded(below, Direction::Down, MAX_FLUID_HEIGHT);
     let bottom = if render_down { INSET } else { 0.0 };
     let above = p.add(0, 1, 0);
     let min_h = h.iter().copied().fold(1.0f32, f32::min);
@@ -78,16 +87,17 @@ pub fn fluid_quads(
             [1.0, ne, 0.0],
         ];
         let corners = [[0.0f32, 0.0f32], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-        let [fx, fz] = flow_direction(h);
+        let [fx, fz] = fluid_flow(world, table, p, fluid);
         let (uvs, sprite) = if fx == 0.0 && fz == 0.0 {
             (corners, still)
         } else {
-            // Texture v runs along the flow, u across it; the window is the middle half of
-            // the flow sprite.
+            // Vanilla rotates the middle-half window of the flow sprite by
+            // `atan2(flow.z, flow.x) - pi/2`: v runs along the flow (u = 0.5 + rz*fx -
+            // rx*fz scaled, v = 0.5 + rx*fx + rz*fz scaled).
             let uvs = corners.map(|[x, z]| {
                 let (rx, rz) = (x - 0.5, z - 0.5);
                 [
-                    0.5 + 0.5 * (rx * -fz + rz * fx),
+                    0.5 + 0.5 * (rx * fz - rz * fx),
                     0.5 + 0.5 * (rx * fx + rz * fz),
                 ]
             });
@@ -133,7 +143,7 @@ pub fn fluid_quads(
     ];
     for (dir, o, a, b) in sides {
         let q = p.add(o[0], o[1], o[2]);
-        if same(q) || occluded(q, dir, a[2].max(b[2])) {
+        if same(q) || self_occluded(dir) || occluded(q, dir, a[2].max(b[2])) {
             continue;
         }
         let overlay = def.overlay && table.overlay(world.state(q));

@@ -13,6 +13,8 @@ use haste_core::view::BlockView;
 use haste_core::{BlockPos, Direction, EntityId, RegistryIndex};
 use haste_protocol::haste_core::game::GameMode;
 
+use crate::player::interact::UseAnimation;
+
 use super::camera::eye_in_lava;
 use super::weather::{biome_has_precipitation, rain_fog_sky_light};
 use super::{interpolate, skins};
@@ -248,6 +250,13 @@ pub struct FirstPersonView {
     pub item: Option<RegistryIndex>,
     /// (sky light, block light) at the eye position, `FirstPerson::light`'s order.
     pub light: (u8, u8),
+    /// The main hand is using an EAT/DRINK consumable with ticks left
+    /// (`LivingEntity.isUsingItem` + `getUseItemRemainingTicks` + `getUseAnimation`).
+    pub use_eat: bool,
+    /// `LivingEntity.getUseItemRemainingTicks` while a use runs (0 otherwise).
+    pub use_remaining: i32,
+    /// `Item.getUseDuration` of the item being used (0 otherwise).
+    pub use_duration: i32,
     /// Swing progress 0..1 over the swing's ticks (0 when the hand does not swing).
     pub attack: (f32, f32),
     /// Equip progress: 1 held, 0 while the item switches.
@@ -278,6 +287,9 @@ impl FirstPersonView {
         FirstPersonView {
             item,
             light: (world.sky_light(p), block_light),
+            use_eat: false,
+            use_remaining: 0,
+            use_duration: 0,
             attack: (0.0, 0.0),
             equip: (1.0, 1.0),
             x_bob: (0.0, 0.0),
@@ -308,6 +320,9 @@ impl FirstPersonView {
             sleeve,
             item: self.item,
             light: self.light,
+            use_eat: self.use_eat,
+            use_remaining: self.use_remaining,
+            use_duration: self.use_duration,
             attack: pair(self.attack),
             equip: pair(self.equip),
             x_bob: pair(self.x_bob),
@@ -353,6 +368,14 @@ pub(super) fn tick_hand(
         let mut fp =
             FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item(), on_fire);
         fp.with_hand(hand);
+        // `FirstPersonHandsAndItems.extractRenderState`: the use state the EAT/DRINK
+        // transform reads. Only the main hand is modelled, so an off-hand use is not
+        // distinguished (a later task).
+        fp.use_eat = p.is_using_item()
+            && p.use_item_remaining() > 0
+            && matches!(p.use_animation(), UseAnimation::Eat | UseAnimation::Drink);
+        fp.use_remaining = p.use_item_remaining();
+        fp.use_duration = p.use_duration();
         Some(fp)
     };
     first_person

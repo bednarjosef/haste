@@ -20,6 +20,8 @@ use crate::player::LocalPlayer;
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// Vanilla `LivingEntity.damageCooldownTime` per hit (the HUD heart blink's window).
+const DAMAGE_COOLDOWN_TICKS: u32 = 20;
 /// The server's correction of the vehicle we steer is only taken when it moved the boat this far
 /// (vanilla `ClientPacketListener.handleMoveVehicle` compares the distance to 1.0E-5).
 const VEHICLE_CORRECTION_EPSILON: f64 = 1.0e-5;
@@ -90,6 +92,12 @@ pub struct Session {
     /// server sent one, else the static one from the data generator reports): resolves the
     /// vehicle's type index to its name, for the passenger seat offset.
     pub entity_type_names: Vec<Identifier>,
+    /// The pickup particles (`take_item_entity`): the collected item/orb flying to the
+    /// collector for three ticks. Ticked here, published to the render thread each tick.
+    pub pickup_particles: Vec<crate::net::pickup::PickupParticle>,
+    /// The random vanilla's `ClientPacketListener.random` draws the pickup pitch and sound
+    /// seed from.
+    pickup_rng: haste_audio::random::LegacyRandom,
     /// Sound packets recorded this tick ([`crate::sound::record`]), drained by the game
     /// thread's sound output ([`crate::sound::Sounds::apply`]); cleared at `end_tick` when
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
@@ -113,6 +121,18 @@ pub struct Session {
     /// (vanilla's `hurtDir`, the `hurt_animation` packet's yaw).
     pub hurt_ticks: u32,
     pub hurt_dir: f32,
+    /// Vanilla `LivingEntity.damageCooldownTime` (20 per hit, 10 on a heal): the HUD heart
+    /// blink's gate (`Hud.extractPlayerHealth` blinks while it is positive), ticked down in
+    /// `end_tick`.
+    pub damage_cooldown: u32,
+    /// Vanilla `LocalPlayer.flashOnSetHealth`: the first `set_health` of a player (join,
+    /// respawn) only stores the health; drops from then on tilt and blink.
+    pub health_seen: bool,
+    /// The hurt sounds' random (vanilla's per-entity `RandomSource`): hurt pitch and sound
+    /// variant seeds.
+    hurt_rng: haste_audio::random::LegacyRandom,
+    /// Entity types whose hurt sound fell back to the generic one (log once per type).
+    unknown_hurt_types: HashSet<String>,
     /// Ticks since the local player died (vanilla's `deathTime`, 0 while alive).
     pub death_ticks: u32,
     /// Ticks the current use item has been held (vanilla's `getTicksUsingItem`), and the held
@@ -207,6 +227,8 @@ impl Session {
             world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
+            pickup_particles: Vec::new(),
+            pickup_rng: Session::new_pickup_rng(),
             sound_requests: Vec::new(),
             screen: crate::screen_effects::PortalEffects::default(),
             screen_probe: crate::screen_effects::WorldProbe::default(),
@@ -215,6 +237,15 @@ impl Session {
             old_fov_modifier: 0.0,
             hurt_ticks: 0,
             hurt_dir: 0.0,
+            damage_cooldown: 0,
+            health_seen: false,
+            hurt_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
+            unknown_hurt_types: HashSet::new(),
             death_ticks: 0,
             use_ticks: 0,
             use_item: None,
@@ -327,6 +358,8 @@ impl Session {
 
         // Hurt and death counters (LivingEntity.tick / tickDeath).
         self.hurt_ticks = self.hurt_ticks.saturating_sub(1);
+        // The damage cooldown the HUD heart blink reads (`LivingEntity.tick`).
+        self.damage_cooldown = self.damage_cooldown.saturating_sub(1);
         if p.health <= 0.0 {
             self.death_ticks = self.death_ticks.saturating_add(1);
         } else {
@@ -366,6 +399,11 @@ impl Session {
                 self.entity_id = EntityId(l.entity_id);
                 let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);
+                // A new player: no hurt tilt, no blink window, and the first
+                // `set_health` only stores the health (vanilla `flashOnSetHealth`).
+                self.hurt_ticks = 0;
+                self.damage_cooldown = 0;
+                self.health_seen = false;
                 self.breaking.clear();
                 self.lids.clear();
                 self.bells.clear();
@@ -400,7 +438,13 @@ impl Session {
                     ));
             }
         }
+        // `set_health`'s old value, for `LocalPlayer.hurtTo` after the player stored the
+        // new one (the health drop tilts the camera and starts the HUD blink's cooldown).
+        let health_before = matches!(p, P::SetHealth(_)).then(|| self.player.health);
         let player_packet = self.player.handle(&p, out);
+        if let (Some(old), P::SetHealth(h)) = (health_before, &p) {
+            damage::hurt_to(self, old, h.health);
+        }
         if player_packet {
             for (pos, state) in self.player.take_world_edits() {
                 world.set_block(pos, state);
@@ -436,7 +480,7 @@ impl Session {
         let Some(p) = self.apply_chunk_updates(p, world) else {
             return;
         };
-        let Some(p) = self.apply_entities(p, own, world, entities, out) else {
+        let Some(p) = self.apply_entities(p, own, world, entities, regs, out) else {
             return;
         };
         let Some(p) = self.apply_chat(p) else {
@@ -451,14 +495,17 @@ mod block_events;
 mod chat;
 pub mod chat_session;
 mod counters;
+pub(crate) mod damage;
 mod driver;
 mod effects;
 mod entities;
 mod fov;
+mod item_world;
 mod lightmap;
 mod misc;
 pub(crate) mod pack_prompt;
 mod particles;
+pub mod pickup;
 mod player_state;
 mod registries;
 mod session_tick;

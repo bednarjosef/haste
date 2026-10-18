@@ -163,6 +163,11 @@ pub trait EntitySink {
     fn metadata_value(&self, _id: EntityId, _index: u8) -> Option<&MetadataValue> {
         None
     }
+    /// The entity's age in ticks (`Entity.tickCount`), for the pickup particle's frozen item
+    /// spin and bob. None in fakes that do not track it.
+    fn entity_age(&self, _id: EntityId) -> Option<u32> {
+        None
+    }
     /// Position and rotation of an entity.
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)>;
     /// Hit box of an entity, for the crosshair (none in fakes by default).
@@ -178,6 +183,12 @@ pub trait EntitySink {
     fn clear(&mut self);
     /// `EntityStore::tick`.
     fn tick(&mut self);
+    /// `EntityStore::tick_in_world`: the tick with the world the dropped items move in
+    /// (`ItemEntity.tick`'s collision, friction and fluids). Fakes ignore the world.
+    fn tick_in_world(&mut self, world: &dyn haste_entity::item_entity::ItemWorld) {
+        let _ = world;
+        self.tick();
+    }
     /// `EntityStore::len`.
     fn len(&self) -> usize;
 }
@@ -291,6 +302,9 @@ impl EntitySink for EntityStore {
             .and_then(|e| e.metadata.get(index))
             .map(|e| &e.value)
     }
+    fn entity_age(&self, id: EntityId) -> Option<u32> {
+        self.get(id).map(|e| e.age)
+    }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.get(id).map(|e| (e.pos, e.yaw, e.pitch))
     }
@@ -308,6 +322,9 @@ impl EntitySink for EntityStore {
     }
     fn tick(&mut self) {
         EntityStore::tick(self)
+    }
+    fn tick_in_world(&mut self, world: &dyn haste_entity::item_entity::ItemWorld) {
+        EntityStore::tick_in_world(self, world)
     }
     fn len(&self) -> usize {
         EntityStore::len(self)

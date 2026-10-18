@@ -1,0 +1,27 @@
+# The attack indicator render smoke, two phases:
+# 1. the recharge bar: swings at the sky (nothing under the crosshair, so the clicks are pure
+#    attacks) and screenshots the bar under the crosshair as it fills. Each screenshot is
+#    preceded by its own click: saving a PNG stalls the frame loop longer than the bare hand's
+#    5-tick recharge, so a single click would be over before the shot.
+# 2. the full icon: the runner summons a still zombie 2.5 blocks ahead (inside the 3-block
+#    pick reach) and gives a diamond sword (a slow item: its 12.5 tick delay passes vanilla
+#    Hud.MIN_CROSSHAIR_ATTACK_SPEED's 5, unlike the bare hand's exactly 5).
+wait_until joined
+wait_until settled
+look 0 -60
+wait 40
+screenshot indicator-before
+click left 240 135
+screenshot indicator-bar-early
+click left 240 135
+wait 1
+screenshot indicator-bar-mid
+click left 240 135
+wait 2
+screenshot indicator-bar-late
+# the zombie is under the crosshair now (the runner summoned it): look at it and hold the sword
+look 0 10
+wait_until hotbar_item
+key 1
+wait 30
+screenshot indicator-full-icon
