@@ -108,8 +108,17 @@ public final class ServerDumps {
         o.add("collision", shapeBoxes(collision));
         VoxelShape outline = state.getShape(EmptyBlockGetter.INSTANCE, ORIGIN, EMPTY_CONTEXT);
         o.add("outline", shapeBoxes(outline));
+        // BlockState.getOcclusionShape: what neighbour/fluid face culling tests against
+        // (getShape by default, empty for the noOcclusion family, smaller for fences and
+        // the other overrides). Absent in dumps from before this field.
+        VoxelShape occlusion = state.getOcclusionShape();
+        o.add("occlusion", shapeBoxes(occlusion));
 
         o.addProperty("light", state.getLightEmission());
+        // BlockState.getLightDampening / propagatesSkylightDown: what the client light engine
+        // (LightEngine, SkyLightEngine) reads for every block it propagates through.
+        o.addProperty("light_dampening", state.getLightDampening());
+        o.addProperty("propagates_skylight_down", state.propagatesSkylightDown());
         o.addProperty("air", state.isAir());
         o.addProperty("opaque", state.isSolidRender());
         // EntityRenderer.extractShadowPiece skips INVISIBLE render shapes; RenderShape has only

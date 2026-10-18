@@ -505,6 +505,7 @@ fn every_tinted_quad_of_a_block_takes_its_blended_colour() {
         ),
         Arc::new(crate::fluid::FluidTable::empty()),
         Arc::new(AoTable::all_solid(states.len())),
+        Arc::new(crate::fluid::FluidOccluders::absent()),
     );
     struct Snowy;
     impl crate::tint::BiomeSource for Snowy {
@@ -633,6 +634,7 @@ fn table_generations_are_unique() {
         Arc::new(crate::tint::BiomeColors::default()),
         Arc::new(crate::fluid::FluidTable::empty()),
         Arc::new(AoTable::all_solid(0)),
+        Arc::new(crate::fluid::FluidOccluders::absent()),
     );
     assert_ne!(a.generation, c.generation);
     assert_ne!(b.generation, c.generation);

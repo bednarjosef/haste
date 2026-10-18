@@ -23,6 +23,7 @@ pub use tables::{AoTable, MeshTables};
 use haste_assets::RenderLayer;
 use haste_core::{BlockPos, BlockStateId, SectionPos};
 
+use crate::fluid_occlusion::Occluder;
 use crate::vertex::{pack_ao_shade, pack_light, PackedVertex};
 use lighting::{shade_index, vertex_light_for};
 use merge::{flush_staged, merge_face, MergeFace, MergeKey, MergeQuad, StagedQuad};
@@ -503,6 +504,8 @@ pub fn mesh_section_with(
 struct FluidView<'a> {
     snapshot: &'a MeshSnapshot,
     baked: &'a haste_assets::BakedBlockModels,
+    /// Per-state occlusion shapes (`fluid/occlusion.rs`).
+    occluders: &'a crate::fluid::FluidOccluders,
 }
 
 impl crate::fluid::FluidWorld for FluidView<'_> {
@@ -514,6 +517,11 @@ impl crate::fluid::FluidWorld for FluidView<'_> {
     }
     fn solid(&self, p: BlockPos) -> bool {
         crate::fluid::baked_solid(self.baked, self.snapshot.block_state(p))
+    }
+    fn face_occluder(&self, p: BlockPos, _dir: haste_assets::Direction) -> Occluder<'_> {
+        let state = self.snapshot.block_state(p);
+        self.occluders
+            .occluder(state, || self.baked.is_full_opaque(state))
     }
 }
 
@@ -539,6 +547,7 @@ fn mesh_fluid(
         let view = FluidView {
             snapshot: ctx.snapshot,
             baked: ctx.baked,
+            occluders: &ctx.tables.fluid_occluders,
         };
         crate::fluid::fluid_quads(&view, &ctx.tables.fluids, block_pos, fluid, &mut quads);
     }
