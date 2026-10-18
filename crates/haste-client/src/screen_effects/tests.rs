@@ -523,6 +523,80 @@ fn the_block_overlay_draws_the_blocks_particle_texture() {
 
 // ---- the worn item's overlay -------------------------------------------------
 
+// ---- the spectator -----------------------------------------------------------
+
+#[test]
+fn a_spectator_draws_neither_water_nor_fire_overlay() {
+    // `ScreenEffectRenderer.submit`: `firstPerson && !isSpectator` gates the water and
+    // fire overlays — a spectator inside a solid block sees the caves, not a screenful
+    // of stone, and no water or fire over the world either.
+    let e = view(ViewEffects {
+        eye_in_water: true,
+        on_fire: true,
+        spectator: true,
+        ..Default::default()
+    });
+    let mut out = Vec::new();
+    frame(0.5, &e).append_to(&mut out);
+    assert!(out.is_empty(), "no level-pass overlays for a spectator");
+}
+
+/// The probe over a world of solid stone: the same world, once as a walking player (the
+/// overlay is found) and once as a spectator (`LevelExtractor.getViewBlockingState`
+/// answers nothing while `noPhysics`). Needs the data generator reports in the cache.
+#[test]
+#[ignore = "needs cache/datagen/26.3/reports (GameData::load)"]
+fn the_probe_skips_the_view_blocking_block_for_a_spectator() {
+    let data = crate::net::load_game_data().unwrap();
+    let dim = haste_protocol::haste_core::game::DimensionInfo::overworld();
+    let mut world = haste_world::World::new_with_biomes(dim.clone(), data.clone(), 67);
+    let stone = haste_core::BlockStateId(1);
+    let c = haste_world::chunk::synthetic_chunk_data(
+        haste_core::ChunkPos::new(0, 0),
+        dim.min_section(),
+        dim.section_count(),
+        |_, _, _, _| stone,
+    );
+    world.load_chunk(&c).unwrap();
+    // `causes_suffocation` on stone, so the stone around the eye is view-blocking.
+    let index = data
+        .blocks
+        .block_index(data.blocks.block_of(stone))
+        .unwrap();
+    let tags = haste_physics::mining::BlockTags::new(vec![(
+        Identifier::minecraft("causes_suffocation"),
+        vec![index.0 as i32],
+    )]);
+    let probe = |spectator: bool| {
+        Probe {
+            world: &world,
+            shapes: &data.shapes,
+            blocks: &data.blocks,
+            tags: Some(&tags),
+            eye: glam::DVec3::new(0.5, 0.6, 0.5),
+            feet: glam::DVec3::new(0.5, 0.0, 0.5),
+            bb_width: 0.6,
+            bb_height: 1.8,
+            scale: 1.0,
+            spectator,
+        }
+        .sample()
+    };
+    use haste_core::view::BlockView as _;
+    assert_eq!(
+        world.block_state(haste_core::BlockPos::new(0, 0, 0)),
+        stone,
+        "the eye block is stone"
+    );
+    assert!(
+        probe(false).block_overlay.is_some(),
+        "a walking player in stone sees the overlay"
+    );
+    let s = probe(true);
+    assert!(s.block_overlay.is_none(), "a spectator sees through it");
+    assert!(!s.in_fire && !s.in_powder_snow && !s.in_portal);
+}
+
 #[test]
 fn only_the_carved_pumpkin_hides_the_screen() {
     assert_eq!(

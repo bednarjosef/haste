@@ -13,7 +13,8 @@
 # scripts/vanilla-rcon.sh setup. Run once before measuring so the server has generated the
 # area (the first visit generates chunks, which would slow whichever client comes first).
 # env: HASTE_BENCH_WIDTH/HEIGHT (default 1600x900), HASTE_BENCH_RUNS (default 1: runs per
-#      client per render distance, alternating Haste and vanilla)
+#      client per render distance, alternating Haste and vanilla), HASTE_BENCH_SPOT ("x y z yaw
+#      pitch", default the land view below)
 # Output: target/bench-vs-vanilla/<time>/ (per-run JSON, logs, memory samples, summary.txt).
 set -euo pipefail
 PORT=${1:-25620}
@@ -29,8 +30,11 @@ GAME="$CACHE/bench-haste-game"
 mkdir -p "$OUT" "$GAME"
 cd "$ROOT"
 
-# The fps_idle spot and view (tools/recorder-mod/scenarios/bench_spot.txt).
-X=9.5 Y=71 Z=6.5 YAW=0 PITCH=10
+# The view both clients measure: 30 blocks above the forest island north-east of spawn, looking
+# south over forest, beaches and water to the horizon (the old fps_idle spot, 9.5 71 6.5, looks
+# mostly at open ocean). Both players are spectators there, so neither falls. The vanilla
+# scenario (tools/recorder-mod/scenarios/bench_spot.txt) gets the same spot below.
+read -r X Y Z YAW PITCH <<< "${HASTE_BENCH_SPOT:-144.5 100 -191.5 180 15}"
 
 echo "== building release haste and the recorder mod"
 cargo build --release -q --bin haste
@@ -58,10 +62,15 @@ run_haste() {
   local rd=$1 tag=$2
   "$ROOT/scripts/vanilla-options.sh" "$GAME/options.txt" "$W" "$H" "renderDistance:$rd" maxFps:260
   echo "-- haste rd $rd ($tag), load $(cut -d' ' -f1-3 /proc/loadavg)"
-  # Teleport the player to the spot while it joins (the bench waits for --pos).
+  # Teleport the player to the spot once it has joined (the bench waits for --pos), and stop
+  # as soon as it is there: a teleport during the measurement would show up as a hitch.
   ( for _ in $(seq 120); do
+      "$ROOT/scripts/vanilla-rcon.sh" --port "$PORT" "gamemode spectator haste" >/dev/null 2>&1 || true
       "$ROOT/scripts/vanilla-rcon.sh" --port "$PORT" "tp haste $X $Y $Z $YAW $PITCH" >/dev/null 2>&1 || true
       sleep 1
+      "$ROOT/scripts/vanilla-rcon.sh" --port "$PORT" \
+        "execute if entity @a[name=haste,x=$X,y=$Y,z=$Z,distance=..0.5]" 2>/dev/null \
+        | grep -q "Test passed" && break
     done ) &
   local tp=$!
   HASTE_GAME_DIR="$GAME" target/release/haste --server "127.0.0.1:$PORT" --username haste \
@@ -106,8 +115,9 @@ run_vanilla() {
   grep -h "frametimes" "$OUT/vanilla-rd$rd-$tag.log" | tail -1 || true
 }
 
-# The bench_spot scenario with this run's measuring time.
-sed "s/^frametimes 30 /frametimes $SECS /" "$ROOT/tools/recorder-mod/scenarios/bench_spot.txt" > "$OUT/bench_spot.txt"
+# The bench_spot scenario with this run's spot and measuring time.
+sed -e "s/^frametimes 30 /frametimes $SECS /" -e "s/^cmd tp @s .*/cmd tp @s $X $Y $Z $YAW $PITCH/" \
+  "$ROOT/tools/recorder-mod/scenarios/bench_spot.txt" > "$OUT/bench_spot.txt"
 
 for rd in $RDS; do
   for run in $(seq "$RUNS"); do

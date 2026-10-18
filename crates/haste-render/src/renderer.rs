@@ -33,6 +33,7 @@ mod terrain_feed;
 #[cfg(test)]
 mod tests;
 mod textures;
+mod visible_sections;
 
 /// Camera for one frame (docs/INTERFACES.md FrameInput).
 #[derive(Clone, Copy, Debug)]
@@ -257,6 +258,9 @@ pub struct Renderer {
     mesher: Mesher,
     /// Reused buffer for meshes drained from the mesher each frame.
     drain_buf: Vec<SectionMesh>,
+    /// Dirty sections held back by mesh back-pressure (see `update_world_from`):
+    /// submitted first on the next call.
+    mesh_carry: Vec<SectionPos>,
     /// Grass/foliage colormaps from the assets (biome colours are resolved against them).
     colormaps: crate::tint::Colormaps,
     sections: crate::section_slab::SectionSlab,
@@ -270,6 +274,13 @@ pub struct Renderer {
     /// same with its background full update).
     section_vis: Arc<Mutex<ahash::AHashMap<(ChunkPos, i32), crate::occlusion::VisibilitySet>>>,
     visible_mask: crate::occlusion::VisibleMask,
+    /// The camera entity is a spectator (`Camera.extractRenderState` reads it off the player),
+    /// for the solid-block rule below.
+    camera_spectator: bool,
+    /// Whether this frame's sections are drawn from the occlusion walk's mask. Vanilla
+    /// `Camera.extractRenderState` turns `smartCull` off for a spectator camera inside a
+    /// solid-render block, so the caves around it draw instead of an empty screen.
+    cull_sections: bool,
     /// Camera section and render distance `visible_mask` was computed for.
     visible_for: Option<(SectionPos, i32)>,
     /// Camera section and render distance the in-flight walk is computing.

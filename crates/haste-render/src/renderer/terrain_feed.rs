@@ -11,6 +11,12 @@ use crate::mesher::SectionMesh;
 
 use super::Renderer;
 
+/// Cap on sections meshed but not yet uploaded (the mesher's pending snapshots, queued
+/// results and in-flight jobs). At render distance 32 one section's mesh averages ~50 KiB,
+/// so this bounds the pipeline's RAM to ~150 MiB instead of the whole view distance's
+/// meshes (~1.4 GiB) piling up behind the per-frame upload budget.
+const MESH_BACKLOG_CAP: usize = 3072;
+
 impl Renderer {
     /// The biome table of the joined server (synced `minecraft:worldgen/biome` registry, index =
     /// biome id). Applies to sections meshed afterwards: call it before the first chunks.
@@ -67,6 +73,7 @@ impl Renderer {
             self.view_distance = view_distance;
             self.visible_for = None;
         }
+        self.arenas.set_start_tier_for(view_distance);
         for pos in dirty {
             self.mesher.submit_with_biomes(world, biomes, *pos);
         }
@@ -75,6 +82,12 @@ impl Renderer {
 
     /// Like `update_world`, but the mesh workers capture the snapshots themselves from
     /// `source` (the render thread neither reads the world nor holds its lock).
+    ///
+    /// Back-pressure: a mesh result holds its vertex and index bytes, and the workers mesh
+    /// faster than the per-frame upload budget drains, so without a cap a big load (render
+    /// distance 32 is ~28k sections) piles up GiB of RAM before the uploads catch up. Over
+    /// [`MESH_BACKLOG_CAP`] the dirty sections wait in `mesh_carry` — positions, not
+    /// bytes — and are submitted as the uploads drain.
     pub fn update_world_from(
         &mut self,
         source: &Arc<dyn crate::mesher::SnapshotSource>,
@@ -86,32 +99,64 @@ impl Renderer {
             self.view_distance = view_distance;
             self.visible_for = None;
         }
-        self.mesher.submit_from(source, dirty);
+        self.arenas.set_start_tier_for(view_distance);
+        let room = MESH_BACKLOG_CAP.saturating_sub(self.mesher.pending_len());
+        if room > 0 {
+            let mut jobs = std::mem::take(&mut self.mesh_carry);
+            if jobs.len() > room {
+                // The rest stays carried, in queue order (the feed queued nearest first).
+                self.mesh_carry = jobs.split_off(room);
+            }
+            jobs.extend_from_slice(dirty);
+            self.mesher.submit_from(source, &jobs);
+        } else if !dirty.is_empty() {
+            self.mesh_carry.extend_from_slice(dirty);
+        }
         self.last_uploads = self.upload_finished();
     }
 
-    /// Uploads finished meshes for up to 2 ms; returns (sections uploaded, bytes written).
+    /// Uploads finished meshes; returns (sections uploaded, bytes written). The budget is
+    /// 2 ms of the frame, extended to 8 ms while a backlog stands (a heavy load's frames
+    /// are warm-up — the alternative is the backlog's mesh bytes staying in RAM until the
+    /// 2 ms slices drain it). The staging belt's copy commands go into one encoder that is
+    /// submitted at the end of the batch (before this frame's render pass reads the arenas).
     fn upload_finished(&mut self) -> (u32, u64) {
         let started = std::time::Instant::now();
+        let budget = if self.mesher.pending_len() > 1024 {
+            std::time::Duration::from_millis(8)
+        } else {
+            std::time::Duration::from_millis(2)
+        };
         let mut uploads = 0;
         let mut bytes = 0;
         let mut batch = std::mem::take(&mut self.drain_buf);
-        while started.elapsed() < std::time::Duration::from_millis(2) {
+        let mut encoder: Option<wgpu::CommandEncoder> = None;
+        while started.elapsed() < budget {
             self.mesher.drain(16, &mut batch);
             if batch.is_empty() {
                 break;
             }
             for mesh in batch.drain(..) {
                 bytes += mesh.vertex_bytes() + mesh.index_bytes();
-                self.upload_mesh(mesh);
+                let encoder = encoder.get_or_insert_with(|| {
+                    self.gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("mesh-upload"),
+                        })
+                });
+                self.upload_mesh(mesh, encoder);
                 uploads += 1;
             }
         }
         self.drain_buf = batch;
+        if let Some(encoder) = encoder {
+            self.arenas.end_batch(encoder);
+        }
         (uploads, bytes)
     }
 
-    fn upload_mesh(&mut self, mesh: SectionMesh) {
+    fn upload_mesh(&mut self, mesh: SectionMesh, encoder: &mut wgpu::CommandEncoder) {
         let pos = mesh.pos;
         let si = pos.y - self.min_section;
         if mesh.is_removal() {
@@ -141,7 +186,7 @@ impl Renderer {
         if let Some(old) = self.sections.remove(&pos) {
             self.arenas.free(&old);
         }
-        if let Some(resident) = self.arenas.upload(&mesh) {
+        if let Some(resident) = self.arenas.upload(&mesh, encoder) {
             self.sections.insert(resident);
         }
     }

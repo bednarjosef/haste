@@ -135,6 +135,13 @@ impl Ui {
         self.state(|s| s.vitals.eye_in_water = v);
     }
 
+    /// The player's damage cooldown (vanilla `LivingEntity.damageCooldownTime`, set by a
+    /// hit or a heal and ticked down by the session): the HUD's heart blink gates on it
+    /// (`Hud.extractPlayerHealth` blinks while it is positive).
+    pub fn set_damage_cooldown(&self, ticks: i32) {
+        self.state(|s| s.vitals.damage_cooldown_ticks = ticks);
+    }
+
     /// The mount HUD's values for this tick (vanilla `Hud`: the vehicle's hearts, the charged
     /// jump bar), `None` on foot.
     pub fn set_mount_hud(&self, mount: Option<haste_jvm::MountHud>) {

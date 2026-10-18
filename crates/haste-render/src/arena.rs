@@ -128,17 +128,24 @@ pub struct MeshArenas {
     queue: Arc<wgpu::Queue>,
     pub(crate) arenas: Vec<Arena>,
     scratch: Vec<u32>,
+    /// Staging for mesh uploads: one pool of recycled host-mapped chunks instead of
+    /// wgpu's per-`write_buffer` staging. Measured at render distance 32: one
+    /// `queue.write_buffer` per mesh (two per section) leaves ~3 GiB of 64 MiB driver
+    /// staging blocks resident; the belt recycles the same chunks every frame.
+    belt: wgpu::util::StagingBelt,
     /// Current size tier (see [`arena_vertices`]).
     tier: usize,
 }
 
 impl MeshArenas {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> MeshArenas {
+        let belt = wgpu::util::StagingBelt::new(wgpu::Device::clone(&*device), 4 * 1024 * 1024);
         MeshArenas {
             device,
             queue,
             arenas: Vec::new(),
             scratch: Vec::new(),
+            belt,
             tier: 0,
         }
     }
@@ -191,8 +198,14 @@ impl MeshArenas {
         self.arenas.len() as u32 - 1
     }
 
-    /// Uploads a mesh; None for an empty one (nothing to draw).
-    pub fn upload(&mut self, mesh: &SectionMesh) -> Option<ResidentSection> {
+    /// Uploads a mesh through the staging belt into `encoder` (copy commands; the caller
+    /// submits the encoder and ends the batch with [`MeshArenas::end_batch`]); None for
+    /// an empty one (nothing to draw).
+    pub fn upload(
+        &mut self,
+        mesh: &SectionMesh,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<ResidentSection> {
         let vcount = mesh.vertices.len() as u32;
         let icount: u32 = mesh.layers.iter().map(|(_, i)| i.len() as u32).sum();
         if vcount == 0 || icount == 0 {
@@ -243,11 +256,14 @@ impl MeshArenas {
             }
         };
         let a = &self.arenas[arena as usize];
-        self.queue.write_buffer(
+        let mut view = self.belt.write_buffer(
+            encoder,
             &a.vertex,
             base_vertex as u64 * std::mem::size_of::<PackedVertex>() as u64,
-            bytemuck::cast_slice(&mesh.vertices),
+            std::num::NonZeroU64::new(vcount as u64 * std::mem::size_of::<PackedVertex>() as u64)
+                .unwrap(),
         );
+        view.copy_from_slice(bytemuck::cast_slice(&mesh.vertices));
         self.scratch.clear();
         let mut layers = Vec::with_capacity(mesh.layers.len());
         for (layer, indices) in &mesh.layers {
@@ -258,11 +274,13 @@ impl MeshArenas {
             });
             self.scratch.extend_from_slice(indices);
         }
-        self.queue.write_buffer(
+        let mut view = self.belt.write_buffer(
+            encoder,
             &a.index,
             index_start as u64 * 4,
-            bytemuck::cast_slice(&self.scratch),
+            std::num::NonZeroU64::new(icount as u64 * 4).unwrap(),
         );
+        view.copy_from_slice(bytemuck::cast_slice(&self.scratch));
         let origin = mesh.pos.block_min();
         let world = |p: [f32; 3]| {
             [
@@ -281,6 +299,31 @@ impl MeshArenas {
             layers,
             aabb: (world(mesh.aabb.0), world(mesh.aabb.1)),
         })
+    }
+
+    /// Ends an upload batch: the belt's pending chunk copies go into `encoder`, and the
+    /// encoder is submitted (a queue submit is FIFO, so the copies land before the frame's
+    /// later render pass reads the arenas). Call once per frame after the last `upload`.
+    pub fn end_batch(&mut self, encoder: wgpu::CommandEncoder) {
+        self.belt.finish();
+        self.queue.submit(Some(encoder.finish()));
+        self.belt.recall();
+    }
+
+    /// The starting arena tier for a view distance, applied while no arena exists yet (on
+    /// join): a big render distance would otherwise climb the 16/32/64 MiB ladder first,
+    /// and every small arena it fills along the way stays allocated for the session — the
+    /// slack is GPU memory (measured at render distance 32: ~240 MiB).
+    pub(crate) fn set_start_tier_for(&mut self, view_distance: i32) {
+        if !self.arenas.is_empty() {
+            return;
+        }
+        self.tier = match view_distance {
+            ..=8 => 0,
+            9..=16 => 1,
+            17..=24 => 2,
+            _ => 3,
+        };
     }
 
     pub fn free(&mut self, s: &ResidentSection) {

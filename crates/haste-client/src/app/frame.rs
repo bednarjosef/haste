@@ -283,9 +283,9 @@ impl App {
             spin: view.screen.spin_warp(partial),
             weather,
         };
-        // Outline boxes of the target and the states of breaking blocks (one short read lock),
-        // then the particles (the per-tick snapshot; no locks).
+        // Outline boxes of the target and the states of breaking blocks (one short read lock).
         let session = self.session.as_ref().expect("the game path above");
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(
             &*session.shared.world.read(),
             &session.shared.data.shapes,
@@ -316,9 +316,9 @@ impl App {
         // The windowed bench's sample: recorded once the still camera is held (the settle
         // frames before it are warm-up, not measurements). The run ends with the window.
         if let (Some(bench), Ok(stats)) = (&mut self.bench, &result) {
-            if let Some(started) = bench.started {
+            if bench.started.is_some() {
                 let prev_drawn = bench.samples.last().map_or(0, |s| s.sections_drawn);
-                bench.record(BenchSample {
+                let sample = BenchSample {
                     frame_ms: stats.frame_ms,
                     sections_drawn: stats.chunk_sections_drawn,
                     sections_total: stats.chunk_sections_total,
@@ -330,10 +330,8 @@ impl App {
                     upload_bytes: stats.upload_bytes,
                     indices_drawn: stats.indices_drawn,
                     index: bench.samples.len() as u32,
-                });
-                if started.elapsed().as_secs_f32() >= bench.seconds {
-                    self.quitting = true;
-                }
+                };
+                self.quitting |= bench.record(sample, session, renderer);
             } else if bench.camera.is_some() {
                 bench.started = Some(Instant::now());
             }

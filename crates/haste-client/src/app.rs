@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use glam::DVec3;
-use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
+use haste_protocol::haste_core::gui::GuiFrame;
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
 use haste_protocol::haste_core::{
@@ -46,6 +46,7 @@ use weather_columns::{extract_weather, WeatherColumnCache};
 use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
 use crate::script;
+use crate::script_frame::log_script_frame;
 use crate::ui::keys;
 use crate::Args;
 use haste_jvm::JvmHost;
@@ -553,6 +554,7 @@ impl Session {
             data,
             world,
             entities,
+            (login.entity_id, login.profile.uuid),
             view_distance,
             haste_render::Particles::new(particle_types.clone()),
             game::skins::SkinManager::new(game_dir().join("skins"), login.profile.uuid),
@@ -890,8 +892,7 @@ impl WorldFeed {
             store.render_instances(partial, &mut self.instances);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
-        self.instances
-            .push(game::player_instance(local.0, view, partial, &own_skin));
+        game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);
         // The pickup particles (`take_item_entity`): one item/orb instance each at the eased
         // position, drawn through the dropped-item renderer (vanilla `ItemPickupParticleGroup`).
         game::pickup::instances(shared, partial, &mut self.instances);
@@ -908,10 +909,9 @@ impl WorldFeed {
 
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
-    /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
-    /// one happens (no allocation per frame).
-    /// The first-person hand only exists in the first-person perspective (F5 hides it) and
-    /// while the HUD is shown (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
+    /// comparing the per-tick part is enough; the skin is cloned only when one happens.
+    /// The hand only exists in first person (F5 hides it) and while the HUD is shown
+    /// (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
     fn set_first_person(
         &mut self,
         shared: &Shared,
@@ -1779,8 +1779,7 @@ impl InputRouter {
         false
     }
 
-    /// The wheel moved by `(dx, dy)` notches at GUI-scaled `(x, y)`. Returns `true` when the
-    /// UI used it.
+    /// The wheel moved by `(dx, dy)` notches at GUI-scaled `(x, y)`; `true` when the UI used it.
     fn wheel(
         &mut self,
         dx: f64,
@@ -1791,6 +1790,21 @@ impl InputRouter {
         shared: &Shared,
     ) -> bool {
         self.mouse = (x, y);
+        // Vanilla `MouseHandler.onScroll`: an open screen takes the wheel first; then, for a
+        // spectator, it is the flying speed — before the UI's own no-screen hotbar handling.
+        let screen_open = ui.is_some_and(|ui| ui.screen_open());
+        if !screen_open && shared.view.lock().spectator {
+            if !self.grabbed {
+                return false;
+            }
+            self.scroll += dy;
+            let steps = self.scroll.trunc() as i32;
+            if steps != 0 {
+                self.scroll -= steps as f64;
+                shared.input.lock().spectator_scroll += steps as f32;
+            }
+            return true;
+        }
         if let Some(ui) = ui {
             if ui.scroll(x, y, dx, dy) {
                 return true;
@@ -1803,7 +1817,6 @@ impl InputRouter {
         let steps = self.scroll.trunc() as i32;
         if steps != 0 {
             self.scroll -= steps as f64;
-            // Scrolling down (negative) moves to the next slot, wrapping 0..=8.
             let current = self
                 .hotbar
                 .map_or(shared.view.lock().held_slot, |s| s as i32);
@@ -2249,8 +2262,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
-    // The render thread's weather extraction buffer and per-tick column cache (both
-    // reused, no allocation after warmup).
+    // The render thread's weather extraction buffer and per-tick column cache (both reused).
     let mut weather_frame = haste_render::WeatherFrame::default();
     let mut weather_cache = WeatherColumnCache::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -2359,14 +2371,14 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             gui: &gui,
             sky,
             partial_tick: partial,
-            // Vanilla's F1 hides the block outline too (`GameRenderer
-            // .shouldRenderBlockOutline` checks `hud.isHidden`).
+            // Vanilla's F1 hides the block outline too (`shouldRenderBlockOutline`: hud hidden).
             block_target: hud_on.then_some(block_target).flatten(),
             breaking: &breaking,
             camera_entity: (!perspective.draws_player()).then_some(session.local.0),
             spin,
             weather,
         };
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
@@ -2487,33 +2499,6 @@ fn mouse_button_id(button: script::MouseButton) -> i32 {
     }
 }
 
-/// Prints the text, item and HUD-sprite facts of a script screenshot's frame. The check scripts
-/// grep these lines as evidence instead of opening the PNGs.
-fn log_script_frame(frame: &GuiFrame, name: &str, item_names: &[Identifier]) {
-    let mut hotbar = false;
-    let mut items = Vec::new();
-    for c in &frame.commands {
-        match c {
-            GuiCommand::Text { text, .. } | GuiCommand::StyledText { text, .. } => {
-                println!("script text[{name}]: {text}");
-            }
-            GuiCommand::Sprite { sprite, .. } if sprite.path() == "hud/hotbar" => hotbar = true,
-            GuiCommand::Item { item, .. } => {
-                // The item's registry name (creative inventory checks grep for these).
-                if let Some(id) = item_names.get(item.0 as usize) {
-                    items.push(id.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    println!(
-        "script frame[{name}]: hotbar={}, items=[{}]",
-        if hotbar { "yes" } else { "no" },
-        items.join(",")
-    );
-}
-
 /// `--script FILE`: with `--server`, join like `--screenshot` and drive the parsed script's
 /// actions every game tick (20 Hz) through the same input routing the window uses
 /// (`InputRouter`: the UI first, then the game). Without one, menu mode: the title screen in
@@ -2586,8 +2571,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
-    // The render thread's weather extraction buffer and per-tick column cache (both
-    // reused, no allocation after warmup).
+    // The render thread's weather extraction buffer and per-tick column cache (both reused).
     let mut weather_frame = haste_render::WeatherFrame::default();
     let mut weather_cache = WeatherColumnCache::default();
     // The script's client is "grabbed" (game input goes through, like an active window).
@@ -3129,6 +3113,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             spin,
             weather,
         };
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);

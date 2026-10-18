@@ -101,6 +101,9 @@ pub(super) fn tick_ui(driver: &mut NetDriver, shared: &Shared, ui_out: &mut Vec<
         // The mount HUD's values for this tick (the vehicle's hearts and the charged jump bar),
         // from the player's ride, the entity store and the synced attributes.
         ui.set_mount_hud(driver.session.mount_hud(&*shared.entities.read()));
+        // The damage cooldown (vanilla `LivingEntity.damageCooldownTime`): the HUD's heart
+        // blink gates on it, so it is mirrored every tick.
+        ui.set_damage_cooldown(driver.session.damage_cooldown as i32);
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
         // the server itself; `set_selected_slot` also marks it sent so the UI does not send it
         // a second time). The server's `set_held_slot` reaches both sides alike.
