@@ -74,6 +74,7 @@ fn data() -> &'static haste_data::GameData {
                     "spyglass",
                     "shield",
                     "potion",
+                    "iron_spear",
                 ]),
                 entries(&[
                     "speed",
@@ -83,7 +84,12 @@ fn data() -> &'static haste_data::GameData {
                     "nausea",
                     "darkness",
                 ]),
-                entries(&["tool", "enchantments"]),
+                entries(&[
+                    "tool",
+                    "enchantments",
+                    "piercing_weapon",
+                    "minimum_attack_charge",
+                ]),
                 entries(&["efficiency", "sharpness"]),
                 entries(&[
                     "item",
@@ -1778,4 +1784,127 @@ fn drop_predicts_the_removal_and_swings_and_runs_independently() {
         ..Default::default()
     });
     assert!(out.is_empty(), "{out:?}");
+}
+
+/// A stack's own `piercing_weapon` patch: the item registry index 11 is `iron_spear`.
+fn spear_patch() -> bytes::Bytes {
+    use haste_protocol::wire::Writer;
+    let mut weapon = Writer::new();
+    weapon.bool(true); // deals_knockback
+    weapon.bool(false); // dismounts
+    let sound = haste_protocol::wire::SoundEvent {
+        name: Identifier::minecraft("item.spear.attack"),
+        fixed_range: None,
+    };
+    weapon.option(&Some(sound), |w, v| {
+        w.identifier(&v.name);
+        w.option(&v.fixed_range, |w, r| w.f32(*r));
+    });
+    weapon.option(&None::<haste_protocol::wire::SoundEvent>, |_, _| {});
+    let mut patch = Writer::new();
+    patch.len_prefix(1);
+    patch.len_prefix(0);
+    patch.var_int(2); // minecraft:piercing_weapon
+    patch.bytes(&weapon.buf);
+    patch.into_inner().into()
+}
+
+/// `Minecraft.startAttack` with a piercing weapon (`MultiPlayerGameMode.piercingAttack`):
+/// the click sends the STAB `player_action` (pos zeroed, DOWN face, no sequence) with no
+/// block or entity packet, resets only the attack ticker, swings, and plays the weapon's
+/// draw sound; `Minecraft.continueAttack` does nothing for such an item, held or released.
+#[test]
+fn a_spear_stabs_instead_of_attacking_or_breaking() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = ItemStackData {
+        count: 1,
+        item: Some(RegistryIndex(11)), // iron_spear
+        components_raw: spear_patch(),
+    };
+    r.p.int.prepare(data());
+    let out = r.tick(ATTACK);
+    assert_eq!(
+        actions(&out),
+        [(action::STAB, 0)],
+        "the spear stabs, it does not break"
+    );
+    assert!(!out.iter().any(|p| matches!(p, ServerboundPlay::Punch(_))));
+    assert!(r.p.hand.is_swinging(), "piercingAttack swings");
+    let sounds = r.p.take_own_sound_requests().collect::<Vec<_>>();
+    assert_eq!(sounds.len(), 1, "the weapon's draw sound plays");
+    // Held: continueAttack does nothing for a piercing weapon (no break, no punch).
+    for _ in 0..5 {
+        assert!(r.tick(ATTACK).is_empty());
+    }
+    // Released: still nothing (the piercing check wraps even stopDestroyBlock).
+    assert!(r.tick(InteractInput::default()).is_empty());
+}
+
+/// An item's default `minecraft:piercing_weapon` (the item reports) makes it stab too.
+#[test]
+fn a_spear_from_the_item_defaults_stabs() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    let mut ic = (*item_components()).clone();
+    ic.insert_piercing_weapon(Identifier::minecraft("iron_spear"), None);
+    r.p.int.set_item_components(std::sync::Arc::new(ic));
+    r.p.int.hotbar[0] = item(11);
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::STAB, 0)]);
+    // No sound: the report named none.
+    assert!(r.p.take_own_sound_requests().next().is_none());
+}
+
+/// `Player.cannotAttackWithItem`: an item with `minecraft:minimum_attack_charge` blocks the
+/// click below that charge (no packet, no swing) and allows it once charged.
+#[test]
+fn minimum_attack_charge_blocks_the_click_below_it() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    let mut ic = (*item_components()).clone();
+    // A 0.5 charge: half the delay ticks must pass first (bare hands charge in 5).
+    ic.insert_minimum_attack_charge(Identifier::minecraft("stick"), 0.5);
+    r.p.int.set_item_components(std::sync::Arc::new(ic));
+    r.p.int.hotbar[0] = item(3); // stick
+    let tick_hand = |r: &mut Rig| {
+        r.p.hand.tick(
+            0.0,
+            (0.0, 90.0),
+            true,
+            false,
+            crate::hand::HeldStack::of(r.p.main_hand().item),
+            4.0,
+        );
+    };
+    // Fully charged: the click attacks the entity under the crosshair
+    // (`MultiPlayerGameMode.attack` resets the attack strength ticker).
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    for _ in 0..10 {
+        tick_hand(&mut r);
+    }
+    let out = r.tick(ATTACK);
+    assert!(matches!(out[0], ServerboundPlay::Attack(_)));
+    // A fresh click at nothing this instant is below the 0.5 requirement and is swallowed:
+    // no miss swing, no punch, no missTime (an unblocked miss would send a punch and freeze
+    // the next ten clicks).
+    r.tick(InteractInput::default());
+    r.entities.clear();
+    r.w = TestWorld::new();
+    let out = r.tick(ATTACK);
+    assert!(out.is_empty(), "{out:?}");
+    // Not a miss either: the next click (still below the charge) is swallowed the same way.
+    r.tick(InteractInput::default());
+    let out = r.tick(ATTACK);
+    assert!(out.is_empty(), "{out:?}");
+    // Once the strength recovers (3 of 5 delay ticks), the click is a normal miss again.
+    for _ in 0..3 {
+        tick_hand(&mut r);
+    }
+    r.tick(InteractInput::default());
+    let out = r.tick(ATTACK);
+    assert!(matches!(out[0], ServerboundPlay::Punch(_)), "{out:?}");
 }

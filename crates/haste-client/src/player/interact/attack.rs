@@ -4,11 +4,12 @@
 
 use haste_core::game::GameMode;
 use haste_core::view::{BlockPhysics, BlockView};
+use haste_core::Direction;
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ServerboundPlay;
 
 use super::super::LocalPlayer;
-use super::{InteractEnv, Target, DESTROY_DELAY, MISS_TIME};
+use super::{action, InteractEnv, Target, DESTROY_DELAY, MISS_TIME};
 
 impl LocalPlayer {
     /// `Minecraft.startAttack`: one left click. Returns vanilla's `endAttack` — the block broke
@@ -40,6 +41,32 @@ impl LocalPlayer {
             out.push(ServerboundPlay::SpectatorAction(sb::SpectatorAction {
                 entity: target,
             }));
+            return true;
+        }
+        // `Player.cannotAttackWithItem` (any item, not just spears): an attack-strength
+        // requirement from `minecraft:minimum_attack_charge` the player has not reached yet
+        // blocks the click outright — no swing, no missTime.
+        let minimum_charge = self.held_minimum_attack_charge();
+        if minimum_charge > 0.0 && self.hand.attack_strength_scale(0.0) < minimum_charge {
+            return false;
+        }
+        // A piercing weapon (spear) stabs instead of attacking or breaking
+        // (`MultiPlayerGameMode.piercingAttack`): STAB with a zeroed pos and DOWN face, no
+        // sequence, `Player.onAttack` (the attack ticker's own half), the swing and the
+        // weapon's draw sound; no block or entity packet. `endAttack` (true) skips
+        // continueAttack this tick.
+        if let Some(sound) = self.held_piercing().map(|s| s.map(str::to_owned)) {
+            out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
+                status: action::STAB,
+                pos: haste_core::BlockPos::new(0, 0, 0),
+                face: Direction::Down as u8,
+                sequence: 0,
+            }));
+            self.hand.reset_only_attack_strength_ticker();
+            self.hand.swing();
+            if let Some(sound) = sound {
+                self.piercing_sound(&sound);
+            }
             return true;
         }
         // `Minecraft.startAttack` swings on every attack, whatever the crosshair is on.
@@ -90,6 +117,11 @@ impl LocalPlayer {
             self.int.miss_time = 0;
         }
         if self.int.miss_time > 0 || self.int.is_using_item {
+            return;
+        }
+        // `Minecraft.continueAttack` does nothing at all for a piercing weapon: no breaking,
+        // no swing, not even the release's stopDestroyBlock.
+        if self.held_piercing().is_some() {
             return;
         }
         if !down {
