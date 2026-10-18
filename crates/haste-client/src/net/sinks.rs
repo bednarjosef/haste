@@ -178,6 +178,12 @@ pub trait EntitySink {
     fn clear(&mut self);
     /// `EntityStore::tick`.
     fn tick(&mut self);
+    /// `EntityStore::tick_in_world`: the tick with the world the dropped items move in
+    /// (`ItemEntity.tick`'s collision, friction and fluids). Fakes ignore the world.
+    fn tick_in_world(&mut self, world: &dyn haste_entity::item_entity::ItemWorld) {
+        let _ = world;
+        self.tick();
+    }
     /// `EntityStore::len`.
     fn len(&self) -> usize;
 }
@@ -308,6 +314,9 @@ impl EntitySink for EntityStore {
     }
     fn tick(&mut self) {
         EntityStore::tick(self)
+    }
+    fn tick_in_world(&mut self, world: &dyn haste_entity::item_entity::ItemWorld) {
+        EntityStore::tick_in_world(self, world)
     }
     fn len(&self) -> usize {
         EntityStore::len(self)

@@ -455,6 +455,7 @@ mod driver;
 mod effects;
 mod entities;
 mod fov;
+mod item_world;
 mod lightmap;
 mod misc;
 pub(crate) mod pack_prompt;
