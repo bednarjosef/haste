@@ -4,6 +4,9 @@
 use std::collections::HashMap;
 
 use super::*;
+use haste_protocol::haste_core::chunk::{ChunkData, LightData};
+use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, PlayerInfo};
+use haste_protocol::haste_core::ChunkPos;
 use haste_protocol::nbt::{Nbt, NbtCompound};
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
 use haste_protocol::wire::particle::Particle;
