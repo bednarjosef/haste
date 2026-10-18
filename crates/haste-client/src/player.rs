@@ -983,6 +983,9 @@ impl LocalPlayer {
         let was_on_ground = self.state.on_ground;
         let pre_tick_pos = self.state.pos;
         let pre_tick_fall = self.state.fall_distance;
+        // The velocity this tick's move starts with (vanilla's `getDeltaMovement` at
+        // `Entity.move`): the step rule's swim-sound volume reads it.
+        let pre_tick_velocity = self.state.velocity;
         // Vanilla's double tap: while the window is armed a fresh press of jump (or the input
         // layer's own double-tap signal) toggles flight; without it a press arms the window for
         // 7 ticks. Vanilla keeps the window while the player swims, and skips the toggle on a
@@ -1058,7 +1061,7 @@ impl LocalPlayer {
                     .and_then(|s| e.data.block_sound_type(s))
             });
             if let Some(e) = ctx.env {
-                let (supporting, effect) = crate::sound::resolve_step_blocks(
+                let (supporting, effect, primary) = crate::sound::resolve_step_blocks(
                     self.state.pos,
                     &self.state.aabb(&self.attrs),
                     self.state.on_ground,
@@ -1068,7 +1071,9 @@ impl LocalPlayer {
                     self.int.block_tags(),
                 );
                 let steps = crate::sound::StepCtx {
+                    player_pos: self.state.pos,
                     movement,
+                    velocity: pre_tick_velocity,
                     on_ground: self.state.on_ground,
                     flying: self.state.flying,
                     discrete: self.state.sneaking,
@@ -1077,6 +1082,7 @@ impl LocalPlayer {
                     in_water: self.state.in_water,
                     supporting,
                     effect,
+                    primary,
                 };
                 self.steps.after_move(&steps, &mut self.sound_out);
             }

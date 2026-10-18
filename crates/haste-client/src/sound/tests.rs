@@ -283,6 +283,7 @@ fn step_block<'a>(sound: Option<&'a haste_data::BlockSoundType>) -> super::steps
         state: BlockStateId(1),
         sound,
         climbable: false,
+        crystal: false,
     }
 }
 
@@ -295,7 +296,9 @@ fn step_ctx<'a>(
 ) -> super::steps::StepCtx<'a> {
     let block = step_block(sound);
     super::steps::StepCtx {
+        player_pos: DVec3::ZERO,
         movement,
+        velocity: DVec3::ZERO,
         on_ground,
         flying: false,
         discrete: false,
@@ -304,6 +307,7 @@ fn step_ctx<'a>(
         in_water: false,
         supporting: step_block(sound),
         effect: block,
+        primary: None,
     }
 }
 
@@ -328,7 +332,7 @@ fn step_distance_rule_fires_every_full_block_walked() {
             fired += 1;
             // Each firing is exactly one step sound at the stone step event,
             // volume 1.0 * 0.15, pitch 1.0 (vanilla's factors), PLAYER source,
-            // played at the block's centre (vanilla plays at the player).
+            // played at the player (vanilla plays its own sounds at itself).
             assert_eq!(requests.len(), 1, "tick {tick}");
             let (name, volume, pitch) = step_request(&requests[0]);
             assert_eq!(name, "minecraft:block.stone.step");
@@ -475,6 +479,178 @@ fn teleport_resets_the_step_accumulator() {
     assert_eq!(fired, 1, "the step comes a block after the teleport");
 }
 
+/// `Player.playStepSound` in water: the swim sound (`Entity.waterSwimSound` ->
+/// `playSwimSound`, `entity.player.swim`) whose volume follows the move's velocity
+/// (sqrt(vx^2*0.2 + vy^2 + vz^2*0.2) * 0.35, capped at 1) with the wobbling pitch,
+/// then a muffled step of the block (`Entity.playMuffledStepSound`: v*0.05, p*0.8) —
+/// never the plain step.
+#[test]
+fn in_water_the_step_becomes_the_swim_sound_and_a_muffled_step() {
+    let stone = stone_type();
+    let mut steps = StepSounds::new();
+    let mut ctx = step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone));
+    ctx.in_water = true;
+    ctx.velocity = DVec3::new(1.0, 2.0, 1.0);
+    // Walk until the step fires.
+    let mut fired = 0;
+    for _ in 0..10 {
+        let mut requests = Vec::new();
+        steps.after_move(&ctx, &mut requests);
+        if !requests.is_empty() {
+            fired += 1;
+            // The swim sound then the muffled stone step, no plain step.
+            assert_eq!(requests.len(), 2);
+            let (swim, volume, pitch) = step_request(&requests[0]);
+            assert_eq!(swim, "minecraft:entity.player.swim");
+            let speed = (1.0_f64 * 1.0 * 0.2 + 2.0 * 2.0 + 1.0 * 1.0 * 0.2).sqrt() * 0.35;
+            assert!((volume - speed as f32).abs() < 1e-6, "swim volume {volume}");
+            assert!((pitch - 1.0).abs() <= 0.4 + 1e-6, "swim pitch {pitch}");
+            let (muffled, m_volume, m_pitch) = step_request(&requests[1]);
+            assert_eq!(muffled, "minecraft:block.stone.step");
+            assert!((m_volume - 0.05).abs() < 1e-6, "muffled volume {m_volume}");
+            assert!((m_pitch - 0.8).abs() < 1e-6, "muffled pitch {m_pitch}");
+        }
+    }
+    assert_eq!(fired, 1, "one step's worth of sounds in 10 ticks");
+}
+
+/// While sprint-swimming (`isSwimming`) the vibration gate closes, so no step plays;
+/// the water branch of `applyMovementEmissionAndPlaySound` advances `nextStep` and
+/// plays the swim sound alone.
+#[test]
+fn sprint_swimming_plays_only_the_swim_sound() {
+    let stone = stone_type();
+    let mut steps = StepSounds::new();
+    let mut ctx = step_ctx(DVec3::new(0.2, 0.0, 0.0), false, Some(&stone));
+    ctx.swimming = true;
+    ctx.in_water = true;
+    ctx.velocity = DVec3::new(0.2, 0.0, 0.0);
+    let mut fired = 0;
+    for _ in 0..20 {
+        let mut requests = Vec::new();
+        steps.after_move(&ctx, &mut requests);
+        for r in &requests {
+            let (name, _, _) = step_request(r);
+            assert_eq!(
+                name, "minecraft:entity.player.swim",
+                "no step while swimming"
+            );
+        }
+        fired += requests.len();
+    }
+    assert!(fired > 0, "the swim sound replaces the step in water");
+    assert!(
+        steps.next_step() > 1.0,
+        "nextStep advanced through the water branch"
+    );
+}
+
+/// `Player.getPrimaryStepSoundBlockPos` + `playCombinationStepSounds`: a carpet
+/// (`#combination_step_sound_blocks`) above the effect block plays its own step
+/// (v*0.15) over a muffled step of the block below (v*0.05, p*0.8); a block in
+/// `#inside_step_sound_blocks` only (snow) plays its plain step instead of the
+/// block below it.
+#[test]
+fn combination_and_inside_step_sound_blocks() {
+    let mut wool = stone_type();
+    wool.step_sound = "minecraft:block.wool.step".to_owned();
+    let mut snow = stone_type();
+    snow.step_sound = "minecraft:block.snow.step".to_owned();
+    let stone = stone_type();
+    // A carpet over stone: primary = the carpet (combination), effect = stone.
+    let mut steps = StepSounds::new();
+    let mut ctx = step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone));
+    ctx.primary = Some(super::steps::PrimaryStep {
+        block: step_block(Some(&wool)),
+        combination: true,
+    });
+    let mut requests = Vec::new();
+    for _ in 0..10 {
+        steps.after_move(&ctx, &mut requests);
+    }
+    assert_eq!(
+        requests.len(),
+        2,
+        "carpet: the wool step over the muffled stone"
+    );
+    let (name, volume, _) = step_request(&requests[0]);
+    assert_eq!(name, "minecraft:block.wool.step");
+    assert!((volume - 0.15).abs() < 1e-6, "carpet volume {volume}");
+    let (name, volume, pitch) = step_request(&requests[1]);
+    assert_eq!(name, "minecraft:block.stone.step");
+    assert!(
+        (volume - 0.05).abs() < 1e-6,
+        "muffled stone volume {volume}"
+    );
+    assert!((pitch - 0.8).abs() < 1e-6, "muffled stone pitch {pitch}");
+    // Snow over stone (`#inside_step_sound_blocks` only): the snow's plain step,
+    // nothing muffled.
+    let mut steps = StepSounds::new();
+    let mut ctx = step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone));
+    ctx.primary = Some(super::steps::PrimaryStep {
+        block: step_block(Some(&snow)),
+        combination: false,
+    });
+    let mut requests = Vec::new();
+    for _ in 0..10 {
+        steps.after_move(&ctx, &mut requests);
+    }
+    assert_eq!(requests.len(), 1, "snow: one plain step");
+    let (name, volume, pitch) = step_request(&requests[0]);
+    assert_eq!(name, "minecraft:block.snow.step");
+    assert!((volume - 0.15).abs() < 1e-6);
+    assert!((pitch - 1.0).abs() < 1e-6);
+}
+
+/// `Entity.walkingStepSound`'s amethyst chime (`shouldPlayAmethystStepSound`: the
+/// block is in `#crystal_sound_blocks` and 20 ticks passed since the last): the
+/// first chime comes with intensity 0.07 (volume 0.1 + 0.07 * 1.2), the next no
+/// sooner than 20 ticks later, with the intensity decayed by 0.997 per tick and
+/// raised again.
+#[test]
+fn amethyst_steps_chime_with_the_intensity_ramp() {
+    let mut amethyst = stone_type();
+    amethyst.step_sound = "minecraft:block.amethyst_block.step".to_owned();
+    let mut steps = StepSounds::new();
+    let mut block = step_block(Some(&amethyst));
+    block.crystal = true;
+    let mut ctx = step_ctx(DVec3::new(0.2, 0.0, 0.0), true, None);
+    ctx.supporting = step_block(Some(&amethyst));
+    ctx.effect = block;
+    // Walk 55 ticks: steps fire at ticks 9, 17, 26, 34, 43, 51; the chime can
+    // first play at tick 20 (>= 0 + 20), so the step at 26 chimes and the next
+    // eligible one is at 51 (>= 26 + 20): the 34 and 43 steps stay silent.
+    let mut chimes = 0;
+    for _ in 0..55 {
+        let mut requests = Vec::new();
+        steps.after_move(&ctx, &mut requests);
+        for r in &requests {
+            let (name, volume, _) = step_request(r);
+            if name == "minecraft:block.amethyst_block.chime" {
+                chimes += 1;
+                if chimes == 1 {
+                    assert!(
+                        (volume - (0.1 + 0.07 * 1.2)).abs() < 1e-6,
+                        "first chime volume {volume}"
+                    );
+                } else if chimes == 2 {
+                    let decayed = 0.07 * 0.997_f64.powi(AMETHYST_CHIME_TICK_GAP) as f32;
+                    let intensity = decayed + 0.07;
+                    assert!(
+                        (volume - (0.1 + intensity * 1.2)).abs() < 1e-6,
+                        "second chime volume {volume}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(chimes, 2, "chimes in 55 ticks");
+}
+
+/// The tick gap between the two chimes of the amethyst test (steps every ~8 ticks,
+/// `tick >= last + 20`).
+const AMETHYST_CHIME_TICK_GAP: i32 = 25;
+
 /// The mining hit's volume/pitch factors (`ClientLevel.playBreakingSound`:
 /// (v+1)/8 and p*0.5) and the break's (`LevelEventHandler` case 2001:
 /// (v+1)/2 and p*0.8). A loud metal type (volume 1.0, pitch 1.5) tells the
@@ -536,6 +712,179 @@ fn level_events_play_the_block_sound_at_its_centre() {
     let mut requests = Vec::new();
     level_event_sound(2001, pos, &quiet, &mut requests);
     assert!(requests.is_empty());
+}
+
+/// A one-block-thick floor for the step-block resolver: `state` everywhere below
+/// y = 0 in a 16x16 patch, `above` in the y = 0 cell (a snow layer or carpet to
+/// stand on), air elsewhere.
+struct StepFloor {
+    state: BlockStateId,
+    above: Option<BlockStateId>,
+}
+
+impl haste_core::view::BlockView for StepFloor {
+    fn block_state(&self, pos: haste_core::BlockPos) -> BlockStateId {
+        if pos.y == 0 {
+            self.above.unwrap_or(haste_core::BlockStateId::AIR)
+        } else if pos.y < 0 && pos.x.abs() <= 8 && pos.z.abs() <= 8 {
+            self.state
+        } else {
+            haste_core::BlockStateId::AIR
+        }
+    }
+    fn is_chunk_loaded(&self, _: haste_core::ChunkPos) -> bool {
+        true
+    }
+    fn sky_light(&self, _: haste_core::BlockPos) -> u8 {
+        15
+    }
+    fn block_light(&self, _: haste_core::BlockPos) -> u8 {
+        0
+    }
+    fn min_y(&self) -> i32 {
+        -64
+    }
+    fn height(&self) -> i32 {
+        320
+    }
+}
+
+/// A full cube for every non-air state (the resolver only asks whether the floor
+/// block supports the box).
+struct FullShapes;
+
+impl haste_core::view::CollisionShapes for FullShapes {
+    fn collision_boxes(&self, state: BlockStateId) -> &[haste_core::Aabb] {
+        if state == haste_core::BlockStateId::AIR {
+            &[]
+        } else {
+            const FULL: &[haste_core::Aabb] = &[haste_core::Aabb {
+                min: DVec3::ZERO,
+                max: DVec3::new(1.0, 1.0, 1.0),
+            }];
+            FULL
+        }
+    }
+    fn outline_boxes(&self, _: BlockStateId) -> &[haste_core::Aabb] {
+        &[]
+    }
+}
+
+/// `resolve_step_blocks` against the real block table and synced tags: on a full
+/// block the effect block is the supporting block; a snow layer above it
+/// (`#inside_step_sound_blocks`) becomes the plain primary step, a carpet
+/// (`#combination_step_sound_blocks`) the combination primary, and an amethyst
+/// floor carries the crystal flag (`#crystal_sound_blocks`).
+#[test]
+#[ignore = "needs cache/ (data generator reports)"]
+fn step_blocks_resolve_from_the_block_table_and_tags() {
+    let data = static_game_data();
+    let state = |name: &str| {
+        data.blocks
+            .default_state(&haste_core::Identifier::parse(name).unwrap())
+            .unwrap()
+    };
+    let index = |name: &str| {
+        data.blocks
+            .block_index(&haste_core::Identifier::parse(name).unwrap())
+            .unwrap()
+            .0 as i32
+    };
+    let stone = state("minecraft:stone");
+    let snow = state("minecraft:snow");
+    let carpet = state("minecraft:white_carpet");
+    let amethyst = state("minecraft:amethyst_block");
+    let tags = haste_physics::mining::BlockTags::new(
+        [
+            ("inside_step_sound_blocks", vec![index("minecraft:snow")]),
+            (
+                "combination_step_sound_blocks",
+                vec![index("minecraft:white_carpet")],
+            ),
+            (
+                "crystal_sound_blocks",
+                vec![index("minecraft:amethyst_block")],
+            ),
+        ]
+        .map(|(t, e)| (haste_core::Identifier::minecraft(t), e)),
+    );
+    let aabb = haste_physics::PlayerState::at(DVec3::new(0.5, 1.0, 0.5))
+        .aabb(&haste_physics::PlayerAttributes::default());
+
+    // On a full stone floor (feet at y = 1): supporting = effect = the stone, no
+    // primary.
+    let floor = StepFloor {
+        state: stone,
+        above: None,
+    };
+    let (supporting, effect, primary) = resolve_step_blocks(
+        DVec3::new(0.5, 1.0, 0.5),
+        &aabb,
+        true,
+        &floor,
+        &FullShapes,
+        &data,
+        Some(&tags),
+    );
+    assert_eq!(supporting.state, stone);
+    assert_eq!(effect.state, stone);
+    assert!(primary.is_none());
+    assert!(!effect.crystal);
+
+    // A snow layer on top (feet at its 0.125 top): the effect block is the stone
+    // under it and the snow is the plain primary step.
+    let floor = StepFloor {
+        state: stone,
+        above: Some(snow),
+    };
+    let (_, effect, primary) = resolve_step_blocks(
+        DVec3::new(0.5, 0.125, 0.5),
+        &aabb,
+        true,
+        &floor,
+        &FullShapes,
+        &data,
+        Some(&tags),
+    );
+    assert_eq!(effect.state, stone);
+    let primary = primary.expect("the snow layer is the primary step block");
+    assert_eq!(primary.block.state, snow);
+    assert!(!primary.combination);
+
+    // A carpet on top (feet at its 0.0625 top): the combination primary.
+    let floor = StepFloor {
+        state: stone,
+        above: Some(carpet),
+    };
+    let (_, effect, primary) = resolve_step_blocks(
+        DVec3::new(0.5, 0.0625, 0.5),
+        &aabb,
+        true,
+        &floor,
+        &FullShapes,
+        &data,
+        Some(&tags),
+    );
+    assert_eq!(effect.state, stone);
+    let primary = primary.expect("the carpet is the primary step block");
+    assert_eq!(primary.block.state, carpet);
+    assert!(primary.combination);
+
+    // An amethyst floor: the crystal flag is set on the effect block.
+    let floor = StepFloor {
+        state: amethyst,
+        above: None,
+    };
+    let (_, effect, _) = resolve_step_blocks(
+        DVec3::new(0.5, 1.0, 0.5),
+        &aabb,
+        true,
+        &floor,
+        &FullShapes,
+        &data,
+        Some(&tags),
+    );
+    assert!(effect.crystal);
 }
 
 /// One landing's requests, decoded to (event name, volume, pitch).
