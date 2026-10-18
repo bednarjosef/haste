@@ -1658,3 +1658,56 @@ fn a_pig_ignores_the_warped_fungus_on_a_stick() {
         );
     }
 }
+
+/// The player's own column is sand at the feet and head with a free east neighbour, so
+/// `LocalPlayer.moveTowardsClosestSpace` must push east.
+fn sand_cell() -> TestWorld {
+    let mut w = TestWorld::new();
+    for (x, z) in [(0, 0), (-1, 0), (0, -1), (0, 1)] {
+        w.set(x, 0, z, states::SAND).set(x, 1, z, states::SAND);
+    }
+    w
+}
+
+fn player_in_sand(mode: GameMode) -> LocalPlayer {
+    let mut p = LocalPlayer::with_entity(ME, mode);
+    p.set_attribute_ids(ids());
+    p.state.pos = DVec3::new(0.5, 0.0, 0.5);
+    p.has_position = true;
+    p.loaded = true;
+    p
+}
+
+#[test]
+fn a_suffocating_block_pushes_the_player_east() {
+    let world = sand_cell();
+    let shapes = TestShapes::default();
+    let mut p = player_in_sand(GameMode::Survival);
+    let mut out = Vec::new();
+    p.tick_with(
+        &InputState::default(),
+        &world,
+        &shapes,
+        &shapes,
+        None,
+        &mut out,
+    );
+    assert!(p.state.pos.x > 0.5, "pushed east: {}", p.state.pos.x);
+}
+
+#[test]
+fn a_spectator_is_not_pushed_out_of_suffocating_blocks() {
+    let world = sand_cell();
+    let shapes = TestShapes::default();
+    let mut p = player_in_sand(GameMode::Spectator);
+    let mut out = Vec::new();
+    p.tick_with(
+        &InputState::default(),
+        &world,
+        &shapes,
+        &shapes,
+        None,
+        &mut out,
+    );
+    assert_eq!(p.state.pos.x, 0.5, "noPhysics: no push");
+}

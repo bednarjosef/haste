@@ -1020,3 +1020,25 @@ fn entity_cull_distance_scales_with_view_scale() {
         ));
     }
 }
+
+#[test]
+fn flame_quads_stack_up_the_bounding_box() {
+    let mut out = Vec::new();
+    flame::emit_geometry(
+        &mut out,
+        glam::Vec3::ZERO,
+        0.6,
+        1.8,
+        glam::Quat::IDENTITY,
+        (15, 15),
+        [0, 0, 1, 1],
+        [0, 0, 1, 1],
+    );
+    // height 1.8, width 0.6 -> 5 quads.
+    assert_eq!(out.len() / 6, 5);
+
+    // first vertex x = s * (-r) (identity rotation, origin zero)
+    let s = 0.6_f32 * 1.4;
+    let r = 0.5_f32;
+    assert!((out[0].pos[0] - (s * -r)).abs() < 1e-4);
+}

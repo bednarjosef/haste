@@ -198,6 +198,12 @@ pub struct EntityInstance {
     pub shadow_strength: f32,
     /// `Entity.isInvisible()`: no shadow (`extractShadow` skips it) and no name tag.
     pub invisible: bool,
+    /// `Entity.displayFireAnimation()`: on fire (shared flag 0x01), not fire immune, not a
+    /// spectator. Draws the flames (`FlameFeatureRenderer`).
+    pub display_fire: bool,
+    /// `Entity.getBbWidth()` / `getBbHeight()`: the bounding box the flames are sized to.
+    pub width: f32,
+    pub height: f32,
     /// `Entity.isDiscrete()` (crouching): the name tag hides past 32 blocks and drops the
     /// see-through pass (`LivingEntityRenderer.shouldShowName`, `submitNameTag`).
     pub is_discrete: bool,
@@ -443,6 +449,9 @@ mod tests {
             shadow_radius: 0.5,
             shadow_strength: 1.0,
             invisible: false,
+            display_fire: false,
+            width: 0.6,
+            height: 1.8,
             is_discrete: false,
             name_tag_y: 1.8,
             hurt: 0.0,

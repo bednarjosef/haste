@@ -225,6 +225,10 @@ impl BlockPhysics for GameData {
     fn is_opaque_full(&self, state: BlockStateId) -> bool {
         self.shapes.is_opaque_full(state)
     }
+    /// `BlockState.isSuffocating` from the recorder's server dump (`LocalPlayer.suffocatesAt`).
+    fn is_suffocating(&self, state: BlockStateId) -> bool {
+        self.shapes.is_suffocating(state)
+    }
     fn is_cobweb(&self, state: BlockStateId) -> bool {
         self.is_minecraft_block(state, "cobweb")
     }
