@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+mod layers;
+
 /// A pack open for reading: a zip file or a plain folder. `asset_keys` lists
 /// every `assets/<ns>/<path>` the pack provides.
 enum PackFile {
@@ -58,14 +60,11 @@ impl PackFile {
     }
 
     /// Every `assets/...` key this file provides.
-    fn keys(&self) -> impl Iterator<Item = &str> {
-        let (zip, folder): (Vec<&str>, Vec<&str>) = match self {
-            PackFile::Zip { keys, .. } => (keys.iter().map(|(k, _)| k.as_str()).collect(), vec![]),
-            PackFile::Folder { entries, .. } => {
-                (vec![], entries.iter().map(|(k, _)| k.as_str()).collect())
-            }
-        };
-        zip.into_iter().chain(folder)
+    fn keys(&self) -> Vec<&str> {
+        match self {
+            PackFile::Zip { keys, .. } => keys.iter().map(|(k, _)| k.as_str()).collect(),
+            PackFile::Folder { entries, .. } => entries.iter().map(|(k, _)| k.as_str()).collect(),
+        }
     }
 }
 

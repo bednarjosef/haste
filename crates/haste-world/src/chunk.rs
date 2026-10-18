@@ -98,6 +98,10 @@ pub struct Chunk {
     pub block_entities: ahash::HashMap<BlockPos, BlockEntityData>,
     /// Sky/block light per section (same indexing as `sections`).
     pub light: ChunkLight,
+    /// Per-column lowest sky source y (vanilla `ChunkSkyLightSources`), lazily built by
+    /// the light engine on the first block change that needs it. `i32::MIN` per column
+    /// means the column is open to the world's floor.
+    pub(crate) sky_sources: Option<Box<[i32; 256]>>,
     /// One dirty bit per section (index = section y - `min_section`), so remesh marking
     /// is a bit-set instead of a hash insert. Owned by the chunk, cleared when the
     /// world drains the dirty sections.
@@ -166,6 +170,7 @@ impl Chunk {
                 .map(|be| (be.pos, be.clone()))
                 .collect(),
             light: ChunkLight::new(section_count),
+            sky_sources: None,
             dirty: vec![0; section_count.div_ceil(64)],
         };
         chunk.apply_light(&data.light);

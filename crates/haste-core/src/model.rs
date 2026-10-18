@@ -46,11 +46,13 @@ pub struct Cube {
 /// Per-frame pose overrides, keyed by interned part id, so animation state stays in
 /// `haste-entity`. Fixed-size, like `BodyTransform`: no per-frame allocation, and a model's
 /// setupAnim never pushes more than the capacities (the spider's eight legs plus the head is
-/// the largest rotation set; the player's six hideable layers the largest hidden set).
+/// the largest rotation set; the player's six hideable layers the largest hidden set; the
+/// crouching humanoid's head, body, arms and legs the largest offset set).
 #[derive(Clone, Debug, Default)]
 pub struct PoseOverrides {
     rotations: [Option<(crate::parts::PartId, Vec3)>; POSE_ROTATIONS],
     hidden: [Option<crate::parts::PartId>; POSE_HIDDEN],
+    offsets: [Option<(crate::parts::PartId, Vec3)>; POSE_OFFSETS],
 }
 
 /// Enough rotation slots for every model's setupAnim (the spider's 8 legs + head, plus
@@ -58,6 +60,8 @@ pub struct PoseOverrides {
 const POSE_ROTATIONS: usize = 12;
 /// Enough hidden slots for the player's six hideable layers, plus headroom.
 const POSE_HIDDEN: usize = 8;
+/// Enough pivot-offset slots for the crouching humanoid's six parts, plus headroom.
+const POSE_OFFSETS: usize = 8;
 
 impl PoseOverrides {
     /// Adds (or replaces) a part's rotation override.
@@ -85,6 +89,34 @@ impl PoseOverrides {
             .flatten()
             .find(|(i, _)| *i == id)
             .map(|(_, r)| *r)
+    }
+
+    /// Adds (or replaces) a part's pivot offset in model units (y down), added to the
+    /// part's pivot like vanilla setupAnim's `part.y += ...` on the reset pose.
+    pub fn set_offset(&mut self, id: crate::parts::PartId, offset: Vec3) {
+        for slot in self.offsets.iter_mut() {
+            match slot {
+                Some((i, o)) if *i == id => {
+                    *o = offset;
+                    return;
+                }
+                Some(_) => continue,
+                None => {
+                    *slot = Some((id, offset));
+                    return;
+                }
+            }
+        }
+        debug_assert!(false, "offset slots exhausted");
+    }
+
+    /// The pivot offset for `id`, if set.
+    pub fn offset_of(&self, id: crate::parts::PartId) -> Option<Vec3> {
+        self.offsets
+            .iter()
+            .flatten()
+            .find(|(i, _)| *i == id)
+            .map(|(_, o)| *o)
     }
 
     /// Hides a part for this frame.

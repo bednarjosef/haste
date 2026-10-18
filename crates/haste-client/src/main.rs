@@ -30,6 +30,7 @@ mod player;
 mod screen_effects;
 mod screenshots;
 mod script;
+mod script_frame;
 mod sound;
 mod strider;
 mod travel;
