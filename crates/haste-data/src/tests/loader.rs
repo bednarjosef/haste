@@ -416,3 +416,61 @@ fn real_reports() {
         );
     }
 }
+
+/// Real oracle dump: the per-state render_shape and suffocating fields (vanilla
+/// `getRenderShape` / `isSuffocating`). `--ignored` (needs
+/// `cache/oracle/26.3/block_shapes.json` regenerated with the fields; dumps from before that
+/// recorder-mod change skip, since the loader then falls back to the documented defaults).
+#[test]
+#[ignore = "needs cache/oracle/26.3/block_shapes.json (run via HASTE_CACHE or haste setup)"]
+fn real_render_shape_and_suffocation_flags() {
+    let reports = haste_core::paths::datagen_reports();
+    if !reports.join("blocks.json").is_file() {
+        eprintln!("skipped: no real reports at {reports:?} (set HASTE_CACHE or run haste setup)");
+        return;
+    }
+    let d = GameData::load().unwrap();
+    let state = |name: &str| {
+        d.blocks
+            .default_state(&Identifier::minecraft(name))
+            .unwrap()
+    };
+    let barrier = state("barrier");
+    if !d.shapes.is_oracle_backed() || !d.shapes.render_shape_invisible(barrier) {
+        eprintln!(
+            "skipped: block_shapes.json predates the render_shape/suffocating fields \
+             (regenerate with tools/recorder-mod/dump-server-oracles.sh)"
+        );
+        return;
+    }
+    // RenderShape.INVISIBLE: barrier, light, structure void, liquids, air.
+    for name in [
+        "barrier",
+        "light",
+        "structure_void",
+        "water",
+        "bubble_column",
+        "air",
+    ] {
+        assert!(
+            d.shapes.render_shape_invisible(state(name)),
+            "{name} is RenderShape.INVISIBLE"
+        );
+    }
+    for name in ["stone", "glass", "oak_planks"] {
+        assert!(
+            !d.shapes.render_shape_invisible(state(name)),
+            "{name} is RenderShape.MODEL"
+        );
+    }
+    // Suffocation: stone yes (tag + full cube), glass no, torch no (not a full cube).
+    assert!(d.shapes.is_suffocating(state("stone")), "stone suffocates");
+    assert!(
+        !d.shapes.is_suffocating(state("glass")),
+        "glass is not in causes_suffocation"
+    );
+    assert!(
+        !d.shapes.is_suffocating(state("torch")),
+        "torch has no full collision cube"
+    );
+}

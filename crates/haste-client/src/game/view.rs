@@ -339,6 +339,7 @@ pub(super) fn tick_hand(
             matches!(p.state.pose, haste_physics::Pose::Swimming),
             p.held_stack(),
             attack_speed,
+            p.hands_busy(),
         );
         let eye = p.camera(1.0).0;
         let hand = &p.hand;
