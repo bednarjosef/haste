@@ -2,12 +2,16 @@
 //! local player and produces the serverbound packets a vanilla client sends for each tick.
 //!
 //! Per tick, in this order (the order a vanilla client is observed to send them in):
-//! 1. `player_input` when the held movement keys changed since the last one sent,
-//! 2. physics (`haste_physics::tick_with`),
-//! 3. `player_abilities` when flight was toggled or ended by landing,
-//! 4. `player_command` start/stop sprinting when the sprint state changed,
-//! 5. one of `move_player_pos_rot` / `_pos` / `_rot` / `_status_only` (send rules below),
-//! 6. `client_tick_end`.
+//! 1. `set_carried_item` when the hotbar slot changed underneath the last value sent
+//!    (`gameMode.tick` -> `ensureHasSentCarriedItem`),
+//! 2. the interactions (hotbar keys, clicks, held use, `continueAttack` — `handleKeybinds`),
+//! 3. physics (`haste_physics::tick_with`) with `player_command` START_FALL_FLYING and
+//!    `player_abilities` from `aiStep`,
+//! 4. `player_input` when the held movement keys changed since the last one sent
+//!    (`sendChanges` runs after `aiStep`),
+//! 5. `player_command` start/stop sprinting when the sprint state changed,
+//! 6. one of `move_player_pos_rot` / `_pos` / `_rot` / `_status_only` (send rules below),
+//! 7. `client_tick_end` — every tick a world exists, before `player_loaded` too.
 //!
 //! Movement send rules (wiki "Java Edition protocol", "Set Player Position"; checked against the
 //! vanilla server's movement checks): the position is sent when it moved more than 2.0E-4 blocks
@@ -208,6 +212,11 @@ pub struct LocalPlayer {
     pub own_flags: crate::screen_effects::OwnFlags,
     /// Selected hotbar slot (0..8).
     pub held_slot: i32,
+    /// The hotbar slot the server was last told about (`MultiPlayerGameMode.carriedIndex`).
+    /// `LocalPlayer::ensure_carried_item` (vanilla `ensureHasSentCarriedItem`, the start of
+    /// every `gameMode.tick`) sends the echo when the slot changed underneath it — the
+    /// client's own pick or the server's `set_held_slot`.
+    carried_index: i32,
     /// Whether a `player_position` arrived since login/respawn.
     pub has_position: bool,
     /// Whether `player_loaded` was sent since login/respawn (movement is sent only after).
@@ -292,6 +301,10 @@ pub struct LocalPlayer {
     water_vision_time: i32,
     /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
     pub(crate) int: interact::Interaction,
+    /// Vanilla `LocalPlayer.handsBusy` (`isHandsBusy`): true while rowing — a movement key
+    /// held while controlling a boat (`rideTick` sets it each passenger tick, clears it on
+    /// dismount). While it is, `Minecraft.startAttack` and `startUseItem` do nothing.
+    hands_busy: bool,
     /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
     /// progress and bob, filled for the render state at the end of each tick.
     pub hand: hand::Hand,
@@ -316,6 +329,7 @@ impl LocalPlayer {
             air_supply: 300,
             own_flags: crate::screen_effects::OwnFlags::default(),
             held_slot: 0,
+            carried_index: 0,
             has_position: false,
             loaded: false,
             vehicle: None,
@@ -350,6 +364,7 @@ impl LocalPlayer {
             jump_held: false,
             water_vision_time: 0,
             int: interact::Interaction::default(),
+            hands_busy: false,
             hand: hand::Hand::new(),
         };
         p.state.on_ground = true;
@@ -441,8 +456,9 @@ impl LocalPlayer {
 
     /// Consumes the packets about the local player. Returns false for packets it does not handle.
     /// The `out` buffer is kept for the caller's uniform signature; this handler defers every
-    /// serverbound reply to the next tick (see [`LocalPlayer::flush_pending_accept`]).
-    pub fn handle(&mut self, p: &ClientboundPlay, _out: &mut Vec<ServerboundPlay>) -> bool {
+    /// serverbound reply to the next tick (see [`LocalPlayer::flush_pending_accept`]) — except
+    /// a teleport's break abort, which vanilla sends from `handleMovePlayer` itself.
+    pub fn handle(&mut self, p: &ClientboundPlay, out: &mut Vec<ServerboundPlay>) -> bool {
         use ClientboundPlay as P;
         match p {
             P::PlayerPosition(t) => {
@@ -455,7 +471,16 @@ impl LocalPlayer {
                 // (flush_pending_accept).
                 self.pending_accept = Some(t.teleport_id);
                 self.pending_accept_age = 0;
-                self.mark_sent_position(self.state.on_ground, self.state.horizontal_collision);
+                // `ClientPacketListener.handleMovePlayer` also calls
+                // `BlockStatePredictionHandler.onTeleport` (a record of the prediction
+                // sequence at the teleport; our predictions never snap the player, so there
+                // is nothing to keep) and `MultiPlayerGameMode.stopDestroyBlock`: a running
+                // break is aborted here, before this tick's key handling — unlike the
+                // accept, which the join-teleport race above keeps a tick late.
+                self.stop_destroy(out);
+                // `xLast`/`yLast`/`zLast` are left untouched, so the first sendPosition
+                // after the teleport reports the new position whatever the threshold (the
+                // movement waits for the accept, as vanilla's handler has already answered).
             }
             P::PlayerRotation(r) => {
                 let yaw = if r.relative_yaw {
@@ -631,10 +656,9 @@ impl LocalPlayer {
     /// races the server's join bookkeeping and it logs
     /// "moved too quickly! <spawn position>" (observed on the vanilla 26.3 server, ~1 join
     /// in 8). One full tick later the server holds the login position, so the accept's
-    /// position matches it. The accepted position counts as sent (26.3's accept carries the
-    /// resulting position and rotation; an extra move_player_pos_rot right after it, what
-    /// older clients sent, gets the client kicked with invalid_player_movement after a
-    /// relative `/tp ~ ~10 ~`).
+    /// position matches it. 26.3's accept carries the resulting position and rotation; the
+    /// first move_player_pos_rot follows one tick after it, as vanilla's `sendPosition`
+    /// does (xLast untouched by the teleport — see the PlayerPosition handler).
     fn flush_pending_accept(&mut self, out: &mut Vec<ServerboundPlay>) {
         if self.pending_accept.is_none() {
             return;
@@ -666,6 +690,20 @@ impl LocalPlayer {
             // first move goes out next tick.
             out.push(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
             self.loaded = true;
+        }
+    }
+
+    /// `MultiPlayerGameMode.ensureHasSentCarriedItem` (`gameMode.tick`, the start of every
+    /// client tick): the server is told the selected hotbar slot whenever it changed
+    /// underneath the last value sent — the client's own pick or the server's
+    /// `set_held_slot` (vanilla's `ClientPacketListener.handleSetHeldSlot` only sets the
+    /// inventory slot, so the next tick echoes `set_carried_item` back).
+    fn ensure_carried_item(&mut self, out: &mut Vec<ServerboundPlay>) {
+        if self.held_slot != self.carried_index {
+            self.carried_index = self.held_slot;
+            out.push(ServerboundPlay::SetCarriedItem(sb::SetCarriedItem {
+                slot: self.held_slot as i16,
+            }));
         }
     }
 
@@ -765,6 +803,7 @@ impl LocalPlayer {
             data,
             entities: &[],
             entity_types: &[],
+            border: None,
             warm_blocks: None,
         };
         self.tick_interact(input, world, &env, None, out);
@@ -854,6 +893,9 @@ impl LocalPlayer {
         // check below): their durations and blend states drive the screen effects.
         self.int.tick_effects();
         if !(self.has_position && self.loaded) {
+            // `Minecraft.tick` ends with ClientTickEnd every tick a level exists — before
+            // `player_loaded`, and with a screen open. Nothing else leaves the client yet.
+            out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
             return;
         }
 
@@ -877,7 +919,12 @@ impl LocalPlayer {
                 });
         }
 
-        // 0. Hotbar, crosshair target and interactions (vanilla handles key bindings before
+        // 0. `gameMode.tick` (`Minecraft.tick` runs it before `handleKeybinds`):
+        // `ensureHasSentCarriedItem` echoes the selected hotbar slot when it changed — our own
+        // pick or the server's `set_held_slot`.
+        self.ensure_carried_item(out);
+
+        // Hotbar, crosshair target and interactions (vanilla handles key bindings before
         // the player's own tick).
         let look = (
             input.yaw + self.look_offset.0,
@@ -887,25 +934,31 @@ impl LocalPlayer {
             self.interact_step(look, input.sneak, ctx.world, env, out);
         }
 
-        // 1. player_input when the held keys change (raw keys, as pressed). While riding this
-        // is how the vehicle learns our keys (steering, and sneak to dismount: the shift flag
-        // makes the server answer with a set_passengers that removes us).
+        // `LocalPlayer.sendInput`: the input packet leaves with `sendChanges`, after `aiStep`
+        // (physics, START_FALL_FLYING, the abilities toggle) and before the sprint command
+        // and the movement. While riding this is how the vehicle learns our keys (steering,
+        // and sneak to dismount: the shift flag makes the server answer with a
+        // set_passengers that removes us).
         let flags = input_bits(input);
-        if self.sent.input != Some(flags) {
-            out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags }));
-            self.sent.input = Some(flags);
-        }
+        let send_input = |p: &mut Self, out: &mut Vec<ServerboundPlay>| {
+            if p.sent.input != Some(flags) {
+                out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags }));
+                p.sent.input = Some(flags);
+            }
+        };
 
         // 2. The passenger tick (vanilla `rideTick`) replaces physics: a passenger sends
         // rotation only, never position packets (the server owns a passenger's position).
         if self.vehicle.is_some() {
             // The vehicle's own tick first (vanilla `ClientLevel.tickNonPassenger`), then the
-            // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the rotation
-            // and, for a vehicle we control, the `move_vehicle` that carries its simulation.
+            // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the
+            // input, the rotation and, for a vehicle we control, the `move_vehicle` that
+            // carries its simulation.
             self.boat_tick(ctx, out);
             self.horse_tick(input, look, ctx, out);
             self.item_steered_tick(look, vehicle, ctx);
             self.ride_tick(input, look, vehicle);
+            send_input(self, out);
             self.send_rotation(out);
             let item_steered = self.steered_by_item();
             let steered = match (&self.boat, &self.horse, item_steered) {
@@ -949,7 +1002,23 @@ impl LocalPlayer {
         // blindness and food terms, `isSlowDueToUsingItem`).
         self.state.sprint_blocked =
             self.int.is_blind() || (self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly);
-        self.state.slow_using_item = self.is_using_item();
+        // Vanilla `LocalPlayer.isSlowDueToUsingItem` / `itemUseSpeedMultiplier`: the used
+        // item's `use_effects` keep a sprint from starting unless `can_sprint`, and scale the
+        // movement input while using.
+        self.apply_item_use_effects(ctx.env);
+        // Vanilla `LocalPlayer.aiStep`: when not `noPhysics` and not a passenger (the passenger
+        // tick returned above), the four feet probes free a player inside a suffocating block
+        // (sand, a closing piston or door) before the sprint rules below.
+        if !self.state.no_physics {
+            let bb = self.state.aabb(&self.attrs);
+            haste_physics::move_towards_closest_space(
+                &mut self.state,
+                &bb,
+                ctx.world,
+                ctx.shapes,
+                ctx.blocks,
+            );
+        }
         // Vanilla `LocalPlayer.aiStep`'s double tap of forward, after `Player.aiStep` counted
         // `sprintTriggerTime` down above: sneak held, an item in use or the backward key
         // cancels the window. `hasForwardImpulse` is read from the PREVIOUS tick's input
@@ -1152,6 +1221,10 @@ impl LocalPlayer {
             }));
         }
 
+        // `LocalPlayer.sendChanges` opens with the input packet (after `aiStep`, whose
+        // START_FALL_FLYING and abilities toggle went out above).
+        send_input(self, out);
+
         // 5. Sprint state.
         if self.state.sprinting != self.sent.sprinting {
             out.push(ServerboundPlay::PlayerCommand(sb::PlayerCommand {
@@ -1202,6 +1275,13 @@ impl LocalPlayer {
     }
 
     fn send_movement(&mut self, out: &mut Vec<ServerboundPlay>) {
+        // A teleport whose accept has not gone out yet: the first movement would name the
+        // post-teleport position before the server has taken the accept (vanilla's
+        // `handleMovePlayer` answers before the next `sendPosition` runs). It goes out with
+        // the accept's own tick, `xLast` still holding the pre-teleport position.
+        if self.pending_accept.is_some() {
+            return;
+        }
         let s = &self.state;
         if !(s.pos.is_finite() && s.yaw.is_finite() && s.pitch.is_finite()) {
             tracing::error!("non-finite player state, not sent: {s:?}");

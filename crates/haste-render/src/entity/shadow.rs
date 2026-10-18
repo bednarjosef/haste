@@ -3,6 +3,7 @@
 
 use super::*;
 
+use haste_core::view::CollisionShapes;
 use std::sync::OnceLock;
 
 impl EntityRenderer {
@@ -22,7 +23,7 @@ impl EntityRenderer {
         skip: Option<EntityId>,
         camera: glam::DVec3,
         world: &dyn BlockView,
-        shapes: &dyn CollisionShapes,
+        shapes: &haste_data::BlockShapes,
         sky_darken: i32,
         ambient_light: f32,
         entity_shadows: bool,
@@ -62,16 +63,20 @@ impl EntityRenderer {
                         let power_at_depth = pow - (e.pos.y - y as f64) as f32 * 0.5;
                         let below = BlockPos::new(x, y - 1, z);
                         let below_state = world.block_state(below);
+                        // Vanilla `EntityRenderer.extractShadowPiece`: skip invisible render shapes first.
+                        if shapes.render_shape_invisible(below_state) {
+                            continue;
+                        }
+                        let brightness = max_local_raw_brightness(world, pos, sky_darken);
+                        if brightness <= 3 {
+                            continue;
+                        }
                         // `isCollisionShapeFullBlock`: exactly one full 0..1 box.
                         let boxes = shapes.collision_boxes(below_state);
                         let full = boxes.len() == 1
                             && boxes[0].min == glam::DVec3::ZERO
                             && boxes[0].max == glam::DVec3::ONE;
                         if !full {
-                            continue;
-                        }
-                        let brightness = max_local_raw_brightness(world, pos, sky_darken);
-                        if brightness <= 3 {
                             continue;
                         }
                         let b = lightmap_brightness(ambient_light, brightness);

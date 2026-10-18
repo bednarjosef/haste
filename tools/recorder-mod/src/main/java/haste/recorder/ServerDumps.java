@@ -112,6 +112,13 @@ public final class ServerDumps {
         o.addProperty("light", state.getLightEmission());
         o.addProperty("air", state.isAir());
         o.addProperty("opaque", state.isSolidRender());
+        // EntityRenderer.extractShadowPiece skips INVISIBLE render shapes; RenderShape has only
+        // INVISIBLE and MODEL in 26.3, so the lowercase enum name is the whole domain.
+        o.addProperty("render_shape", state.getRenderShape().name().toLowerCase(Locale.ROOT));
+        // Level.collidesWithSuffocatingBlock -> BlockState.isSuffocating with an empty level: the
+        // default predicate is tag + isCollisionShapeFullBlock (no-neighbour shape here); see
+        // NOTES.md for the two predicates that read more than the state.
+        o.addProperty("suffocating", state.isSuffocating(EmptyBlockGetter.INSTANCE, ORIGIN));
         if (state.liquid() || !state.getFluidState().isEmpty()) {
             Identifier fluid = BuiltInRegistries.FLUID.getKey(state.getFluidState().getType());
             o.addProperty("fluid", fluid.toString());
@@ -181,6 +188,7 @@ public final class ServerDumps {
             o.addProperty("height", dims.height());
             o.addProperty("eye_height", dims.eyeHeight());
             o.addProperty("fixed", dims.fixed());
+            o.addProperty("fire_immune", type.fireImmune());
             types.add(o);
         }
         root.add("types", types);

@@ -4,9 +4,16 @@
 use std::collections::HashMap;
 
 use super::*;
+use glam::DVec3;
+use haste_core::input::InputState;
+use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
+use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
+use haste_protocol::haste_core::ChunkPos;
 use haste_protocol::nbt::{Nbt, NbtCompound};
+use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
 use haste_protocol::wire::particle::Particle;
+use haste_world::World;
 
 #[derive(Default)]
 struct FakeWorld {
@@ -74,6 +81,8 @@ struct FakeEntities {
     equipment: HashMap<EntityId, Vec<(u8, ItemStackData)>>,
     /// Synched data per entity id (index -> last value), like the store's metadata.
     metadata: HashMap<EntityId, HashMap<u8, haste_core::entity::MetadataValue>>,
+    /// Age in ticks per entity id, like the store's `Entity.age`.
+    ages: HashMap<EntityId, u32>,
 }
 
 impl EntitySink for FakeEntities {
@@ -138,6 +147,9 @@ impl EntitySink for FakeEntities {
         index: u8,
     ) -> Option<&haste_core::entity::MetadataValue> {
         self.metadata.get(&id).and_then(|m| m.get(&index))
+    }
+    fn entity_age(&self, id: EntityId) -> Option<u32> {
+        self.ages.get(&id).copied()
     }
     fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData) {
         self.log.push(format!("equipment {} {slot}", id.0));
@@ -233,6 +245,7 @@ impl Rig {
             .map(|p| match p {
                 ServerboundPlay::AcceptTeleportation(_) => "accept_teleportation",
                 ServerboundPlay::PlayerLoaded(_) => "player_loaded",
+                ServerboundPlay::MovePlayerPos(_) => "move_player_pos",
                 ServerboundPlay::MovePlayerPosRot(_) => "move_player_pos_rot",
                 ServerboundPlay::PlayerInput(_) => "player_input",
                 ServerboundPlay::ClientTickEnd(_) => "client_tick_end",
@@ -468,14 +481,15 @@ fn swing_animation_reaches_the_store() {
 #[test]
 fn teleport_is_accepted_one_tick_later_then_movement_follows() {
     let mut r = Rig::new();
-    // Nothing is sent before the first teleport.
+    // Before the first teleport only ClientTickEnd leaves (Minecraft.tick sends it every
+    // tick a level exists — from the login on, whatever the player's state).
     r.session.end_tick(
         &InputState::default(),
         &mut r.world,
         &r.entities,
         &mut r.out,
     );
-    assert!(r.out.is_empty());
+    assert_eq!(r.names(), ["client_tick_end"]);
     r.apply(teleport(1, DVec3::new(0.5, -60.0, 0.5), 0));
     // The accept is not sent from the packet handler (a join teleport answered within
     // microseconds of arrival races the server's join bookkeeping: "moved too quickly!"),
@@ -487,7 +501,7 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &r.entities,
         &mut r.out,
     );
-    assert!(r.out.is_empty());
+    assert_eq!(r.names(), ["client_tick_end"]);
     r.session.end_tick(
         &InputState::default(),
         &mut r.world,
@@ -500,10 +514,13 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
             "accept_teleportation",
             "player_loaded",
             "player_input",
+            // The teleport's position and rotation are reported by the first sendPosition
+            // after the accept (xLast and the sent rotation untouched by the teleport).
+            "move_player_pos_rot",
             "client_tick_end"
         ]
     );
-    // The fake world has no chunks: the player stays put, so no movement packet.
+    // The fake world has no chunks: the player stays put, so no further movement packet.
     // player_input only when it changes; player_loaded only once.
     r.session.end_tick(
         &InputState::default(),
@@ -529,7 +546,11 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &r.entities,
         &mut r.out,
     );
-    assert_eq!(r.names(), ["accept_teleportation", "client_tick_end"]);
+    // The relative teleport moved the player: the accept, then the new position.
+    assert_eq!(
+        r.names(),
+        ["accept_teleportation", "move_player_pos", "client_tick_end"]
+    );
 }
 
 #[test]
@@ -561,7 +582,8 @@ fn respawn_resets_world_and_entities() {
         Identifier::minecraft("the_nether")
     );
     assert_eq!(r.session.player.game_mode, GameMode::Survival);
-    // Movement waits for the next teleport after a respawn.
+    // Movement waits for the next teleport after a respawn; only the ClientTickEnd leaves
+    // (Minecraft.tick sends it with a level, player_loaded or not).
     r.out.clear();
     r.session.end_tick(
         &InputState::default(),
@@ -569,7 +591,7 @@ fn respawn_resets_world_and_entities() {
         &r.entities,
         &mut r.out,
     );
-    assert!(r.out.is_empty());
+    assert_eq!(r.names(), ["client_tick_end"]);
 }
 
 /// The real `World` behind the sink: a synthetic chunk (our own encoder) loads and counts,

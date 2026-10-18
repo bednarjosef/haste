@@ -9,6 +9,7 @@ pub mod arena;
 pub mod block_particles;
 pub mod blockentity;
 pub mod blur;
+pub mod clouds;
 pub mod entity;
 pub mod fluid;
 pub mod fluid_occlusion;

@@ -22,9 +22,13 @@ public final class PlayerImpl {
 
 
     // ---- LivingEntity ----
-    /** Health: the player's from Rust's set_health state, the mount's from its living-entity data. */
+    /** Health: the player's from Rust's set_health state, the mount's from its living-entity data.
+     * The crosshair pick's proxy answers 1 (alive): it is only assigned to
+     * {@code Minecraft.crosshairPickEntity} while Rust's pick is a living, alive entity, which is
+     * what its {@code isAlive} (kept body: health > 0) asks. */
     public static float getHealth(net.minecraft.world.entity.LivingEntity e) {
-        return e == Proxies.player ? Mirror.health() : Mirror.mountHealth();
+        if (e == Proxies.player) return Mirror.health();
+        return e == Proxies.crosshairPick ? 1f : Mirror.mountHealth();
     }
 
     /** Max health: the player's own attribute map; the mount's synced max_health attribute. */
@@ -39,9 +43,15 @@ public final class PlayerImpl {
         for (net.minecraft.world.effect.MobEffectInstance e : Proxies.player.getActiveEffects()) e.tickClient();
     }
 
-    /** Item use, attack cooldown and sleeping are Rust's (player): not mirrored yet, so idle values. */
+    /** Item use and sleeping are Rust's (player): not mirrored yet, so idle values. */
     public static net.minecraft.world.item.ItemStack getActiveItem(net.minecraft.world.entity.LivingEntity e) { return net.minecraft.world.item.ItemStack.EMPTY; }
-    public static float getAttackStrengthScale(Player p, float partial) { return 1f; }
+    /** Vanilla {@code Player.getAttackStrengthScale}: (ticker + partial) / delay, clamped, from Rust's attack charge. */
+    public static float getAttackStrengthScale(Player p, float partial) {
+        return net.minecraft.util.Mth.clamp((Mirror.attackStrengthTicker() + partial) / Mirror.attackStrengthDelay(), 0f, 1f);
+    }
+    /** Vanilla {@code Player.getCurrentItemAttackStrengthDelay}: the mirrored delay, so the HUD's
+     * full-icon {@code Hud.MIN_CROSSHAIR_ATTACK_SPEED} check reads the same value as the scale. */
+    public static float getCurrentItemAttackStrengthDelay(Player p) { return Mirror.attackStrengthDelay(); }
     /** The mount's charged jump scale (vanilla `LocalPlayer.getJumpRidingScale`, Rust's charge state). */
     public static float getJumpRidingScale(net.minecraft.client.player.LocalPlayer p) { return Mirror.jumpRidingScale(); }
     public static int getSleepTimer(Player p) { return 0; }

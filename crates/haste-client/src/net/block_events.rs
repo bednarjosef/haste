@@ -38,3 +38,32 @@ impl Session {
         pots.extend(self.pots.iter().map(|(p, w)| (*p, w.0, w.1)));
     }
 }
+
+/// One block entity's lid animation (vanilla `ChestLidController` for chests and ender chests,
+/// `ShulkerBoxBlockEntity.updateAnimation`'s progress for shulker boxes: both step their value
+/// by 0.1 per tick towards the open target). `old` is the value at the start of the last tick,
+/// for the partial-tick lerp.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LidAnim {
+    pub old: f32,
+    pub value: f32,
+    pub open: bool,
+}
+
+impl LidAnim {
+    /// One 20 Hz tick (vanilla `ChestLidController.tickLid`: 0.1 steps, clamped at 0 and 1).
+    pub(super) fn tick(&mut self) {
+        self.old = self.value;
+        let target = if self.open { 1.0 } else { 0.0 };
+        if self.value < target {
+            self.value = (self.value + 0.1).min(target);
+        } else if self.value > target {
+            self.value = (self.value - 0.1).max(target);
+        }
+    }
+
+    /// Whether the lid is at rest closed (nothing left to animate, no need to copy it out).
+    pub(super) fn at_rest_closed(&self) -> bool {
+        !self.open && self.value == 0.0
+    }
+}

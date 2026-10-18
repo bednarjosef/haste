@@ -30,6 +30,10 @@ impl LocalPlayer {
         self.vehicle = vehicle;
         self.boat = boat;
         self.item_steered = item_steered;
+        // `LocalPlayer.removeVehicle` clears `handsBusy` (a dismount stops rowing at once).
+        if vehicle.is_none() {
+            self.hands_busy = false;
+        }
         let has_horse = horse.is_some();
         self.horse = horse;
         if !has_horse {
@@ -132,6 +136,12 @@ impl LocalPlayer {
         look: (f32, f32),
         vehicle: Option<VehiclePose>,
     ) {
+        // vanilla `LocalPlayer.rideTick` sets `handsBusy` when a movement key is held while
+        // controlling an `AbstractBoat` (rowing): `isHandsBusy` blocks `Minecraft
+        // .startAttack` and `startUseItem` for the ticks it is set. Any other vehicle (or
+        // none) clears it, as the flag is reset at the top of every rideTick.
+        self.hands_busy =
+            self.boat.is_some() && (input.left || input.right || input.forward || input.back);
         // vanilla `LocalPlayer.rideTick`: the passenger is a boat's rudder.
         let posed = if let Some(boat) = &mut self.boat {
             boat.set_input(crate::boat::BoatInput::from_input(input));
@@ -267,5 +277,13 @@ impl LocalPlayer {
             animal.follow(v.pos, v.yaw);
         }
         animal.set_look(look);
+    }
+}
+
+impl LocalPlayer {
+    /// `LocalPlayer.isHandsBusy`: rowing a boat (set in `rideTick`). The first-person hands
+    /// dip while it is set (`FirstPersonHandsAndItems.tick`).
+    pub fn hands_busy(&self) -> bool {
+        self.hands_busy
     }
 }
