@@ -266,8 +266,14 @@ pub struct Entity {
     pub old_swell: i32,
     /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
     pub attack_ticks: i32,
-    /// A dropped item entity's stack (metadata index 9, `Item`), if its metadata named one.
+    /// A dropped item entity's stack (metadata index 8, `ItemEntity.DATA_ITEM`), if its metadata
+    /// named one.
     pub item: Option<ItemStackData>,
+    /// True for a `minecraft:item` entity (`ItemEntity`): its client-side motion is simulated from
+    /// the spawn / `set_entity_motion` velocity (`ItemEntity.getMoveSimulationType()` is
+    /// `SERVER_AND_CLIENT`). Resolved from the entity type name at spawn, and confirmed when the
+    /// item stack arrives at `ItemEntity.DATA_ITEM` (index 8).
+    pub is_item: bool,
     /// Ticks since spawn: drives the dropped items' spin and bob.
     pub age: u32,
     /// A player's trailing cape point (`ClientAvatarState`'s cloak), ticked for players only.
@@ -276,10 +282,11 @@ pub struct Entity {
 
 impl Entity {
     fn new(s: &EntitySpawn, dims: &EntityDimensions) -> Entity {
+        let type_name = crate::registry::entity_type_name(s.kind);
         let living = if s.kind.0 == 0 {
             true
         } else {
-            match crate::registry::entity_type_name(s.kind) {
+            match type_name {
                 None => true,
                 Some(name) => {
                     crate::registry::table_entry(name).is_some()
@@ -289,6 +296,9 @@ impl Entity {
                 }
             }
         };
+        // `ItemEntity`: simulated client-side (SERVER_AND_CLIENT). Without the registry name
+        // (no cache) `set_metadata` upgrades this when `ItemEntity.DATA_ITEM` (index 8) arrives.
+        let is_item = type_name == Some("minecraft:item");
         Entity {
             id: s.id,
             uuid: s.uuid,
@@ -334,6 +344,7 @@ impl Entity {
             old_swell: 0,
             attack_ticks: 0,
             item: None,
+            is_item,
             age: 0,
             cloak: crate::avatar::Cloak::default(),
         }
@@ -754,6 +765,11 @@ impl EntityStore {
         // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
         // clears the drop.
         if let Some(entry) = e.metadata.get(8) {
+            if matches!(entry.value, MetadataValue::ItemStack(_)) {
+                // Only `ItemEntity` defines an item stack at this slot, so it also confirms the
+                // type when the registry name was unavailable at spawn (no cache).
+                e.is_item = true;
+            }
             e.item = match &entry.value {
                 MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
                 _ => None,
@@ -839,6 +855,12 @@ impl EntityStore {
                 pitch: &mut slot.pitch,
                 prev_pitch: &mut slot.prev_pitch,
             });
+            // `ItemEntity.tick`: the client simulates a dropped item's motion from its velocity
+            // (gravity + drag) until the next position packet; vanilla calls `commonTick` first,
+            // so this runs after the interpolation step above.
+            if slot.is_item {
+                crate::item_entity::tick(slot);
+            }
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
             // `LivingEntity.calculateEntityAnimation`: passengers and the dead stop walking.
