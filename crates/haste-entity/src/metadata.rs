@@ -55,6 +55,27 @@ impl MobFlags {
     }
 }
 
+/// `LivingEntity.DATA_LIVING_ENTITY_FLAGS` (index 8, the first of `LivingEntity`'s slots
+/// after `Entity`'s eight; a byte). Only the bits the client's use tracking reads:
+/// `setLivingEntityFlag(1, ...)` starts a use, `2` marks the off hand as the used one.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct LivingFlags {
+    /// `isUsingItem` (bit 1).
+    pub using_item: bool,
+    /// `getUsedItemHand` answers the off hand for bit 2.
+    pub use_offhand: bool,
+}
+
+impl LivingFlags {
+    fn from_byte(b: i8) -> LivingFlags {
+        let b = b as u8;
+        LivingFlags {
+            using_item: b & 0x01 != 0,
+            use_offhand: b & 0x02 != 0,
+        }
+    }
+}
+
 /// Per-entity metadata: interpreted shared fields plus every raw entry, indexed.
 #[derive(Default)]
 pub struct Metadata {
@@ -62,6 +83,8 @@ pub struct Metadata {
     pub pose: Option<Pose>,
     /// The `Mob` flags byte (index 15): aggressive / left-handed.
     pub mob: MobFlags,
+    /// The `LivingEntity` flags byte (index 8): an item use in progress.
+    pub living: LivingFlags,
     /// `Entity.DATA_CUSTOM_NAME` (index 2): the entity's custom name, for the upside-down check.
     pub custom_name: Option<Component>,
     /// The custom name flattened to plain text, computed when the metadata changes (name tags
@@ -101,6 +124,9 @@ impl Metadata {
                     self.custom_name_plain = Some(c.to_plain(&|_| None));
                 }
                 (6, MetadataValue::Pose(p)) => self.pose = Some(*p),
+                // Index 8 is `LivingEntity`'s flags byte; `ItemEntity`'s stack sits on the
+                // same index as an ItemStack, so the wire type tells them apart.
+                (8, MetadataValue::Byte(b)) => self.living = LivingFlags::from_byte(*b),
                 (15, MetadataValue::Byte(b)) => self.mob = MobFlags::from_byte(*b),
                 // Index 16 is `Creeper.DATA_SWELL_DIR` (int); `AgeableMob`'s baby flag at 16 is a
                 // bool, so the wire type keeps the two apart.

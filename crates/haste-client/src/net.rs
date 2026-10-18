@@ -197,6 +197,13 @@ pub struct Session {
     /// `ClientPacketListener.handleSetEntityPassengersPacket` shows the "mount.onboard"
     /// overlay message on exactly that transition): taken by the driver, which tells the UI.
     mounted_message: bool,
+    /// A remote entity's consume draws run through its own generator (vanilla's
+    /// `RandomSource` is one per entity), by entity id. Entries live as long as the
+    /// entity does (`remove_entities` drops them).
+    pub(crate) remote_use: HashMap<EntityId, crate::player::interact::ConsumeEffects>,
+    /// The remote uses' sound-request scratch (see `net::remote_use`): drawn in vanilla's
+    /// order with the particles, then dropped — the server's sound packets carry the sound.
+    remote_use_sounds: Vec<crate::sound::SoundRequest>,
 }
 
 impl Session {
@@ -276,6 +283,8 @@ impl Session {
             entity_attributes: HashMap::new(),
             attribute_names: None,
             mounted_message: false,
+            remote_use: HashMap::new(),
+            remote_use_sounds: Vec::new(),
         }
     }
 
@@ -404,6 +413,7 @@ impl Session {
                 entities.clear();
                 self.fireworks.clear();
                 self.attached_firework = None;
+                self.remote_use.clear();
                 self.dimension = dim;
                 self.world_border = crate::world_border::WorldBorder::default();
                 self.entity_id = EntityId(l.entity_id);
@@ -521,6 +531,7 @@ mod particles;
 pub mod pickup;
 mod player_state;
 mod registries;
+mod remote_use;
 mod session_tick;
 mod sinks;
 mod vehicle;

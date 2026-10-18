@@ -173,3 +173,12 @@ pub fn box_for(width: f32, height: f32) -> Arc<CubeModel> {
         })
         .clone()
 }
+
+/// Whether a model has a part with this id (humanoid models carry `right_arm`, which only the
+/// armed/armoured layers need).
+pub(crate) fn model_has_part(
+    part: &haste_core::model::ModelPart,
+    id: haste_core::parts::PartId,
+) -> bool {
+    part.id == id || part.children.iter().any(|c| model_has_part(c, id))
+}

@@ -51,6 +51,12 @@ pub(super) fn tick(
     }
     let ui = shared.ui.lock().clone();
     driver.end_tick(&input.state, &mut *world, &mut *entities, ui.as_ref())?;
+    // The remote entities' use effects (vanilla's entities tick before the level's
+    // particles spawn, `ClientLevel.tick`): the use steps the entity tick just recorded,
+    // run through the same consume path the local player's own use takes.
+    driver
+        .session
+        .apply_remote_use(entities.use_ticks(), &shared.data);
     weather::tick(driver, &world, shared);
     let mut dirty = world.take_dirty_sections();
     if !dirty.is_empty() {
