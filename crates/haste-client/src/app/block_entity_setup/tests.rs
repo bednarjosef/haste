@@ -299,14 +299,15 @@ fn dump_covers_the_old_table() {
             "{block} -> {type_path}"
         );
     }
-    // Everything the old table produced is still produced.
-    for (block, type_path) in OLD_TABLE_PAIRS {
-        assert_eq!(
-            kind_of(block),
-            Some(id(type_path)),
-            "{block} -> {type_path}"
-        );
-    }
+    // Everything the old table produced is still produced, except the old table's own bugs:
+    // `MovingPistonBlock.newBlockEntity` returns null (the piston's block event creates the
+    // moving piston's entity itself), so a block update placing moving_piston creates none.
+    let dropped: Vec<String> = OLD_TABLE_PAIRS
+        .iter()
+        .filter(|(block, type_path)| kind_of(block) != Some(id(type_path)))
+        .map(|(block, type_path)| format!("{block} -> {type_path}"))
+        .collect();
+    assert_eq!(dropped, ["moving_piston -> piston"]);
     // Pairs only the dump has: bugs the old table had. Informational, not a failure.
     let old: HashSet<(&str, &str)> = OLD_TABLE_PAIRS.iter().copied().collect();
     let mut missed: Vec<String> = Vec::new();

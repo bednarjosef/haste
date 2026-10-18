@@ -133,13 +133,15 @@ for block, want in [
     ("minecraft:shulker_box", "minecraft:shulker_box"),
     ("minecraft:poplar_shelf", "minecraft:shelf"),
     ("minecraft:spawner", "minecraft:mob_spawner"),
-    ("minecraft:moving_piston", "minecraft:piston"),
 ]:
     got = bet["blocks"].get(block)
     if got != want:
         failures.append(f"{block} block entity type {got} != {want}")
 if "minecraft:stone" in bet["blocks"]:
     failures.append("stone has a block entity type")
+# MovingPistonBlock.newBlockEntity returns null: the piston's block event makes that entity.
+if "minecraft:moving_piston" in bet["blocks"]:
+    failures.append("moving_piston has a block entity type from newBlockEntity")
 
 if failures:
     print("FAILURES:")
