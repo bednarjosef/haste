@@ -260,6 +260,8 @@ pub fn player_instance(
         // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
         hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
             / crate::net::HURT_TILT_TICKS as f32),
+        // Full sky until the frame pass samples the world (`EntityInstance::sample_light`).
+        light: (15, 0),
         overlays: Default::default(),
         item: None,
         decoration: None,

@@ -887,7 +887,14 @@ impl WorldFeed {
         };
         self.instances
             .push(game::player_instance(local.0, view, partial, &own_skin));
-        renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
+        // Entity light rides on the instances themselves (sampled once, where they are built;
+        // the renderer holds no world reference and no longer keeps a per-frame light map).
+        {
+            let world = shared.world.read();
+            for inst in &mut self.instances {
+                inst.sample_light(&*world);
+            }
+        }
         (&self.instances, &self.be_instances)
     }
 

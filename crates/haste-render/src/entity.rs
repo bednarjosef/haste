@@ -271,7 +271,6 @@ pub struct EntityRenderer {
     shadow_buffer: wgpu::Buffer,
     shadow_capacity: usize,
     shadow_vertices: Vec<EntityVertex>,
-    lights: HashMap<EntityId, (u8, u8)>,
     pub nametags: Vec<Nametag>,
     hand_buffer: wgpu::Buffer,
     hand_capacity: usize,
@@ -312,13 +311,6 @@ pub struct EntityRenderer {
 }
 
 impl EntityRenderer {
-    /// Sky/block light at each entity's position (sampled by the caller with the world at hand).
-    /// Entities without an entry are drawn at full sky light.
-    pub fn set_lights(&mut self, lights: impl IntoIterator<Item = (EntityId, (u8, u8))>) {
-        self.lights.clear();
-        self.lights.extend(lights);
-    }
-
     /// The beams' radius scale for this frame (vanilla `BeaconRenderer.extract`: 1 within 96
     /// blocks or while scoping, else the horizontal distance / 96).
     pub fn set_beam_radius_scale(&mut self, scale: f32) {
@@ -356,8 +348,8 @@ impl EntityRenderer {
             if !aabb_in_frustum(frustum, rel, half + 0.5) {
                 continue;
             }
-            let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
-            // The map is (sky, block); the vertex wants (block, sky).
+            let (sky, block) = e.light;
+            // The instance's light is (sky, block); the vertex wants (block, sky).
             let light = (block, sky);
             if let Some(item) = &e.item {
                 let start = self.vertices.len();
