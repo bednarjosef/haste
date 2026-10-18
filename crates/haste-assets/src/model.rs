@@ -94,6 +94,27 @@ pub struct ElementDef {
     pub(crate) faces: BTreeMap<Direction, FaceDef>,
     #[serde(default = "default_true")]
     pub(crate) shade: bool,
+    /// Vanilla 26.3 `shade_direction_override`: when set, every face of the
+    /// element takes this direction's `CardinalLighting` brightness instead of
+    /// its own facing (cross plants declare "up" so they light like the ground).
+    #[serde(default, deserialize_with = "deserialize_shade_direction")]
+    pub(crate) shade_direction_override: Option<Direction>,
+}
+
+/// `shade_direction_override` is a direction name; an unknown name fails the
+/// model like vanilla's `JsonParseException` (the whole model falls back to
+/// the missing model).
+fn deserialize_shade_direction<'de, D>(de: D) -> Result<Option<Direction>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name: Option<String> = Option::deserialize(de)?;
+    match name {
+        None => Ok(None),
+        Some(name) => Direction::parse(&name)
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown shade direction: {name}"))),
+    }
 }
 
 fn default_true() -> bool {

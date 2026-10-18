@@ -406,9 +406,14 @@ fn bake_refs(
                     positions = rotate_positions(positions, r.x, r.y);
                     cullface = cullface.map(|d| d.rotate_x(r.x).rotate_y(r.y));
                 }
-                let shade_face = el
-                    .shade
-                    .then(|| direction_from_positions(&positions).unwrap_or(Direction::Up));
+                // Cardinal-lighting face: the element's `shade_direction_override`
+                // (vanilla `BakedQuad.MaterialInfo.shadeDirectionOverride`, e.g.
+                // the cross models' "up") wins over the derived facing; the
+                // legacy `shade: false` (dropped in 26.3) keeps its old meaning.
+                let shade_face = el.shade_direction_override.or_else(|| {
+                    el.shade
+                        .then(|| direction_from_positions(&positions).unwrap_or(Direction::Up))
+                });
                 quads.push(BakedQuad {
                     positions,
                     uvs,

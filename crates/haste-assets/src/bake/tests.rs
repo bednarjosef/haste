@@ -281,6 +281,24 @@ fn jar_bake_stone_and_stairs() {
         .unwrap();
     assert!(baked.is_full_opaque(grass), "grass_block full opaque");
 
+    // The cross plants' quads are lit as "up" (`shade_direction_override`
+    // in tinted_cross): their shade face is Up, not the quad's own facing.
+    for name in ["short_grass", "tall_grass", "poppy"] {
+        let plant = (0..states.len() as u32)
+            .map(BlockStateId)
+            .find(|s| states.block_of(*s).path() == name)
+            .unwrap();
+        let quads = baked.quads(plant);
+        assert!(!quads.is_empty(), "{name} has no quads");
+        for q in quads {
+            assert_eq!(
+                q.shade_face,
+                Some(crate::model::Direction::Up),
+                "{name} quad must light as up"
+            );
+        }
+    }
+
     // oak_stairs facing=east (bottom, straight): > 6 quads
     let mut stairs_east = None;
     for id in 0..states.len() as u32 {

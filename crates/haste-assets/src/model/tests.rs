@@ -9,6 +9,34 @@ const DIRS: [Direction; 6] = [
     Direction::East,
 ];
 
+/// `shade_direction_override` (the cross models' "up") parses to its
+/// direction; an unknown name fails the model like vanilla's
+/// `JsonParseException`.
+#[test]
+fn shade_direction_override_parses() {
+    let file: ModelFile = serde_json::from_str(
+        r##"{"elements": [{
+             "from": [0, 0, 0], "to": [16, 16, 16],
+             "shade_direction_override": "up",
+             "faces": { "north": { "texture": "#all" } }
+               }]}"##,
+    )
+    .unwrap();
+    assert_eq!(
+        file.elements[0].shade_direction_override,
+        Some(Direction::Up)
+    );
+
+    let bad = serde_json::from_str::<ModelFile>(
+        r##"{"elements": [{
+             "from": [0, 0, 0], "to": [16, 16, 16],
+             "shade_direction_override": "sideways",
+             "faces": { "north": { "texture": "#all" } }
+               }]}"##,
+    );
+    assert!(bad.is_err(), "unknown shade direction must fail the model");
+}
+
 /// 26.3 texture values may carry `force_translucent`; the sprite id lands in the
 /// map and the flag in the model's set (glass panes, redstone dust).
 #[test]
