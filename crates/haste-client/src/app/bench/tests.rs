@@ -113,3 +113,14 @@ fn bench_camera_path_turns_then_flies() {
     assert!((c.pos.x - 250.0).abs() < 1e-4, "{}", c.pos.x);
     assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
 }
+
+#[test]
+fn interval_stats_sorts_and_picks_percentiles() {
+    // 999 frames of 1 ms and one of 50 ms: the average moves, p50/p99 stay 1 ms.
+    let mut v = vec![1.0_f32; 999];
+    v.insert(500, 50.0);
+    let [avg, p50, p90, p99, _p999, worst] = window::interval_stats(&v);
+    assert!((avg - 1.049).abs() < 1e-4, "{avg}");
+    assert_eq!((p50, p90, p99, worst), (1.0, 1.0, 1.0, 50.0));
+    assert_eq!(window::interval_stats(&[]), [0.0; 6]);
+}

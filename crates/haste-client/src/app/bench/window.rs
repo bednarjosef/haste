@@ -20,6 +20,45 @@ pub(crate) struct WindowBench {
     pub(crate) look: (Option<f32>, Option<f32>),
     /// `--pos`: the settle also waits until the server has teleported the player here.
     pub(crate) want_pos: Option<DVec3>,
+    /// The wall time between one measured frame's end and the next one's: the whole frame
+    /// (game view, GUI, feed, render, present), what vanilla's frame-to-frame time measures.
+    /// A sample's `frame_ms` is only the renderer's part.
+    pub(crate) intervals: Vec<f32>,
+    pub(crate) last_frame: Option<Instant>,
+}
+
+impl WindowBench {
+    /// Records one measured frame and the interval since the previous one.
+    pub(crate) fn record(&mut self, sample: BenchSample) {
+        let now = Instant::now();
+        if let Some(last) = self.last_frame {
+            self.intervals.push((now - last).as_secs_f32() * 1000.0);
+        }
+        self.last_frame = Some(now);
+        self.samples.push(sample);
+    }
+}
+
+/// The frame-to-frame interval statistics, in milliseconds: average, p50, p90, p99, p99.9 and
+/// worst (the same fields as the vanilla recorder's `frametimes` step).
+pub(super) fn interval_stats(intervals: &[f32]) -> [f32; 6] {
+    let mut sorted = intervals.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let avg = sorted.iter().sum::<f32>() / sorted.len().max(1) as f32;
+    let at = |p: f32| {
+        sorted
+            .get(((p * sorted.len() as f32) as usize).min(sorted.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    [
+        avg,
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        at(0.999),
+        sorted.last().copied().unwrap_or(0.0),
+    ]
 }
 
 /// `--bench-window SECONDS`: the windowed twin of `bench`. Joins like the windowed client
@@ -80,6 +119,8 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
         quitting: false,
         bench: Some(WindowBench {
             samples: Vec::with_capacity(seconds as usize * 1000),
+            intervals: Vec::with_capacity(seconds as usize * 1000),
+            last_frame: None,
             camera: None,
             view_distance: 12,
             seconds: seconds as f32,
@@ -127,6 +168,11 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let summary = bench_summary(&bench.samples);
     println!("windowed bench at {}, {}", meta.width, meta.height);
     println!("{}", summary.text(&meta));
+    let [i_avg, i_p50, i_p90, i_p99, i_p999, i_worst] = interval_stats(&bench.intervals);
+    println!(
+        "frame interval (whole frame): avg {i_avg:.3} ms ({:.0} FPS), p50 {i_p50:.3}, p90 {i_p90:.3}, p99 {i_p99:.3}, p99.9 {i_p999:.3}, worst {i_worst:.3} ms",
+        if i_avg > 0.0 { 1000.0 / i_avg } else { 0.0 }
+    );
     if let Some(out) = &args.bench_out {
         let json = serde_json::json!({
             "windowed": true,
@@ -136,6 +182,13 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "fps": summary.fps(),
             "p99_ms": summary.p99_ms,
             "worst_ms": summary.worst_ms,
+            "interval_avg_ms": i_avg,
+            "interval_fps": if i_avg > 0.0 { 1000.0 / i_avg } else { 0.0 },
+            "interval_p50_ms": i_p50,
+            "interval_p90_ms": i_p90,
+            "interval_p99_ms": i_p99,
+            "interval_p999_ms": i_p999,
+            "interval_worst_ms": i_worst,
             "sections_drawn": summary.sections_drawn,
             "sections_total": summary.sections_total,
             "draw_calls": summary.draw_calls,

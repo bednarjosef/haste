@@ -4017,7 +4017,7 @@ impl App {
         if let (Some(bench), Ok(stats)) = (&mut self.bench, &result) {
             if let Some(started) = bench.started {
                 let prev_drawn = bench.samples.last().map_or(0, |s| s.sections_drawn);
-                bench.samples.push(BenchSample {
+                bench.record(BenchSample {
                     frame_ms: stats.frame_ms,
                     sections_drawn: stats.chunk_sections_drawn,
                     sections_total: stats.chunk_sections_total,
