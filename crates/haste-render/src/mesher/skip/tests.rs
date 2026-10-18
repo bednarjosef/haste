@@ -289,6 +289,8 @@ fn glass_wall_interior_faces_cull_in_the_mesh() {
         .count();
     assert_eq!(south, 1, "glass model: one south-cullface quad");
     assert_eq!(north, 1, "glass model: one north-cullface quad");
+    // 8 glass blocks x 6 faces = 48 quads; the 8 interior ones are culled.
+    assert_eq!((with, without), (40, 48), "glass wall quad counts");
     assert_eq!(without - with, 8, "4 columns x 2 interior faces culled");
     assert!(with > 0, "the wall's outer faces stay");
 }
@@ -376,6 +378,8 @@ fn connected_pane_pair_culls_the_shared_faces() {
         .iter()
         .filter(|q| q.cullface == Some(Direction::North))
         .count();
+    // 44 quads for two panes; the connected pair's two arm faces are culled.
+    assert_eq!((with, without), (42, 44), "pane pair quad counts");
     assert_eq!(
         without - with,
         south + north,
