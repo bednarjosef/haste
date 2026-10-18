@@ -46,6 +46,9 @@ use crate::script;
 use crate::ui::keys;
 use crate::Args;
 use haste_jvm::JvmHost;
+use menu_background::{menu_camera, menu_frame, menu_sky};
+
+mod menu_background;
 
 /// Saved options this run uses: FOV, render distance, mouse sensitivity and (unless the
 /// `--vsync` flag says otherwise) vsync. `Config::load` creates the file with defaults on
@@ -2007,7 +2010,7 @@ impl InputRouter {
         }
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
-        shared_input.first_person = matches!(perspective, game::Perspective::FirstPerson);
+        shared_input.perspective = perspective;
         {
             let i = &mut shared_input.interact;
             i.attack = self.attack;
@@ -2171,7 +2174,15 @@ fn open_sounds(
     let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
         let mut assets = open_assets()?;
         let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
-        haste_audio::sounds::SoundEvents::parse(&bytes)
+        let mut events = haste_audio::sounds::SoundEvents::parse(&bytes)?;
+        // Vanilla's load-time check (SoundManager.prepare's validateSoundResource): a
+        // file listed in sounds.json but absent from the assets is dropped from its
+        // event now, so it can never be picked and fail to play later.
+        let dropped = events.retain_files(|path| assets.has_asset(&format!("assets/{path}")));
+        if dropped > 0 {
+            tracing::warn!("{dropped} sound files listed in sounds.json are missing");
+        }
+        Ok(events)
     })();
     match events {
         Ok(events) => Some(crate::sound::Sounds::new(
@@ -2327,51 +2338,6 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The GUI frame of menu mode: the open screen over the plain background the renderer draws
-/// without a world. `mouse` is the cursor in GUI pixels; the camera looks straight ahead.
-fn menu_frame(
-    ui: &mut crate::ui::Ui,
-    renderer: &mut Renderer,
-    input: &InputRouter,
-    options: &Options,
-) -> (GuiFrame, Camera, SkyState, f32) {
-    let (w, h) = renderer.size();
-    let scale = resolve_gui_scale(
-        u32::from(options.gui_scale),
-        w,
-        h,
-        options.force_unicode_font,
-    );
-    let (gw, gh) = gui_scaled_size(w, h, scale);
-    let gui = ui.take_frame(gw, gh, scale, input.mouse, 0.0);
-    (gui, menu_camera(), menu_sky(), 0.0)
-}
-
-/// Menu mode's camera: at the origin looking north (the world is not drawn).
-fn menu_camera() -> Camera {
-    Camera {
-        pos: DVec3::ZERO,
-        yaw: 180.0,
-        pitch: 0.0,
-        fov_deg: 70.0,
-        hand_fov_deg: 70.0,
-        roll_deg: 0.0,
-        bob: haste_render::ViewBob::default(),
-    }
-}
-
-/// Menu mode's sky: noon, no fog (a plain bright background behind the screen).
-fn menu_sky() -> SkyState {
-    SkyState {
-        time_of_day: 6000,
-        rain: 0.0,
-        dimension_has_sky: true,
-        fog_start: 1000.0,
-        fog_end: 1000.0,
-        ..Default::default()
-    }
-}
-
 /// `--screenshot <file>`: with `--server`, join, wait until the world is meshed, render one
 /// frame offscreen, save it as PNG and leave (`--seconds` bounds the wait). Without one, menu
 /// mode: the title screen once the JVM is up, saved the same way.
@@ -2388,7 +2354,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     )?;
     let shared = session.shared.clone();
     // The shot is first person: the game thread's camera effects take that perspective.
-    shared.input.lock().first_person = true;
+    shared.input.lock().perspective = game::Perspective::FirstPerson;
     let mut assets = open_assets_with(&session.server_packs)?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
@@ -2476,6 +2442,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.take_frame(gw, gh, scale, (0.0, 0.0), partial);
+            renderer.set_panorama(u.gui().panorama());
         }
         // The screen effects around the HUD frame, like the window draws them.
         let spin = {
@@ -3127,6 +3094,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 );
                 let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
                 gui = u.take_frame(gw, gh, scale, input.mouse, 0.0);
+                renderer.set_panorama(u.gui().panorama());
             }
             let frame = FrameInput {
                 camera: menu_camera(),
@@ -3222,6 +3190,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.take_frame(gw, gh, scale, input.mouse, partial);
+            renderer.set_panorama(u.gui().panorama());
         }
         // The screen effects around the HUD frame, like the window draws them.
         let spin = {
@@ -3618,7 +3587,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let session = Session::join(&args.username, args.render_distance, server, false, None)?;
     let shared = session.shared.clone();
     // The bench camera is first person: the game thread's camera effects take that perspective.
-    shared.input.lock().first_person = true;
+    shared.input.lock().perspective = game::Perspective::FirstPerson;
     let mut assets = open_assets_with(&session.server_packs)?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
@@ -4041,7 +4010,7 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let session = Session::join(&args.username, args.render_distance, server, false, None)?;
     let shared = session.shared.clone();
     // The bench camera is first person: the game thread's camera effects take that perspective.
-    shared.input.lock().first_person = true;
+    shared.input.lock().perspective = game::Perspective::FirstPerson;
     // `--x11`: the same XWayland window vanilla's client gets (framebuffer exactly
     // `--width`x`--height`; a Wayland window's is the desktop scale multiple).
     if args.x11 {
@@ -4564,8 +4533,7 @@ impl App {
         self.scope
     }
 
-    /// Menu mode's frame: the open screen over the plain background the renderer draws
-    /// without a world (vanilla draws the rotating panorama there; not yet in Haste).
+    /// Menu mode's frame: the open screen over the title panorama (see `menu_background`).
     fn draw_menu(&mut self) {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
@@ -4790,6 +4758,7 @@ impl App {
             );
             let (gw, gh) = gui_scaled_size(w, h, scale);
             self.gui = ui.take_frame(gw, gh, scale, mouse, partial);
+            renderer.set_panorama(ui.gui().panorama());
         }
         // The screen effects around the HUD frame (vanilla's `ScreenEffectRenderer.submit`'s
         // level-pass overlays and `Hud.extractCameraOverlays`'s own).

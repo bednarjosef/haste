@@ -894,8 +894,9 @@ fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
     let pose = vehicle_at(DVec3::new(10.0, 64.0, 10.0));
     let out = tick_riding(&mut p, &InputState::default(), Some(pose));
     assert_eq!(p.state.pos, DVec3::new(10.0, 64.1, 10.0));
-    // Rotation only; never a position packet.
-    assert_eq!(names(&out), ["tick_end"]);
+    // Rotation only; never a position packet. A passenger sends it every tick, even unchanged
+    // (`LocalPlayer.sendChanges`).
+    assert_eq!(names(&out), ["rot", "tick_end"]);
     // The vehicle moves: the passenger moves with it, and the camera follows (prev_pos
     // brackets the tick like always).
     let out = tick_riding(
@@ -907,7 +908,7 @@ fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
     assert_eq!(p.prev_pos, DVec3::new(10.0, 64.1, 10.0));
     let (eye, _, _) = p.camera(0.5);
     assert!((eye.x - 10.5).abs() < 1e-9, "{eye:?}");
-    assert_eq!(names(&out), ["tick_end"]);
+    assert_eq!(names(&out), ["rot", "tick_end"]);
     // An untracked vehicle leaves the passenger where it was.
     tick_riding(&mut p, &InputState::default(), None);
     assert_eq!(p.state.pos, DVec3::new(11.0, 64.1, 10.0));
@@ -955,13 +956,14 @@ fn a_passenger_looks_freely_and_sends_rotation_only() {
     // The look changed: one rotation packet, no position (the keys have not changed, so no
     // player_input with it).
     assert_eq!(names(&out), ["rot", "tick_end"]);
-    // Same look again: nothing but the tick end.
+    // Same look again: still a rotation packet — LocalPlayer.sendChanges sends
+    // MovePlayerPacket.Rot every tick while riding, changed or not.
     let out = tick_riding(
         &mut p,
         &look,
         Some(vehicle_at(DVec3::new(10.0, 64.0, 10.0))),
     );
-    assert_eq!(names(&out), ["tick_end"]);
+    assert_eq!(names(&out), ["rot", "tick_end"]);
 }
 
 #[test]
@@ -1061,7 +1063,10 @@ fn steering_a_boat_sends_paddle_boat_and_move_vehicle() {
         ..Default::default()
     };
     let out = tick_paddling(&mut p, &forward, &world);
-    assert_eq!(names(&out), ["input", "paddle", "move_vehicle", "tick_end"]);
+    assert_eq!(
+        names(&out),
+        ["input", "paddle", "rot", "move_vehicle", "tick_end"]
+    );
     // First tick: the keys we came aboard with were empty, so the paddles do not turn yet.
     let paddle = out.iter().find_map(|p| match p {
         ServerboundPlay::PaddleBoat(p) => Some((p.left, p.right)),
@@ -1070,7 +1075,7 @@ fn steering_a_boat_sends_paddle_boat_and_move_vehicle() {
     assert_eq!(paddle, Some((false, false)));
     // The second tick paddles: both paddles turn and the boat has started forward.
     let out = tick_paddling(&mut p, &forward, &world);
-    assert_eq!(names(&out), ["paddle", "move_vehicle", "tick_end"]);
+    assert_eq!(names(&out), ["paddle", "rot", "move_vehicle", "tick_end"]);
     match &out[0] {
         ServerboundPlay::PaddleBoat(p) => assert!(p.left && p.right),
         other => panic!("expected paddle_boat, got {other:?}"),
@@ -1089,7 +1094,7 @@ fn steering_a_boat_sends_paddle_boat_and_move_vehicle() {
         boat.pos.y + p.seat().y
     );
     // The `move_vehicle` is the boat's own pose (its pitch is zero: a boat never pitches).
-    match &out[1] {
+    match &out[2] {
         ServerboundPlay::MoveVehicle(m) => {
             assert_eq!(m.pos, boat.pos);
             assert_eq!(m.yaw, boat.yaw);
@@ -1208,13 +1213,13 @@ fn steering_a_horse_sends_move_vehicle_of_its_simulation() {
     // The first tick: the horse has not got our keys yet (they arrive with this tick, one tick
     // late, like the boat's paddles), so it stands still but still reports its pose.
     let out = tick_riding_world(&mut p, &forward, &world);
-    assert_eq!(names(&out), ["input", "move_vehicle", "tick_end"]);
+    assert_eq!(names(&out), ["input", "rot", "move_vehicle", "tick_end"]);
     let horse = p.horse().expect("still steering the horse");
     assert!(horse.delta.z.abs() < 1.0e-9, "{}", horse.delta.z);
     // The second tick rides.
     let out = tick_riding_world(&mut p, &forward, &world);
-    assert_eq!(names(&out), ["move_vehicle", "tick_end"]);
-    match &out[0] {
+    assert_eq!(names(&out), ["rot", "move_vehicle", "tick_end"]);
+    match &out[1] {
         ServerboundPlay::MoveVehicle(m) => {
             assert_eq!(m.pos, p.horse().unwrap().pos);
             assert_eq!(m.yaw, p.horse().unwrap().yaw);
@@ -1351,13 +1356,15 @@ fn on_the_pig() -> (LocalPlayer, TestWorld) {
 fn a_pig_walks_while_the_carrot_stick_is_held() {
     let (mut p, world) = on_the_pig();
     let hold = InputState::default();
-    // The pig has no look yet (it arrives one tick late, like the horse's input).
+    // The pig has no look yet (it arrives one tick late, like the horse's input). The
+    // passenger's rotation goes before the vehicle's move (LocalPlayer.sendChanges sends it
+    // every tick while riding).
     let out = tick_riding_world(&mut p, &hold, &world);
-    assert_eq!(names(&out), ["move_vehicle", "tick_end"]);
+    assert_eq!(names(&out), ["rot", "move_vehicle", "tick_end"]);
     let out = tick_riding_world(&mut p, &hold, &world);
     let pig = p.pig().expect("still steering the pig");
     assert!(pig.delta.z > 0.0, "the pig walked: {}", pig.delta.z);
-    match &out[0] {
+    match &out[1] {
         ServerboundPlay::MoveVehicle(m) => {
             assert_eq!(m.pos, p.pig().unwrap().pos);
             assert!(m.pos.z > 0.5, "the pig moved: {}", m.pos.z);
