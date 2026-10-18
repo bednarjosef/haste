@@ -5896,16 +5896,19 @@ impl App {
             self.draw_menu();
             return;
         }
-        // The spyglass scope's per-frame easing, before the renderer borrows `self` for the
-        // rest of the frame (it reads one flag of the view under a short lock).
+        // The frame's view state: locked and copied once here, then passed to everything
+        // below (frame_view, the feed, debug_info) instead of each taking the lock again.
+        // The spyglass scope's easing reads its flag from the same copy.
         let t0 = Instant::now();
-        let scope = {
-            let scoping = self
-                .session
-                .as_ref()
-                .is_some_and(|s| s.shared.view.lock().screen.scoping);
-            self.scope_scale(scoping, t0)
-        };
+        let view = self
+            .session
+            .as_ref()
+            .expect("checked above")
+            .shared
+            .view
+            .lock()
+            .clone();
+        let scope = self.scope_scale(view.screen.scoping, t0);
         let session = self.session.as_ref().expect("checked above");
         // The options the player just changed in a vanilla screen: the game thread applied
         // them to `live_options` and bumped its version; copy them here so FOV, GUI scale and
@@ -5932,9 +5935,6 @@ impl App {
         }
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
-        // The frame's view state: locked and copied once here, then passed to everything
-        // below (frame_view, the feed, debug_info) instead of each taking the lock again.
-        let view = session.shared.view.lock().clone();
         // The windowed bench holds the camera still (the settle frame's view with the
         // requested look), like the offscreen `--bench --bench-fixed`.
         if let Some(bench) = &mut self.bench {
