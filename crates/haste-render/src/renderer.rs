@@ -15,7 +15,7 @@ use haste_core::{ChunkPos, SectionPos};
 use parking_lot::Mutex;
 
 use crate::arena::MeshArenas;
-use crate::mesher::Mesher;
+use crate::mesher::{Mesher, SectionMesh};
 use crate::pipeline::Gpu;
 
 pub(crate) use readback::Capture;
@@ -250,6 +250,8 @@ pub struct Renderer {
     animation_tick: u64,
     baked: Arc<haste_assets::BakedBlockModels>,
     mesher: Mesher,
+    /// Reused buffer for meshes drained from the mesher each frame.
+    drain_buf: Vec<SectionMesh>,
     /// Grass/foliage colormaps from the assets (biome colours are resolved against them).
     colormaps: crate::tint::Colormaps,
     sections: crate::section_slab::SectionSlab,

@@ -95,17 +95,19 @@ impl Renderer {
         let started = std::time::Instant::now();
         let mut uploads = 0;
         let mut bytes = 0;
+        let mut batch = std::mem::take(&mut self.drain_buf);
         while started.elapsed() < std::time::Duration::from_millis(2) {
-            let batch = self.mesher.drain(16);
+            self.mesher.drain(16, &mut batch);
             if batch.is_empty() {
                 break;
             }
-            for mesh in batch {
+            for mesh in batch.drain(..) {
                 bytes += mesh.vertex_bytes() + mesh.index_bytes();
                 self.upload_mesh(mesh);
                 uploads += 1;
             }
         }
+        self.drain_buf = batch;
         (uploads, bytes)
     }
 
