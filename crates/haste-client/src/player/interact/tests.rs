@@ -1043,7 +1043,11 @@ fn use_duration_and_animation_come_from_the_item() {
         warm_blocks: None,
         ui: None,
     };
-    let d = |i: u32| r.p.int.use_data(&item(i), env.data).map(|u| (u.duration, u.animation));
+    let d = |i: u32| {
+        r.p.int
+            .use_data(&item(i), env.data)
+            .map(|u| (u.duration, u.animation))
+    };
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
     assert_eq!(d(5), Some((72000, UseAnimation::Bow)));
     assert_eq!(d(6), Some((72000, UseAnimation::Crossbow)));
