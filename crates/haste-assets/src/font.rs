@@ -80,9 +80,9 @@ impl HexGlyph {
 /// The resolved default font. `TextMetrics` is implemented over it (`haste_core::gui`).
 pub struct BitmapFont {
     glyphs: HashMap<char, Glyph>,
-    /// Code points 0..128 straight from `glyphs`, filled once after all providers are
-    /// merged so table and map always agree: nearly every character the GUI draws (ASCII)
-    /// avoids the hash probe.
+    /// Code points 0..128 mirrored from `glyphs` by `insert` (the only write path), so table
+    /// and map always agree: nearly every character the GUI draws (ASCII) avoids the hash
+    /// probe.
     ascii: [Option<Glyph>; 128],
     pages: Vec<Arc<image::RgbaImage>>,
     hex: Vec<HexGlyph>,
@@ -104,18 +104,6 @@ impl Default for BitmapFont {
 }
 
 impl BitmapFont {
-    /// Refill `ascii` from `glyphs` after all providers have been merged (or after the last
-    /// direct `insert` in tests): the hot lookup paths read `ascii` for `ch < 128`, so it
-    /// must never lag behind the map.
-    fn fill_ascii_table(&mut self) {
-        self.ascii = [None; 128];
-        for (&ch, &glyph) in &self.glyphs {
-            if ch as u32 <= 127 {
-                self.ascii[ch as usize] = Some(glyph);
-            }
-        }
-    }
-
     /// The glyph for a code point, `Glyph::MISSING` when no provider has it.
     pub fn glyph(&self, ch: char) -> Glyph {
         if ch as u32 <= 127 {
@@ -193,6 +181,9 @@ impl BitmapFont {
             }
         }
         self.glyphs.insert(ch, glyph);
+        if (ch as u32) < 128 {
+            self.ascii[ch as usize] = Some(glyph);
+        }
     }
 
     fn add_bitmap_provider(&mut self, p: &BitmapProviderRaw, image: image::RgbaImage) {
@@ -438,7 +429,6 @@ impl Assets {
     pub fn font_default(&mut self) -> Result<BitmapFont> {
         let mut font = BitmapFont::default();
         self.load_font_into(&Identifier::minecraft("default"), &mut font, 0)?;
-        font.fill_ascii_table();
         Ok(font)
     }
 
@@ -549,7 +539,6 @@ mod tests {
                 ..Glyph::MISSING
             },
         );
-        f.fill_ascii_table();
         f
     }
 
