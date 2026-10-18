@@ -115,6 +115,10 @@ public final class ServerDumps {
         o.add("occlusion", shapeBoxes(occlusion));
 
         o.addProperty("light", state.getLightEmission());
+        // BlockState.getLightDampening / propagatesSkylightDown: what the client light engine
+        // (LightEngine, SkyLightEngine) reads for every block it propagates through.
+        o.addProperty("light_dampening", state.getLightDampening());
+        o.addProperty("propagates_skylight_down", state.propagatesSkylightDown());
         o.addProperty("air", state.isAir());
         o.addProperty("opaque", state.isSolidRender());
         // EntityRenderer.extractShadowPiece skips INVISIBLE render shapes; RenderShape has only

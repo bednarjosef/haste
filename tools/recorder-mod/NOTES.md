@@ -62,6 +62,9 @@ exists (`server.overworld()` is used for the per-pose player dimensions).
   overrides: fences, fence gates, lecterns, sculk shriekers). Absent in dumps from before
   the field was added; consumers fall back to the `outline` shape plus the solid-render
   flag, which is exact except for those two classes.
+- **`light_dampening`** and **`propagates_skylight_down`** are `state.getLightDampening()` and
+  `state.propagatesSkylightDown()`, the per-state inputs of the light engines (absent in older
+  dumps).
 - Deprecated-API warning at compile: `Block.stateById`/`Block.getId` are marked deprecated
   (they want you on the registry) but are exactly the BLOCK_STATE_REGISTRY view we need.
 
