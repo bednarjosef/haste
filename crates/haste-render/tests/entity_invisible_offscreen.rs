@@ -45,14 +45,17 @@ impl haste_core::view::BlockView for Flat {
 fn render_scene(
     renderer: &mut Renderer,
     world: &dyn haste_core::view::BlockView,
-    entities: &[EntityInstance],
+    entities: &mut [EntityInstance],
     camera: Camera,
 ) -> image::RgbaImage {
     let gui = haste_core::gui::GuiFrame {
         scale: 2,
         ..Default::default()
     };
-    renderer.sample_entity_lights(world, entities);
+    // Entity light rides on the instances (sampled here, where the test builds its frame).
+    for e in entities.iter_mut() {
+        e.sample_light(world);
+    }
     let frame = haste_render::FrameInput {
         camera,
         entities,
@@ -129,6 +132,7 @@ fn invisible_entities_offscreen() {
         pose: PoseOverrides::default(),
         body: BodyTransform::default(),
         body_scale: glam::Vec3::ONE,
+        light: (15, 0),
         skin: None,
         nametag: Some("Steve".into()),
         below_name: None,
@@ -177,9 +181,9 @@ fn invisible_entities_offscreen() {
 
     // Warm up the lazy atlas, then the empty scene to compare against.
     for _ in 0..2 {
-        let _ = render_scene(&mut renderer, &world, &[], camera);
+        let _ = render_scene(&mut renderer, &world, &mut [], camera);
     }
-    let empty = render_scene(&mut renderer, &world, &[], camera);
+    let empty = render_scene(&mut renderer, &world, &mut [], camera);
     let diff = |a: &image::RgbaImage, b: &image::RgbaImage| {
         a.pixels()
             .zip(b.pixels())
@@ -190,7 +194,7 @@ fn invisible_entities_offscreen() {
     let img = render_scene(
         &mut renderer,
         &world,
-        std::slice::from_ref(&visible),
+        std::slice::from_mut(&mut visible.clone()),
         camera,
     );
     assert!(diff(&empty, &img) > 2000, "the visible body draws");
@@ -199,7 +203,7 @@ fn invisible_entities_offscreen() {
     let img = render_scene(
         &mut renderer,
         &world,
-        std::slice::from_ref(&invisible),
+        std::slice::from_mut(&mut invisible.clone()),
         camera,
     );
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
@@ -213,7 +217,12 @@ fn invisible_entities_offscreen() {
     assert_eq!(renderer.entities_drawn(), 0, "no geometry was posed");
     // Invisible but equipped: the armour and sword still draw (vanilla keeps the
     // equipment layers), and nothing else does.
-    let img = render_scene(&mut renderer, &world, std::slice::from_ref(&armed), camera);
+    let img = render_scene(
+        &mut renderer,
+        &world,
+        std::slice::from_mut(&mut armed.clone()),
+        camera,
+    );
     img.save(out.join("invisible_equipped.png")).unwrap();
     assert!(
         diff(&empty, &img) > 100,
@@ -227,7 +236,7 @@ fn invisible_entities_offscreen() {
     let img = render_scene(
         &mut renderer,
         &world,
-        std::slice::from_ref(&visible_armed),
+        std::slice::from_mut(&mut visible_armed.clone()),
         camera,
     );
     assert!(
@@ -255,6 +264,7 @@ fn decoration(
         pose: PoseOverrides::default(),
         body: BodyTransform::default(),
         body_scale: glam::Vec3::ONE,
+        light: (15, 0),
         skin: None,
         nametag: None,
         below_name: None,
@@ -334,9 +344,9 @@ fn invisible_item_frame_offscreen() {
     let empty_invisible = frame(3, true, None);
 
     for _ in 0..2 {
-        let _ = render_scene(&mut renderer, &world, &[], camera);
+        let _ = render_scene(&mut renderer, &world, &mut [], camera);
     }
-    let empty = render_scene(&mut renderer, &world, &[], camera);
+    let empty = render_scene(&mut renderer, &world, &mut [], camera);
     let diff = |a: &image::RgbaImage, b: &image::RgbaImage| {
         a.pixels()
             .zip(b.pixels())
@@ -347,7 +357,7 @@ fn invisible_item_frame_offscreen() {
     let img = render_scene(
         &mut renderer,
         &world,
-        std::slice::from_ref(&visible),
+        std::slice::from_mut(&mut visible.clone()),
         camera,
     );
     assert!(diff(&empty, &img) > 500, "the visible frame draws");
@@ -357,7 +367,7 @@ fn invisible_item_frame_offscreen() {
     let img = render_scene(
         &mut renderer,
         &world,
-        std::slice::from_ref(&invisible),
+        std::slice::from_mut(&mut invisible.clone()),
         camera,
     );
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
@@ -377,7 +387,7 @@ fn invisible_item_frame_offscreen() {
     let img = render_scene(
         &mut renderer,
         &world,
-        std::slice::from_ref(&empty_invisible),
+        std::slice::from_mut(&mut empty_invisible.clone()),
         camera,
     );
     assert_eq!(

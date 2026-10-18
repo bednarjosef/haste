@@ -31,8 +31,8 @@ impl Renderer {
         self.first_person = fp;
     }
 
-    /// Samples what this frame's overlays and entities need from the world (the renderer holds
-    /// no world): entity light, the targeted block's outline boxes, the states of breaking
+    /// Samples what this frame's overlays need from the world (the renderer holds
+    /// no world): the targeted block's outline boxes, the states of breaking
     /// blocks. Call before `render` with the frame you are about to render.
     pub fn sample_world(
         &mut self,
@@ -40,7 +40,6 @@ impl Renderer {
         shapes: &dyn haste_core::view::CollisionShapes,
         frame: &FrameInput,
     ) {
-        self.sample_entity_lights(world, frame.entities);
         self.prepare_shadows(world, shapes, frame);
         let o = &mut self.overlay.world;
         o.target = frame.block_target.and_then(|(pos, _)| {
@@ -112,32 +111,6 @@ impl Renderer {
         );
         self.particles
             .prepare(snapshot, camera, partial, &planes, forward);
-    }
-
-    /// Sky and block light at each entity's position, sampled from the world by the caller
-    /// (the renderer holds no world reference). Call before `render`; entities without an
-    /// entry are drawn at full sky light.
-    pub fn set_entity_lights(
-        &mut self,
-        lights: impl IntoIterator<Item = (haste_core::EntityId, (u8, u8))>,
-    ) {
-        self.entity.set_lights(lights);
-    }
-
-    /// Convenience over `set_entity_lights`: samples `world` at each instance's block position.
-    pub fn sample_entity_lights(
-        &mut self,
-        world: &dyn BlockView,
-        entities: &[haste_core::model::EntityInstance],
-    ) {
-        self.entity.set_lights(entities.iter().map(|e| {
-            let p = haste_core::BlockPos::new(
-                e.pos.x.floor() as i32,
-                (e.pos.y + 0.5).floor() as i32,
-                e.pos.z.floor() as i32,
-            );
-            (e.id, (world.sky_light(p), world.block_light(p)))
-        }));
     }
 
     /// Vanilla `Options.entityShadows`: draw the round entity shadows (default on).

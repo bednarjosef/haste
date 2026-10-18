@@ -374,7 +374,6 @@ impl EntityRenderer {
             shadow_buffer,
             shadow_capacity,
             shadow_vertices: Vec::new(),
-            lights: HashMap::new(),
             nametags: Vec::new(),
             hand_buffer,
             hand_capacity: 1024,
