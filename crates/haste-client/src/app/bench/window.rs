@@ -195,6 +195,7 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
         breaking: Vec::new(),
         frame_stats: FrameStats::default(),
         fps: FpsCounter::new(),
+        hitches: HitchTrace::new(),
         error: None,
         seconds: None,
         screenshot: false,

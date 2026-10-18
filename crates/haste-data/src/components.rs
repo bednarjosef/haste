@@ -84,7 +84,13 @@ impl ItemComponents {
 
     /// The item's default `minecraft:consumable`, if it has one.
     pub fn consumable(&self, item: &Identifier) -> Option<Consumable> {
-        self.consumables.get(item).copied()
+        self.consumables.get(item).cloned()
+    }
+
+    /// The names of the items whose default components carry `minecraft:consumable` (the
+    /// ones a use can emit effects for; the renderer packs their particle sprites).
+    pub fn consumable_items(&self) -> impl Iterator<Item = &Identifier> {
+        self.consumables.keys()
     }
 
     /// The item's default `minecraft:food`, if it has one: `Some(can_always_eat)`

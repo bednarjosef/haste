@@ -257,16 +257,16 @@ pub fn upload_section(
     let (min, max) = (world(mesh.aabb.0), world(mesh.aabb.1));
     mesh.layers
         .iter()
-        .map(|(layer, indices)| SectionGpuMesh {
+        .map(|l| SectionGpuMesh {
             pos: mesh.pos,
             vertex_buffer: vertex_buffer.clone(),
             index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("section-indices"),
-                contents: bytemuck::cast_slice(indices),
+                contents: bytemuck::cast_slice(&l.indices),
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             }),
-            index_count: indices.len() as u32,
-            layer: *layer,
+            index_count: l.indices.len() as u32,
+            layer: l.layer,
             aabb: (min, max),
         })
         .collect()

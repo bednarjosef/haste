@@ -310,9 +310,10 @@ fn mesh_hash(mesh: &haste_render::SectionMesh) -> u64 {
     };
     let mut h = DefaultHasher::new();
     mesh.vertices.len().hash(&mut h);
-    for (layer, indices) in &mesh.layers {
-        layer_index(*layer).hash(&mut h);
-        let mut triangles: Vec<u64> = indices
+    for l in &mesh.layers {
+        layer_index(l.layer).hash(&mut h);
+        let mut triangles: Vec<u64> = l
+            .indices
             .as_chunks::<3>()
             .0
             .iter()
@@ -374,7 +375,11 @@ fn mesher_output_stable() {
         );
         let mesh = mesh_section_with(&snapshot, &baked, &atlas, &tables, pos);
         mesh_hash(&mesh).hash(&mut hash);
-        quads += mesh.layers.iter().map(|(_, i)| i.len() / 6).sum::<usize>();
+        quads += mesh
+            .layers
+            .iter()
+            .map(|l| l.indices.len() / 6)
+            .sum::<usize>();
         vertices += mesh.vertices.len();
         for v in &mesh.vertices {
             sprites.0 = sprites.0.min(v.sprite);
