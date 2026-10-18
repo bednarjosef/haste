@@ -36,6 +36,9 @@ impl WorldSink for FakeWorld {
     fn apply_light(&mut self, pos: ChunkPos, _light: &LightData) {
         self.log.push(format!("light {} {}", pos.x, pos.z));
     }
+    fn replace_biomes(&mut self, pos: ChunkPos, _data: &[u8]) {
+        self.log.push(format!("biomes {} {}", pos.x, pos.z));
+    }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         self.log.push(format!(
             "be {} {} {} {} {:?}",

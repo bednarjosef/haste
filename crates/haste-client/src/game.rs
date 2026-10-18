@@ -769,6 +769,9 @@ impl WorldSink for TrackedWorld<'_> {
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
         WorldSink::apply_light(self.world, pos, light)
     }
+    fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
+        WorldSink::replace_biomes(self.world, pos, data)
+    }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         WorldSink::set_block_entity(self.world, pos, data)
     }
@@ -953,7 +956,7 @@ fn apply_option_changes(shared: &Shared, driver: &NetDriver, changes: Vec<(Strin
     shared.options_version.fetch_add(1, Ordering::Relaxed);
     if let Some(rd) = render_distance {
         // The server's view distance still caps what we mesh, like at join.
-        shared.view.lock().view_distance = driver.login().view_distance.min(rd);
+        shared.view.lock().view_distance = driver.session.view_distance.min(rd);
     }
     if sound_changed {
         let volumes = shared.live_options.lock().sound;
@@ -1056,6 +1059,10 @@ fn drain_packets(
     };
     let ui = shared.ui.lock().clone();
     driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
+    shared.view.lock().view_distance = driver
+        .session
+        .view_distance
+        .min(shared.live_options.lock().render_distance as i32);
     drop(entities);
     skins::request_profiles(&shared.skins, &mut driver.session.profiles);
     let mut dirty = world.take_dirty_sections();
