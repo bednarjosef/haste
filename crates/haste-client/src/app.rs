@@ -3685,9 +3685,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
-            let world = shared.world.read();
-            let mut particles = shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+            let snapshot = shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial, spin);
         }
         stats = renderer.render(&frame)?;
         drop(weather_guard);
@@ -4428,9 +4430,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(shared.view.lock().world_age);
         {
-            let world = shared.world.read();
-            let mut particles = shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+            let snapshot = shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial, spin);
         }
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
@@ -4849,9 +4853,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
-            let world = shared.world.read();
-            let mut particles = shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+            let snapshot = shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial, None);
         }
         stats = renderer.render(&frame)?;
         drop(weather_guard);
@@ -5033,9 +5039,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
-            let world = shared.world.read();
-            let mut particles = shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial_tick);
+            let snapshot = shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial_tick, None);
         }
         let stats = renderer.render(&frame)?;
         drop(weather_guard);
@@ -5975,7 +5983,7 @@ impl App {
             weather,
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock),
-        // then the particles (one short read lock).
+        // then the particles (the per-tick snapshot; no locks).
         let session = self.session.as_ref().expect("the game path above");
         renderer.sample_world(
             &*session.shared.world.read(),
@@ -5983,9 +5991,12 @@ impl App {
             &frame,
         );
         {
-            let world = session.shared.world.read();
-            let mut particles = session.shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+            let snapshot = session
+                .shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial, frame.spin);
         }
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(session.shared.view.lock().world_age);
