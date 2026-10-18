@@ -28,13 +28,15 @@ use merge::{flush_staged, merge_face, MergeFace, MergeKey, MergeQuad, StagedQuad
 use sink::{layer_index, MeshSink};
 use snapshot::{Cell, EXT};
 
+pub use sink::SectionLayerMesh;
+
 /// One section's meshed geometry, split by render layer.
 pub struct SectionMesh {
     pub pos: SectionPos,
     /// Vertices shared by all layers (section-local packed).
     pub vertices: Vec<PackedVertex>,
-    /// (layer, indices) pairs in draw order; indices reference `vertices`.
-    pub layers: Vec<(RenderLayer, Vec<u32>)>,
+    /// Layers in draw order; indices reference `vertices`.
+    pub layers: Vec<sink::SectionLayerMesh>,
     /// Section-local AABB (min/max in blocks) for frustum culling.
     pub aabb: ([f32; 3], [f32; 3]),
     /// Face-to-face sightlines through the section (cave culling).
@@ -72,7 +74,7 @@ impl SectionMesh {
 
     /// GPU bytes the indices will occupy in an arena.
     pub fn index_bytes(&self) -> u64 {
-        self.layers.iter().map(|(_, i)| i.len() as u64 * 4).sum()
+        self.layers.iter().map(|l| l.indices.len() as u64 * 4).sum()
     }
 }
 
@@ -243,12 +245,7 @@ impl MeshScratch {
     /// tables, so it persists across sections (clearing it would redo the
     /// atlas lookups and re-allocate every state's quad vector per section).
     fn begin_section(&mut self) {
-        self.sink.vertices.clear();
-        for idx in &mut self.sink.layers {
-            idx.clear();
-        }
-        self.sink.min = [f32::MAX; 3];
-        self.sink.max = [f32::MIN; 3];
+        self.sink.clear();
         self.fluid_scratch.clear();
         self.staged.clear();
     }
@@ -439,6 +436,7 @@ pub fn mesh_section_with(
                         } else {
                             staged.push(StagedQuad::Direct {
                                 layer: info.layer,
+                                dir: quad.direction.index() as u8,
                                 positions,
                                 uvs: quad.uvs,
                                 lights,
@@ -452,24 +450,9 @@ pub fn mesh_section_with(
         }
         flush_staged(staged, sink);
 
-        // The section's final output: the sink's vectors, moved (not copied)
-        // into the SectionMesh. Refill the scratch with right-sized vectors:
-        // consecutive sections are similar in size, so the next section pays
-        // one allocation per vector instead of growing them geometrically.
-        let vertex_len = sink.vertices.len();
-        let index_lens: [usize; 4] = core::array::from_fn(|i| sink.layers[i].len());
-        let vertices = std::mem::take(&mut sink.vertices);
-        let index_vecs = std::mem::take(&mut sink.layers);
-        sink.vertices = Vec::with_capacity(vertex_len);
-        sink.layers = index_lens.map(Vec::with_capacity);
-
-        // Compact into per-layer (vertices, indices).
-        let layers: Vec<(RenderLayer, Vec<u32>)> = index_vecs
-            .into_iter()
-            .enumerate()
-            .filter(|(_, idx)| !idx.is_empty())
-            .map(|(i, idx)| (sink::layer_from_index(i), idx))
-            .collect();
+        // The section's final output: the sink concatenates its buckets into
+        // per-layer index vectors (see `MeshSink::take_layers`).
+        let (vertices, layers) = sink.take_layers();
 
         SectionMesh {
             pos,
@@ -564,7 +547,15 @@ fn mesh_fluid(
             let positions = q
                 .positions
                 .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
-            sink.push_quad(layer, &positions, &q.uvs, [packed; 4], tint, q.sprite);
+            sink.push_quad(
+                layer,
+                q.dir,
+                &positions,
+                &q.uvs,
+                [packed; 4],
+                tint,
+                q.sprite,
+            );
         }
     }
     *ctx.fluid_scratch = quads;

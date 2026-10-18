@@ -148,7 +148,7 @@ fn jar_mesh_flat_stone_section() {
     // between neighbours, bottom at world bottom is against air but y=-1
     // is air so the bottom face shows too => 16*16 top + 16*16 bottom
     // + 4 edges * 16 = quads).
-    let total_quads: usize = mesh.layers.iter().map(|(_, idx)| idx.len() / 6).sum();
+    let total_quads: usize = mesh.layers.iter().map(|l| l.indices.len() / 6).sum();
     eprintln!("total quads: {total_quads}");
     // Histogram by cullface direction to debug face emission.
     use std::collections::HashMap;
@@ -162,7 +162,7 @@ fn jar_mesh_flat_stone_section() {
     eprintln!("stone baked quads by cullface: {hist:?}");
     // All in the solid layer.
     assert_eq!(mesh.layers.len(), 1);
-    assert_eq!(mesh.layers[0].0, haste_assets::RenderLayer::Solid);
+    assert_eq!(mesh.layers[0].layer, haste_assets::RenderLayer::Solid);
     // Vertices packed, sprite ids resolved from the atlas.
     assert!(mesh.vertices.iter().all(|v| v.sprite != 0));
     // Greedy merge: the uniform-light top and bottom faces each merge into
@@ -199,7 +199,7 @@ fn jar_mesh_flat_stone_section() {
     };
     let snapshot = MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
     let mesh = mesh_section(&snapshot, &baked, &atlas, SectionPos::new(0, 0, 0));
-    let quads: usize = mesh.layers.iter().map(|(_, idx)| idx.len() / 6).sum();
+    let quads: usize = mesh.layers.iter().map(|l| l.indices.len() / 6).sum();
     eprintln!(
         "grass slab: {quads} quads, {} vertices",
         mesh.vertices.len()

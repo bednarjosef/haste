@@ -100,12 +100,16 @@ pub(crate) struct Arena {
     indices: RangeAlloc,
 }
 
-/// One render layer of a resident section.
+/// One draw range of a resident section: a render layer, or one face
+/// direction's group within it (see `SectionLayerMesh`).
 #[derive(Clone, Copy, Debug)]
 pub struct LayerDraw {
     pub layer: RenderLayer,
     pub first_index: u32,
     pub index_count: u32,
+    /// Face direction (`Direction::ALL` index) of this group; 6 = the whole
+    /// layer (translucent, never direction-skipped).
+    pub dir: u8,
 }
 
 /// A section's meshes in an arena.
@@ -194,7 +198,7 @@ impl MeshArenas {
     /// Uploads a mesh; None for an empty one (nothing to draw).
     pub fn upload(&mut self, mesh: &SectionMesh) -> Option<ResidentSection> {
         let vcount = mesh.vertices.len() as u32;
-        let icount: u32 = mesh.layers.iter().map(|(_, i)| i.len() as u32).sum();
+        let icount: u32 = mesh.layers.iter().map(|l| l.indices.len() as u32).sum();
         if vcount == 0 || icount == 0 {
             return None;
         }
@@ -249,14 +253,30 @@ impl MeshArenas {
             bytemuck::cast_slice(&mesh.vertices),
         );
         self.scratch.clear();
-        let mut layers = Vec::with_capacity(mesh.layers.len());
-        for (layer, indices) in &mesh.layers {
-            layers.push(LayerDraw {
-                layer: *layer,
-                first_index: index_start + self.scratch.len() as u32,
-                index_count: indices.len() as u32,
-            });
-            self.scratch.extend_from_slice(indices);
+        let mut layers = Vec::with_capacity(mesh.layers.len() * 6);
+        for l in &mesh.layers {
+            let base = index_start + self.scratch.len() as u32;
+            if l.whole {
+                layers.push(LayerDraw {
+                    layer: l.layer,
+                    first_index: base,
+                    index_count: l.indices.len() as u32,
+                    dir: 6,
+                });
+            } else {
+                for d in 0..6 {
+                    let (start, count) = l.dirs[d];
+                    if count > 0 {
+                        layers.push(LayerDraw {
+                            layer: l.layer,
+                            first_index: base + start,
+                            index_count: count,
+                            dir: d as u8,
+                        });
+                    }
+                }
+            }
+            self.scratch.extend_from_slice(&l.indices);
         }
         self.queue.write_buffer(
             &a.index,

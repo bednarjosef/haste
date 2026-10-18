@@ -407,6 +407,10 @@ impl Renderer {
             )
             .length_squared();
             for l in sections.layers(s) {
+                // Skip a direction group facing away from the camera.
+                if l.dir < 6 && l.back_facing(lo, hi) {
+                    continue;
+                }
                 // Sort key: ascending distance for opaque (early depth),
                 // negated for translucent so ascending = far first.
                 let translucent = l.layer == haste_assets::RenderLayer::Translucent;
@@ -435,18 +439,15 @@ impl Renderer {
                 emit(&mut buckets, pos);
             }
         }
-        // Group the opaque buckets by arena: the draw loop issues one multi-draw-indirect
-        // call per run sharing a layer and an arena, and the visit order interleaves the
-        // arenas (a section's arena is where its mesh fit, unrelated to the walk), so
-        // ungrouped the runs average a few sections and the frame pays thousands of draw
-        // dispatches (2232 measured at rd 32 over 16 arenas). Depth-tested layers do not
-        // depend on order (terrain faces never coincide), so regrouping keeps the picture
-        // identical. Translucent stays back to front.
+        // Group the opaque buckets by arena: the draw loop issues one multi-draw
+        // call per run sharing a layer and an arena, and the visit order
+        // interleaves the arenas, so ungrouped the frame pays thousands of draw
+        // dispatches (2232 measured at rd 32 over 16 arenas). Depth-tested
+        // layers do not depend on order (terrain faces never coincide).
         for b in buckets.iter_mut().take(3) {
             b.sort_unstable_by_key(|d| d.arena);
         }
-        // Translucent back to front: the key is the negated distance, so
-        // ascending key order is far first.
+        // Translucent back to front: the key is the negated distance.
         buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
         let mut draws = std::mem::take(&mut self.draw_list);
         draws.clear();
@@ -639,9 +640,8 @@ impl Renderer {
                     draw_calls += self.entity.draw_portals(&mut pass);
                     draw_calls += self.entity.draw_beams(&mut pass);
                     pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                    // End the entity bracket before the translucent terrain that follows
-                    // (the layer change below opens its own): without this end the
-                    // translucent draws would be attributed to "entities".
+                    // End the entity bracket before the translucent terrain that
+                    // follows, or translucent draws are attributed to "entities".
                     if let Some(t) = self.timer.as_ref() {
                         if sub_open[5] {
                             t.end_subpass(&mut pass, 5);
@@ -717,8 +717,7 @@ impl Renderer {
                 draw_calls += self.entity.draw_beams(&mut pass);
             }
             if let Some(t) = self.timer.as_ref() {
-                // The last terrain layer (translucent, after the entities) leaves its
-                // bracket open: close it so its timestamp pair is complete.
+                // The last terrain layer leaves its bracket open: close it.
                 t.close_terrain(&mut pass, &mut sub_open);
                 if sub_open[5] {
                     t.end_subpass(&mut pass, 5);
