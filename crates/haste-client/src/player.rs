@@ -1003,6 +1003,19 @@ impl LocalPlayer {
         self.state.sprint_blocked =
             self.int.is_blind() || (self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly);
         self.state.slow_using_item = self.is_using_item();
+        // Vanilla `LocalPlayer.aiStep`: when not `noPhysics` and not a passenger (the passenger
+        // tick returned above), the four feet probes free a player inside a suffocating block
+        // (sand, a closing piston or door) before the sprint rules below.
+        if !self.state.no_physics {
+            let bb = self.state.aabb(&self.attrs);
+            haste_physics::move_towards_closest_space(
+                &mut self.state,
+                &bb,
+                ctx.world,
+                ctx.shapes,
+                ctx.blocks,
+            );
+        }
         // Vanilla `LocalPlayer.aiStep`'s double tap of forward, after `Player.aiStep` counted
         // `sprintTriggerTime` down above: sneak held, an item in use or the backward key
         // cancels the window. `hasForwardImpulse` is read from the PREVIOUS tick's input
