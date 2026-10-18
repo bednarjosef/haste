@@ -14,6 +14,9 @@ use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ClientboundPlay;
 use haste_protocol::ServerboundPlay;
 
+mod click_results;
+mod use_item;
+
 const ME: EntityId = EntityId(7);
 const STONE: BlockStateId = BlockStateId(1);
 const DIRT: BlockStateId = BlockStateId(2);
@@ -38,6 +41,18 @@ pub(super) fn data() -> &'static haste_data::GameData {
         let dir = std::env::temp_dir().join(format!("haste-interact-test-{}", std::process::id()));
         let reports = dir.join("reports");
         std::fs::create_dir_all(&reports).unwrap();
+        // One item components report file: the spear family's `minecraft:use_effects`
+        // (`Item.Properties.spear` sets `UseEffects(true, false, 1.0)`).
+        let components = reports
+            .join("minecraft")
+            .join("components")
+            .join("item");
+        std::fs::create_dir_all(&components).unwrap();
+        std::fs::write(
+            components.join("iron_spear.json"),
+            r#"{"components":{"minecraft:use_effects":{"can_sprint":true,"interact_vibrations":false,"speed_multiplier":1.0}}}"#,
+        )
+        .unwrap();
         let names = ["air", "stone", "dirt", "bedrock", "short_grass", "obsidian"];
         let blocks: Vec<String> = names
             .iter()
@@ -759,6 +774,58 @@ fn use_does_nothing_while_a_block_is_being_destroyed() {
 }
 
 #[test]
+fn the_used_item_use_effects_feed_the_physics_state() {
+    // Vanilla `LocalPlayer.isSlowDueToUsingItem` and `itemUseSpeedMultiplier`: using an item
+    // blocks the sprint and scales the input by the stack's `use_effects` — the default
+    // (`UseEffects.DEFAULT`, speed 0.2, can_sprint false) for items without an override, the
+    // spear family's `(can_sprint true, speed 1.0)` from the components report — and nothing
+    // of either without an item in use.
+    let mut r = Rig::new(GameMode::Survival);
+    let env = InteractEnv {
+        data: data(),
+        entities: &[],
+        entity_types: &[],
+        border: None,
+        warm_blocks: None,
+    };
+    r.p.apply_item_use_effects(Some(&env));
+    assert!(!r.p.state.using_item);
+    assert!(!r.p.state.slow_using_item);
+    assert_eq!(r.p.state.item_use_speed, 1.0);
+    r.p.int.set_using_item(true);
+    // The server-synced use before the hand's stack fills in, and no environment to resolve
+    // the item: the default every prototype carries.
+    r.p.apply_item_use_effects(Some(&env));
+    assert!(r.p.state.using_item);
+    assert!(r.p.state.slow_using_item);
+    assert_eq!(r.p.state.item_use_speed, 0.2);
+    r.p.apply_item_use_effects(None);
+    assert!(r.p.state.slow_using_item);
+    assert_eq!(r.p.state.item_use_speed, 0.2);
+    // An item without a use_effects entry in the report: the default.
+    r.p.int.using = Some(UsingItem {
+        item: Some(RegistryIndex(4)), // apple
+        duration: 32,
+        remaining: 32,
+        animation: UseAnimation::Eat,
+    });
+    r.p.apply_item_use_effects(Some(&env));
+    assert!(r.p.state.slow_using_item);
+    assert_eq!(r.p.state.item_use_speed, 0.2);
+    // The spear's component from the report: sprint stays possible, full speed.
+    r.p.int.using = Some(UsingItem {
+        item: Some(RegistryIndex(11)), // iron_spear
+        duration: 72000,
+        remaining: 72000,
+        animation: UseAnimation::Spear,
+    });
+    r.p.apply_item_use_effects(Some(&env));
+    assert!(r.p.state.using_item);
+    assert!(!r.p.state.slow_using_item, "the spear's can_sprint");
+    assert_eq!(r.p.state.item_use_speed, 1.0);
+}
+
+#[test]
 fn while_an_item_is_in_use_clicks_do_nothing_and_releasing_sends_release_use_item() {
     let mut r = Rig::new(GameMode::Survival);
     r.w = TestWorld::new();
@@ -995,41 +1062,6 @@ fn use_duration_and_animation_come_from_the_item() {
     // A tool is not used over time.
     assert_eq!(d(1), None);
     assert_eq!(d(3), None);
-}
-
-/// Starting a use sets `useItemRemainingTicks` and stops the 4-tick repeat; releasing the key
-/// sends `release_use_item` (`Minecraft.handleKeybinds` / `MultiPlayerGameMode.releaseUsingItem`).
-#[test]
-fn using_an_item_ticks_down_and_releases_on_key_up() {
-    let mut r = Rig::new(GameMode::Survival);
-    r.p.int.prepare(data());
-    r.p.int.set_item_components(item_components());
-    r.p.int.hotbar[0] = item(5); // bow
-    r.w = TestWorld::new(); // look at nothing: the use_item path
-    let use_ = InteractInput {
-        use_item: true,
-        ..Default::default()
-    };
-    let out = r.tick(use_);
-    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
-    assert!(r.p.is_using_item());
-    assert_eq!(r.p.use_duration(), 72000);
-    assert_eq!(r.p.use_animation(), UseAnimation::Bow);
-    // The start tick already ticked the remaining time down (`LivingEntity.tick`).
-    assert_eq!(r.p.use_item_remaining(), 71999);
-    // Held: the use does not repeat and only the timer advances.
-    let out = r.tick(use_);
-    assert!(out.is_empty());
-    assert_eq!(r.p.use_item_remaining(), 71998);
-    assert_eq!(r.p.ticks_using_item(), 2);
-    // Key up: one release, the use ends.
-    let out = r.tick(InteractInput::default());
-    assert_eq!(actions(&out), [(action::RELEASE_USE_ITEM, 0)]);
-    assert!(!r.p.is_using_item());
-    // A new press starts a fresh use.
-    let out = r.tick(use_);
-    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
-    assert_eq!(r.p.use_item_remaining(), 71999);
 }
 
 #[test]
@@ -1390,6 +1422,7 @@ fn a_held_attack_swings_the_hand_every_tick() {
             false,
             crate::hand::HeldStack::of(item),
             4.0,
+            false,
         );
         progress.push(r.p.hand.attack().1);
     }
@@ -1556,6 +1589,7 @@ fn an_entity_hit_and_a_miss_reset_the_attack_strength() {
             false,
             crate::hand::HeldStack::of(None),
             4.0,
+            false,
         );
     }
     assert!((r.p.hand.attack_strength_scale(0.5) - 1.0).abs() < 1e-6);
@@ -1573,6 +1607,7 @@ fn an_entity_hit_and_a_miss_reset_the_attack_strength() {
             false,
             crate::hand::HeldStack::of(None),
             4.0,
+            false,
         );
     }
     assert!((r.p.hand.attack_strength_scale(0.5) - 1.0).abs() < 1e-6);
@@ -1817,6 +1852,7 @@ fn a_spear_stabs_instead_of_attacking_or_breaking() {
             false,
             crate::hand::HeldStack::of(None),
             4.0,
+            false,
         );
     }
     let out = r.tick(ATTACK);
@@ -1871,6 +1907,7 @@ fn minimum_attack_charge_blocks_the_click_below_it() {
             false,
             crate::hand::HeldStack::of(r.p.main_hand().item),
             4.0,
+            false,
         );
     };
     // Fully charged: the click attacks the entity under the crosshair

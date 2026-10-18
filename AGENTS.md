@@ -95,9 +95,16 @@ these seams.
   type, screen bridge and group of packet handlers lives in its own file, named after the
   vanilla class it follows (`blockentity/chest.rs` for `ChestRenderer`, and so on). Shared
   plumbing goes into its own module, not into the file that first needed it.
-- **Small files.** Source files stay under about 600 lines; tests live in their own files
-  (`tests.rs` or `tests/`). A file already over 1000 lines must not grow: put new code into a
-  new module and move the code you touch out of the big file when you can.
+- **Small files.** Source files stay within 600 lines and test files within 1000; tests live
+  in their own files (`tests.rs` or `tests/`), never inline in a big source file. CI enforces
+  this (`scripts/check-file-sizes.sh`): the files that were already larger are listed in
+  `scripts/large-files.txt` and may shrink but never grow. When a change would push a file over
+  its limit, put the new code into a new module named after the vanilla concept it follows
+  instead, and move the code you touch out of a listed file when you can. After a split, run
+  `scripts/check-file-sizes.sh --update` to lower the recorded sizes.
+- **Plan the module before writing the code.** A new feature starts as its own file (or a
+  directory of files) named after the vanilla class it ports, with shared plumbing in its own
+  module; never append a new feature to whichever file happened to be open.
 - **Split along responsibilities, never by size alone.** A split is a pure move: no behaviour
   change in the same commit, so the move can be reviewed as a move.
 

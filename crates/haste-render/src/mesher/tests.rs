@@ -205,11 +205,18 @@ fn jar_mesh_flat_stone_section() {
         mesh.vertices.len()
     );
     // Greedy merge: unmerged this scene would draw 256 top + 256 bottom +
-    // 256 side + 256 overlay quads (1024); the uniform-light faces merge
-    // (top and bottom to one each, the side overlays to a few rects) while
-    // the light-graded side quads stay per block.
-    assert!(quads < 1024, "culled grass slab must merge something");
-    assert!(quads >= 256, "the graded side faces stay per block");
+    // 256 side + 256 overlay quads (1024). The uniform-light faces merge: top
+    // and bottom to one quad each, and each edge's y=1..3 side and overlay
+    // faces to one 16x3 rect (their face-adjacent cells are lit, so vanilla
+    // LightCoordsUtil.smoothBlend's dark-neighbour substitution makes their
+    // light uniform — the y=0 row below them is sky-0 in FlatWorld). Only the
+    // y=0 side faces are light-graded — their face-adjacent cells sit at sky
+    // 0 with lit cells one row up, so the corner blend differs per vertex —
+    // and stay per block: 2 + 4 edges * 2 merged + 4 edges * 16 * 2 = 138.
+    assert_eq!(
+        quads, 138,
+        "uniform-light faces merge, graded side faces stay per block"
+    );
 }
 
 /// The client jar's baked models and atlas (None without the cache: the caller

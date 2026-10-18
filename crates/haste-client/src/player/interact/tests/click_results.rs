@@ -1,7 +1,7 @@
 //! Playtest 2026-10-18, click timing and feedback: the held-button packet counts
 //! (the "spam feels uncapped" report), and the use results vanilla answers with
 //! (`Minecraft.startUseItem`'s swing rules, `BlockItem.place`'s obstruction).
-//! The rig lives in `tests.rs`; only the crosshair-look variant of its tick is
+//! The rig lives in `../tests.rs`; only the crosshair-look variant of its tick is
 //! here (it is fixed at straight down there).
 
 use glam::DVec3;
@@ -11,8 +11,8 @@ use haste_core::{Aabb, BlockPos, Direction, EntityId};
 use haste_physics::testing::TestWorld;
 use haste_protocol::ServerboundPlay;
 
-use super::tests::{actions, data, item, Rig, ATTACK, USE, ZOMBIE};
-use super::{action, InteractEnv};
+use super::{actions, data, item, Rig, ATTACK, USE, ZOMBIE};
+use crate::player::interact::{action, InteractEnv};
 
 /// `minecraft:dirt` in the test registry (see `tests::data`): a block item.
 const DIRT_ITEM: u32 = 12;
@@ -182,6 +182,7 @@ fn a_placing_use_swings_the_hand_and_drops_it() {
         false,
         crate::hand::HeldStack::of(item),
         4.0,
+        false,
     );
     assert_eq!(r.p.hand.equip(), (0.0, 0.0));
     assert_eq!(r.p.hand.shown_item(), item);
@@ -192,6 +193,7 @@ fn a_placing_use_swings_the_hand_and_drops_it() {
         false,
         crate::hand::HeldStack::of(item),
         4.0,
+        false,
     );
     assert!(
         (r.p.hand.equip().1 - 0.064).abs() < 1e-6,

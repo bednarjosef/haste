@@ -11,6 +11,8 @@ pub struct Dimensions {
     pub width: f32,
     pub height: f32,
     pub eye_height: f32,
+    /// `EntityType.fireImmune()` (the recorder dump's `fire_immune`).
+    pub fire_immune: bool,
 }
 
 impl Default for Dimensions {
@@ -19,6 +21,7 @@ impl Default for Dimensions {
             width: 0.6,
             height: 1.8,
             eye_height: 1.62,
+            fire_immune: false,
         }
     }
 }
@@ -28,6 +31,7 @@ const DEFAULT: Dimensions = Dimensions {
     width: 0.6,
     height: 1.8,
     eye_height: 1.62,
+    fire_immune: false,
 };
 
 /// Sneaking/crawling height scaling. Observed on vanilla servers: a 1.8-tall humanoid crouches to
@@ -59,6 +63,11 @@ impl EntityDimensions {
             _ => d.height,
         };
         (d.width, height)
+    }
+
+    /// `EntityType.fireImmune()`: such entities never show flames (`Entity.isOnFire`).
+    pub fn fire_immune(&self, kind: RegistryIndex) -> bool {
+        self.map.get(&kind).copied().unwrap_or(DEFAULT).fire_immune
     }
 
     /// Height for the crouch flags (when no explicit pose metadata arrived).
@@ -98,6 +107,10 @@ fn load_oracle() -> Option<HashMap<RegistryIndex, Dimensions>> {
                 width: width as f32,
                 height: height as f32,
                 eye_height: eye_height as f32,
+                fire_immune: t
+                    .get("fire_immune")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
             },
         );
     }

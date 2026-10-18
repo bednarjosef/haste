@@ -4,9 +4,16 @@
 use std::collections::HashMap;
 
 use super::*;
+use glam::DVec3;
+use haste_core::input::InputState;
+use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
+use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
+use haste_protocol::haste_core::ChunkPos;
 use haste_protocol::nbt::{Nbt, NbtCompound};
+use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
 use haste_protocol::wire::particle::Particle;
+use haste_world::World;
 
 #[derive(Default)]
 struct FakeWorld {
@@ -74,6 +81,8 @@ struct FakeEntities {
     equipment: HashMap<EntityId, Vec<(u8, ItemStackData)>>,
     /// Synched data per entity id (index -> last value), like the store's metadata.
     metadata: HashMap<EntityId, HashMap<u8, haste_core::entity::MetadataValue>>,
+    /// Age in ticks per entity id, like the store's `Entity.age`.
+    ages: HashMap<EntityId, u32>,
 }
 
 impl EntitySink for FakeEntities {
@@ -138,6 +147,9 @@ impl EntitySink for FakeEntities {
         index: u8,
     ) -> Option<&haste_core::entity::MetadataValue> {
         self.metadata.get(&id).and_then(|m| m.get(&index))
+    }
+    fn entity_age(&self, id: EntityId) -> Option<u32> {
+        self.ages.get(&id).copied()
     }
     fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData) {
         self.log.push(format!("equipment {} {slot}", id.0));

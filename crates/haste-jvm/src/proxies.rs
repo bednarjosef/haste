@@ -96,6 +96,29 @@ pub struct MountHud {
     pub jump_scale: f32,
 }
 
+/// The attack indicator's charge (vanilla `Hud.extractCrosshair` and its hotbar variant): the
+/// local player's attack strength ticker and the held item's attack delay, ticked by the client
+/// once per tick (`Player.tick` / `Player.getCurrentItemAttackStrengthDelay`) and read by the
+/// player proxy's `getAttackStrengthScale`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AttackStrengthHud {
+    /// `Player.attackStrengthTicker`: ticks since the last attack or held-item change.
+    pub ticker: f32,
+    /// `Player.getCurrentItemAttackStrengthDelay`: 20 / attack speed, in ticks.
+    pub delay: f32,
+}
+
+impl Default for AttackStrengthHud {
+    fn default() -> Self {
+        // A fist fully charged (attack speed 4.0): the HUD draws no bar before the client
+        // publishes its own value.
+        AttackStrengthHud {
+            ticker: 5.0,
+            delay: 5.0,
+        }
+    }
+}
+
 /// What the F3 overlay shows (vanilla's default debug entries, see `NOTES.md`): filled by the
 /// client every frame. The numbers go through the mirror arrays; the strings
 /// ([`DebugInfo::biome`], [`DebugInfo::target_block`], ...) through `Native.debugText`, pulled by
@@ -207,7 +230,10 @@ pub(crate) mod mirror {
     pub const D_MOUNT_HEALTH: usize = 14;
     pub const D_MOUNT_MAX_HEALTH: usize = 15;
     pub const D_MOUNT_JUMP_SCALE: usize = 16;
-    pub const DOUBLES: usize = 17;
+    /// The attack indicator's charge (see `AttackStrengthHud`).
+    pub const D_ATTACK_STRENGTH_TICKER: usize = 17;
+    pub const D_ATTACK_STRENGTH_DELAY: usize = 18;
+    pub const DOUBLES: usize = 19;
     pub const F_HARDCORE: i32 = 1;
     pub const F_EYE_IN_WATER: i32 = 2;
     pub const F_INVULNERABLE: i32 = 4;
@@ -221,6 +247,8 @@ pub(crate) mod mirror {
     pub const F_MOUNT_LIVING: i32 = 512;
     /// Steering a vehicle that can jump (the jump bar replaces the experience bar).
     pub const F_MOUNT_JUMPABLE: i32 = 1024;
+    /// The crosshair picks a living, alive entity (the attack indicator's full icon).
+    pub const F_CROSSHAIR_PICK: i32 = 2048;
 }
 
 impl GameState {
@@ -247,7 +275,8 @@ impl GameState {
             | flag(self.immediate_respawn, F_IMMEDIATE_RESPAWN)
             | flag(self.debug_shown, F_DEBUG_SHOWN)
             | flag(self.mount.is_some(), F_MOUNT_LIVING)
-            | flag(self.mount.is_some_and(|m| m.jumpable), F_MOUNT_JUMPABLE);
+            | flag(self.mount.is_some_and(|m| m.jumpable), F_MOUNT_JUMPABLE)
+            | flag(self.crosshair_pick_living, F_CROSSHAIR_PICK);
         let dbg = &self.debug;
         i[I_FPS] = dbg.fps;
         i[I_CHUNKS] = dbg.chunks;
@@ -283,6 +312,8 @@ impl GameState {
             d[D_MOUNT_MAX_HEALTH] = f64::from(m.max_health);
             d[D_MOUNT_JUMP_SCALE] = f64::from(m.jump_scale);
         }
+        d[D_ATTACK_STRENGTH_TICKER] = f64::from(self.attack_strength.ticker);
+        d[D_ATTACK_STRENGTH_DELAY] = f64::from(self.attack_strength.delay);
         (i, d)
     }
 }
@@ -348,6 +379,11 @@ pub struct GameState {
     pub vitals: PlayerVitals,
     /// The mount HUD while riding a living vehicle (None on foot), see [`MountHud`].
     pub mount: Option<MountHud>,
+    /// The attack indicator's charge (crosshair bar and hotbar icon), see [`AttackStrengthHud`].
+    pub attack_strength: AttackStrengthHud,
+    /// The crosshair picks a living, alive entity in reach (vanilla
+    /// `Minecraft.crosshairPickEntity`): the attack indicator's full icon.
+    pub crosshair_pick_living: bool,
     /// What the F3 overlay shows.
     pub debug: DebugInfo,
     /// Whether the F3 overlay is on (vanilla's `DebugScreenEntryList.isOverlayVisible`; the
@@ -414,6 +450,8 @@ impl Default for GameState {
             permission_level: 0,
             vitals: PlayerVitals::default(),
             mount: None,
+            attack_strength: AttackStrengthHud::default(),
+            crosshair_pick_living: false,
             debug: DebugInfo::default(),
             debug_shown: false,
             in_world: false,
@@ -595,65 +633,4 @@ pub(crate) fn with_state<T>(f: impl FnOnce(&mut GameState) -> T) -> T {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stack_encoding_round_trips() {
-        let s = ItemStackData {
-            count: 64,
-            item: Some(RegistryIndex(300)),
-            components_raw: bytes::Bytes::from_static(&[1, 0, 5, 9]),
-        };
-        let b = encode_stack(&s);
-        assert_eq!(b[..3], [64, 0xAC, 0x02]);
-        assert_eq!(decode_stack(&b), Some(s));
-        assert_eq!(decode_stack(&[0]), Some(empty_stack()));
-        assert_eq!(encode_stack(&empty_stack()), vec![0]);
-        assert_eq!(decode_stack(&[0x80]), None, "truncated VarInt");
-        let plain = ItemStackData {
-            count: 1,
-            item: Some(RegistryIndex(1)),
-            components_raw: bytes::Bytes::new(),
-        };
-        assert_eq!(encode_stack(&plain), vec![1, 1, 0, 0]);
-    }
-
-    #[test]
-    fn mirror_slots() {
-        let mut s = GameState::default();
-        s.set_mirror(
-            3,
-            ItemStackData {
-                count: 5,
-                item: Some(RegistryIndex(1)),
-                components_raw: bytes::Bytes::new(),
-            },
-        );
-        assert_eq!(s.slot(3).map(|x| x.count), Some(5));
-        assert!(s.slot(4).is_none());
-        assert!(s.slot(999).is_none());
-        s.set_mirror(50, empty_stack());
-        assert_eq!(s.inventory.len(), 51);
-        s.selected_slot = 3;
-        assert_eq!(s.selected().map(|x| x.count), Some(5));
-        s.sent.push(ChatMessage {
-            text: "hi".into(),
-            command: false,
-        });
-        assert_eq!(s.take_sent().len(), 1);
-        assert!(s.sent.is_empty());
-        // Every mirrored change is queued for the client to drain, oldest first.
-        assert_eq!(
-            s.take_inventory_changes(),
-            vec![(3, s.slot(3).cloned().unwrap()), (50, empty_stack())]
-        );
-        s.set_mirror(3, empty_stack());
-        assert_eq!(
-            s.take_inventory_changes(),
-            vec![(3, empty_stack())],
-            "clearing a slot is a change too (a creative pickup empties the hotbar slot)"
-        );
-        assert!(s.take_inventory_changes().is_empty(), "drained");
-    }
-}
+mod tests;
