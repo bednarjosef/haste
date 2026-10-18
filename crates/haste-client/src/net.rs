@@ -2280,6 +2280,7 @@ impl NetDriver {
 pub mod account;
 mod block_events;
 pub mod chat_session;
+pub(crate) mod pack_prompt;
 mod vehicle;
 
 #[cfg(test)]

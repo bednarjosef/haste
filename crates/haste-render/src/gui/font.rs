@@ -129,7 +129,7 @@ impl GuiRenderer {
                 if w == 0 {
                     return;
                 }
-                let (rect, _) = self.lookup(&TexKey::FontPage(page), assets);
+                let (rect, _) = self.lookup_ref(TexKeyRef::Key(&TexKey::FontPage(page)), assets);
                 (
                     rect,
                     [gx as f32, gy as f32, w as f32, h as f32],
@@ -144,7 +144,7 @@ impl GuiRenderer {
                 if g.trimmed == 0 {
                     return;
                 }
-                let (rect, _) = self.lookup(&TexKey::Hex(index), assets);
+                let (rect, _) = self.lookup_ref(TexKeyRef::Key(&TexKey::Hex(index)), assets);
                 (
                     rect,
                     [0.0, 0.0, rect[2] as f32, rect[3] as f32],

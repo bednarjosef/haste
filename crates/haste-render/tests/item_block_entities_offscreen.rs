@@ -94,6 +94,7 @@ fn pig_model() -> &'static haste_core::model::CubeModel {
         tex_height: 64,
         root: haste_core::model::ModelPart {
             name: "root".into(),
+            id: haste_core::parts::ROOT,
             pivot: glam::Vec3::ZERO,
             rotation: glam::Vec3::ZERO,
             visible: true,

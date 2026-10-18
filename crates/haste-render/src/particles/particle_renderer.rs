@@ -4,14 +4,12 @@
 use std::sync::Arc;
 
 use glam::Vec3;
-use haste_core::view::BlockView;
-use haste_core::BlockPos;
 
 use crate::entity::EntityVertex;
 use crate::renderer::Camera;
 
 use super::resources::ParticleTypes;
-use super::*;
+use super::snapshot::ParticleSnapshot;
 
 /// Draws the pool: camera-facing quads over the particle atlas, one draw call for all
 /// particles. The vertex/pipeline shape is the entity renderer's (same shader, textureLoad
@@ -161,104 +159,67 @@ impl ParticleRenderer {
         }));
     }
 
-    /// Poses every particle as a camera-facing quad into the vertex buffer (positions
-    /// interpolated within the tick; light resampled when a particle leaves its block).
-    /// The camera bind group of the main pass is at group 0; roll is ignored (billboards
-    /// do not tilt with the hurt tilt).
+    /// Poses the snapshot's visible particles as camera-facing quads into the vertex
+    /// buffer (positions interpolated within the tick; light and sprite resolved per
+    /// tick by the snapshot, vanilla `QuadParticleGroup.extractRenderState`). The camera
+    /// bind group of the main pass is at group 0; roll is ignored (billboards do not
+    /// tilt with the hurt tilt). No locks: `snapshot` is the render thread's own copy of
+    /// the game thread's per-tick pose; `planes` are the camera-relative view-projection
+    /// planes and `camera_forward` the look vector (the cull camera's offset).
     pub fn prepare(
         &mut self,
-        particles: &mut Particles,
+        snapshot: &ParticleSnapshot,
         camera: Camera,
         partial: f32,
-        world: &dyn BlockView,
+        planes: &[glam::Vec4; 6],
+        camera_forward: glam::Vec3,
     ) {
         self.vertices.clear();
         self.drawn = 0;
         // Debug visibility: how many particles the frame poses (once a second).
         self.log_clock += 1;
         let log = self.log_clock.is_multiple_of(60);
-        let types = particles.types.clone();
-        let Some(types) = types.as_deref() else {
-            return;
-        };
         let (right, up) = billboard_axes(camera.yaw, camera.pitch);
-        for p in &mut particles.pool {
-            let pos = p.prev_pos.lerp(p.pos, partial);
-            // Light at the particle's position, resampled when it crosses a block boundary.
-            let block = BlockPos::new(
-                pos.x.floor() as i32,
-                pos.y.floor() as i32,
-                pos.z.floor() as i32,
-            );
-            if p.sky_light == UNSAMPLED || block != p.light_at {
-                p.light_at = block;
-                p.sky_light = world.sky_light(block);
-                p.block_light = world.block_light(block);
+        // Vanilla's cull camera sits 3 blocks behind the eye along the view vector
+        // (`ParticleEngine.extract` gets `new Frustum(cullFrustum).offset(-3.0F)`, i.e.
+        // `cam -= viewVector * 3`), so the frustum is a little larger than the view.
+        // `planes` are camera-relative (the eye is their origin); the particle's world
+        // position becomes cull-camera-relative by shifting 3 blocks along the view.
+        let shift = camera_forward * 3.0;
+        for p in &snapshot.views {
+            // Vanilla culls per particle: `frustum.pointInFrustum(x, y, z)` at the tick
+            // position, in cull-camera-relative coordinates.
+            if !point_visible(planes, p.pos - camera.pos.as_vec3() + shift) {
+                continue;
             }
-            let (rect, uvs) = match p.block_sprite {
-                // A terrain particle: its block sprite's fixed 4x4 sub-piece.
-                Some(s) => (
-                    s.rect,
-                    [
-                        [s.uv[0], s.uv[3]],
-                        [s.uv[2], s.uv[3]],
-                        [s.uv[2], s.uv[1]],
-                        [s.uv[0], s.uv[1]],
-                    ],
-                ),
-                None => {
-                    let sprites = types.sprites(p.kind);
-                    if sprites.is_empty() {
-                        continue;
-                    }
-                    // The sprite for the particle's age (multi-sprite types animate over
-                    // the list, like vanilla's `setSpriteFromAge`).
-                    let index = ((p.age / p.lifetime) * sprites.len() as f32).floor() as usize;
-                    let rect = sprites[index.min(sprites.len() - 1)];
-                    let (x, y, w, h) = (
-                        rect[0] as f32,
-                        rect[1] as f32,
-                        rect[2] as f32,
-                        rect[3] as f32,
-                    );
-                    (rect, [[x, y + h], [x + w, y + h], [x + w, y], [x, y]])
-                }
-            };
-            let light = if p.behaviour.full_light {
-                // HugeExplosionParticle.getLightCoords: always full light.
-                (15u8, 15u8)
-            } else {
-                (p.block_light, p.sky_light)
-            };
-            let alpha = p.behaviour.alpha.unwrap_or(1.0);
+            let pos = p.prev_pos.lerp(p.pos, partial);
             // The light is applied by the shader from the light texture, not multiplied into
             // the colour here (that would light twice).
-            let color = [p.color[0], p.color[1], p.color[2], alpha];
+            let color = [p.color[0], p.color[1], p.color[2], p.alpha];
             let rel = (pos.as_dvec3() - camera.pos).as_vec3();
             // The quad size the behaviour rolled at spawn, grown for its age
             // (`SingleQuadParticle.getQuadSize`).
-            let growth = p.behaviour.growth.scale((p.age + partial) / p.lifetime);
+            let growth = p.growth.scale((p.age + partial) / p.lifetime);
             let half = p.quad * growth;
             let r = right * half;
             let u = up * half;
             let corners = [rel - r - u, rel + r - u, rel + r + u, rel - r + u];
-            let rect16 = rect;
             for i in [0usize, 1, 2, 0, 2, 3] {
                 self.vertices.push(EntityVertex {
                     pos: corners[i].to_array(),
-                    uv: uvs[i],
+                    uv: p.uvs[i],
                     color,
-                    rect: rect16,
-                    light: [light.0 as u16, light.1 as u16, 0, 0],
+                    rect: p.rect,
+                    light: [p.block_light as u16, p.sky_light as u16, 0, 0],
                 });
             }
             self.drawn += 1;
         }
-        if log && (self.drawn > 0 || particles.alive() > 0) {
+        if log && (self.drawn > 0 || snapshot.alive > 0) {
             tracing::debug!(
                 "particles: {} drawn of {} alive, {} vertices",
                 self.drawn,
-                particles.alive(),
+                snapshot.alive,
                 self.vertices.len()
             );
         }
@@ -296,6 +257,14 @@ pub(super) fn make_vertex_buffer(device: &wgpu::Device, capacity: usize) -> wgpu
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+/// A point against the frustum planes (vanilla `Frustum.pointInFrustum` -> JOML's
+/// `testPoint`): inside when no plane's signed distance is negative.
+pub(super) fn point_visible(planes: &[glam::Vec4; 6], p: glam::Vec3) -> bool {
+    planes
+        .iter()
+        .all(|pl| pl.x * p.x + pl.y * p.y + pl.z * p.z + pl.w >= 0.0)
 }
 
 /// Billboard axes for a camera look (yaw/pitch in degrees, Minecraft's convention):

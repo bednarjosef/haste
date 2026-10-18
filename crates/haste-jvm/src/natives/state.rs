@@ -172,6 +172,16 @@ pub(crate) extern "system" fn request_disconnect<'l>(_env: EnvUnowned<'l>, _c: J
     with_state(|s| s.disconnect_requested = true);
 }
 
+/// The player answered the server resource pack prompt (vanilla's
+/// `PackConfirmScreen` callback).
+pub(crate) extern "system" fn pack_prompt_answered<'l>(
+    _env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    accepted: jboolean,
+) {
+    with_state(|s| s.pack_prompt_answer = Some(accepted));
+}
+
 pub(crate) extern "system" fn request_join<'l>(
     mut env: EnvUnowned<'l>,
     _c: JClass<'l>,

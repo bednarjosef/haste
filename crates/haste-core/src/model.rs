@@ -17,6 +17,11 @@ pub struct CubeModel {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelPart {
     pub name: String,
+    /// The interned `name` (`parts::intern` at model build time): the frame path matches pose
+    /// overrides by this id, never by string. Skipped by serde (nothing serializes models
+    /// today); see `parts::PartId` for the deserialization caveat.
+    #[serde(skip)]
+    pub id: crate::parts::PartId,
     /// Pivot in model units (1/16 block), vanilla's `PartPose` offset.
     pub pivot: Vec3,
     /// Rotation in radians, applied around the pivot (x, y, z order like vanilla).
@@ -38,11 +43,79 @@ pub struct Cube {
     pub mirror: bool,
 }
 
-/// Per-frame pose overrides, keyed by part name, so animation state stays in `haste-entity`.
+/// Per-frame pose overrides, keyed by interned part id, so animation state stays in
+/// `haste-entity`. Fixed-size, like `BodyTransform`: no per-frame allocation, and a model's
+/// setupAnim never pushes more than the capacities (the spider's eight legs plus the head is
+/// the largest rotation set; the player's six hideable layers the largest hidden set).
 #[derive(Clone, Debug, Default)]
 pub struct PoseOverrides {
-    pub rotations: Vec<(String, Vec3)>,
-    pub hidden: Vec<String>,
+    rotations: [Option<(crate::parts::PartId, Vec3)>; POSE_ROTATIONS],
+    hidden: [Option<crate::parts::PartId>; POSE_HIDDEN],
+}
+
+/// Enough rotation slots for every model's setupAnim (the spider's 8 legs + head, plus
+/// headroom for a model that adds a body or wing pair on top).
+const POSE_ROTATIONS: usize = 12;
+/// Enough hidden slots for the player's six hideable layers, plus headroom.
+const POSE_HIDDEN: usize = 8;
+
+impl PoseOverrides {
+    /// Adds (or replaces) a part's rotation override.
+    pub fn set_rotation(&mut self, id: crate::parts::PartId, rot: Vec3) {
+        for slot in self.rotations.iter_mut() {
+            match slot {
+                Some((i, r)) if *i == id => {
+                    *r = rot;
+                    return;
+                }
+                Some(_) => continue,
+                None => {
+                    *slot = Some((id, rot));
+                    return;
+                }
+            }
+        }
+        debug_assert!(false, "rotation slots exhausted");
+    }
+
+    /// The rotation override for `id`, if set.
+    pub fn rotation_of(&self, id: crate::parts::PartId) -> Option<Vec3> {
+        self.rotations
+            .iter()
+            .flatten()
+            .find(|(i, _)| *i == id)
+            .map(|(_, r)| *r)
+    }
+
+    /// Hides a part for this frame.
+    pub fn hide(&mut self, id: crate::parts::PartId) {
+        for slot in self.hidden.iter_mut() {
+            match slot {
+                Some(i) if *i == id => return,
+                Some(_) => continue,
+                None => {
+                    *slot = Some(id);
+                    return;
+                }
+            }
+        }
+        debug_assert!(false, "hidden slots exhausted");
+    }
+
+    /// Whether `id` is hidden this frame.
+    pub fn is_hidden(&self, id: crate::parts::PartId) -> bool {
+        self.hidden.iter().flatten().any(|i| *i == id)
+    }
+
+    /// The set rotations, in push order.
+    pub fn rotations(&self) -> impl Iterator<Item = (crate::parts::PartId, Vec3)> + '_ {
+        self.rotations.iter().flatten().map(|(i, r)| (*i, *r))
+    }
+
+    /// The hidden part ids, in push order.
+    pub fn hidden(&self) -> impl Iterator<Item = crate::parts::PartId> + '_ {
+        self.hidden.iter().flatten().copied()
+    }
 }
 
 /// One step of the whole-model transform `LivingEntityRenderer.setupRotations` builds (plus
