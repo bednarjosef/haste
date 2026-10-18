@@ -8,6 +8,18 @@ mod hitch;
 use hitch::FramePhases;
 pub(crate) use hitch::HitchTrace;
 
+/// The config's cloud option as the renderer's (vanilla `Options.cloudStatus` →
+/// `OptionsRenderState.cloudStatus`).
+pub(super) fn cloud_status(
+    status: haste_setup::options::CloudStatus,
+) -> haste_render::clouds::CloudStatus {
+    match status {
+        haste_setup::options::CloudStatus::Off => haste_render::clouds::CloudStatus::Off,
+        haste_setup::options::CloudStatus::Fast => haste_render::clouds::CloudStatus::Fast,
+        haste_setup::options::CloudStatus::Fancy => haste_render::clouds::CloudStatus::Fancy,
+    }
+}
+
 impl App {
     /// Menu mode's frame: the open screen over the title panorama (see `menu_background`).
     fn draw_menu(&mut self) {
@@ -164,9 +176,13 @@ impl App {
                     .is_none_or(|p| (view.feet - p).length() <= 0.5);
                 view.has_position
                     && at_pos
-                    && self
-                        .feed
-                        .settled(&self.frame_stats, Duration::from_millis(1500))
+                    && self.feed.settled(
+                        &self.frame_stats,
+                        Duration::from_millis(1500),
+                        renderer,
+                        camera_section(&camera),
+                        vd,
+                    )
                     && (self.ui.is_some()
                         || session.shared.hud_failed.load(Ordering::Relaxed)
                         || !session.shared.hud_enabled.load(Ordering::Relaxed))
@@ -304,6 +320,7 @@ impl App {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         renderer.set_view_scale(self.options.entity_distance_scaling);
+        renderer.set_cloud_status(cloud_status(self.options.clouds));
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();

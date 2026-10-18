@@ -242,3 +242,33 @@ fn a_spectator_camera_inside_a_solid_block_turns_the_cull_off() {
     assert!(super::frame_setup::cull_sections(true, false));
     assert!(!super::frame_setup::cull_sections(true, true));
 }
+
+#[test]
+fn empty_section_bits_set_clear_and_drop_their_column() {
+    // The walk's see-through data for unmeshed sections (vanilla
+    // `SectionOcclusionGraph.updateEmptySections`): setting reports a change once,
+    // repeating does not, clearing reports one and drops the column with its last bit.
+    let mut empty = crate::occlusion::EmptyColumns::new();
+    let column = ChunkPos::new(3, -7);
+    assert!(super::terrain_feed::set_empty_bit(
+        &mut empty, column, 2, true
+    ));
+    assert!(!super::terrain_feed::set_empty_bit(
+        &mut empty, column, 2, true
+    ));
+    assert!(super::terrain_feed::set_empty_bit(
+        &mut empty, column, 5, true
+    ));
+    assert_eq!(empty.get(&column), Some(&(0b100100)));
+    assert!(super::terrain_feed::set_empty_bit(
+        &mut empty, column, 2, false
+    ));
+    assert_eq!(empty.get(&column), Some(&(1 << 5)));
+    assert!(super::terrain_feed::set_empty_bit(
+        &mut empty, column, 5, false
+    ));
+    assert!(empty.get(&column).is_none());
+    assert!(!super::terrain_feed::set_empty_bit(
+        &mut empty, column, 5, false
+    ));
+}

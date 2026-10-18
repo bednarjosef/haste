@@ -123,6 +123,11 @@ public final class ServerDumps {
         // (LightEngine, SkyLightEngine) reads for every block it propagates through.
         o.addProperty("light_dampening", state.getLightDampening());
         o.addProperty("propagates_skylight_down", state.propagatesSkylightDown());
+        // BlockState.canOcclude / useShapeForLightOcclusion: LightEngine's gates for
+        // shape-based light occlusion (isEmptyShape, shapeOccludes). Absent in dumps from
+        // before this field.
+        o.addProperty("can_occlude", state.canOcclude());
+        o.addProperty("use_shape_for_light_occlusion", state.useShapeForLightOcclusion());
         o.addProperty("air", state.isAir());
         o.addProperty("opaque", state.isSolidRender());
         // EntityRenderer.extractShadowPiece skips INVISIBLE render shapes; RenderShape has only

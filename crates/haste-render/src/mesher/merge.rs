@@ -149,6 +149,7 @@ pub(super) struct MergeFace {
 /// at its first member's index, so the relative order of everything that can
 /// overlap coplanar stays as emitted (vanilla relies on model order for its
 /// coplanar overlay quads).
+#[derive(Clone)]
 pub(super) enum StagedQuad {
     /// A quad that cannot merge (any shape, or per-vertex light differences).
     Direct {
@@ -179,6 +180,7 @@ pub(super) struct MergeKey {
     pub(super) face: MergeFace,
 }
 
+#[derive(Clone)]
 pub(super) struct MergeQuad {
     pub(super) key: MergeKey,
     /// Section-local block cell (0..16 on each axis).
