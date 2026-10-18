@@ -1,8 +1,14 @@
+//! Length framing: packet size limits and the raw packet type.
+//!
+//! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0; see THIRD_PARTY.md), moved here out of
+//! `transport/mod.rs`.
+
 use bytes::Bytes;
 use thiserror::Error;
 
 use crate::wire::varint::VarError;
 
+/// Vanilla's maximum packet length (2 MiB), enforced on read and write.
 pub const MAX_PACKET_SIZE: u64 = 2_097_152;
 /// Vanilla's maximum decompressed packet data size (8 MiB).
 pub const MAX_PACKET_DATA_SIZE: usize = 8_388_608;

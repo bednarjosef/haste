@@ -1,3 +1,8 @@
+//! AES-128-CFB8 stream encryption and decryption.
+//!
+//! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0; see THIRD_PARTY.md), moved here out of
+//! `transport/mod.rs`.
+
 // decrypt -> decompress -> raw
 pub(crate) type Aes128Cfb8Dec = cfb8::Decryptor<aes::Aes128>;
 pub(crate) type Aes128Cfb8Enc = cfb8::Encryptor<aes::Aes128>;

@@ -1,3 +1,8 @@
+//! The packet reader and writer over tokio streams (decode/encode with compression and encryption).
+//!
+//! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0; see THIRD_PARTY.md), moved here out of
+//! `transport/mod.rs`.
+
 use aes::cipher::KeyIvInit;
 use bytes::{Bytes, BytesMut};
 use flate2::{Compress, Compression, FlushCompress, Status};

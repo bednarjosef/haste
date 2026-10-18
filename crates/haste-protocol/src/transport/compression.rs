@@ -1,7 +1,11 @@
+//! zlib compression threshold and level.
+//!
+//! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0; see THIRD_PARTY.md), moved here out of
+//! `transport/mod.rs`.
+
 use tokio::io::{AsyncRead, BufReader};
 
 /// The threshold determines the minimum size of data that should be compressed.
-/// Data smaller than the threshold will not be compressed.
 /// Data smaller than the threshold will not be compressed.
 pub type CompressionThreshold = usize;
 
