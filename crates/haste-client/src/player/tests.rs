@@ -148,7 +148,8 @@ fn names(out: &[ServerboundPlay]) -> Vec<&'static str> {
 fn first_teleport_accepts_one_tick_later_then_reports_loaded() {
     let mut p = LocalPlayer::with_entity(ME, GameMode::Survival);
     let mut out = Vec::new();
-    // Nothing is sent before a position arrives.
+    // Before a position arrives only ClientTickEnd leaves (vanilla `Minecraft.tick` sends it
+    // every tick a level exists, whatever the player's state).
     p.tick_with(
         &InputState::default(),
         &world(),
@@ -157,15 +158,17 @@ fn first_teleport_accepts_one_tick_later_then_reports_loaded() {
         None,
         &mut out,
     );
-    assert!(out.is_empty());
+    assert_eq!(names(&out), ["tick_end"]);
+    out.clear();
     // The teleport is applied at once, but the accept is not sent from the packet
     // handler: answering within microseconds of the join teleport races the server's
     // join bookkeeping ("moved too quickly! <spawn position>"). It waits one full tick.
     p.handle(&teleport(5, DVec3::new(1.5, 2.0, -3.5), 90.0, 0), &mut out);
     assert!(out.is_empty());
     assert!(p.has_position && !p.loaded);
-    // The tick the teleport arrived in sends nothing (movement waits for player_loaded).
-    assert!(tick(&mut p, &InputState::default()).is_empty());
+    // The tick the teleport arrived in sends nothing but ClientTickEnd (vanilla
+    // `Minecraft.tick` ends with it before `player_loaded`).
+    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
     assert!(!p.loaded);
     let out = tick(&mut p, &InputState::default());
     assert_eq!(
@@ -313,7 +316,8 @@ fn first_move_after_join_carries_the_server_position() {
     assert!(p.handle(&teleport(1, spawn, 0.0, 0), &mut out));
     assert!(out.is_empty());
     let floor = TestWorld::flat(-60, states::STONE);
-    // The tick the teleport arrived in: the accept is held for one full tick.
+    // The tick the teleport arrived in: the accept is held for one full tick; only the
+    // ClientTickEnd leaves (Minecraft.tick sends it before player_loaded too).
     let mut out = Vec::new();
     p.tick_with(
         &InputState::default(),
@@ -323,7 +327,8 @@ fn first_move_after_join_carries_the_server_position() {
         None,
         &mut out,
     );
-    assert!(out.is_empty());
+    assert_eq!(names(&out), ["tick_end"]);
+    out.clear();
     p.tick_with(
         &InputState::default(),
         &floor,
@@ -853,11 +858,11 @@ fn respawn_waits_for_a_new_position() {
     ));
     assert!(!p.loaded && !p.has_position);
     assert_eq!(p.game_mode, GameMode::Creative);
-    assert!(tick(&mut p, &InputState::default()).is_empty());
+    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
     p.handle(&teleport(9, DVec3::new(0.5, 0.0, 0.5), 0.0, 0), &mut out);
     // The respawn teleport's accept and the new player_loaded go out one full tick later.
     assert!(!p.loaded);
-    assert!(tick(&mut p, &InputState::default()).is_empty());
+    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
     assert_eq!(
         names(&tick(&mut p, &InputState::default()))[..2],
         ["accept", "loaded"]
@@ -1068,7 +1073,7 @@ fn steering_a_boat_sends_paddle_boat_and_move_vehicle() {
     let out = tick_paddling(&mut p, &forward, &world);
     assert_eq!(
         names(&out),
-        ["input", "paddle", "rot", "move_vehicle", "tick_end"]
+        ["paddle", "input", "rot", "move_vehicle", "tick_end"]
     );
     // First tick: the keys we came aboard with were empty, so the paddles do not turn yet.
     let paddle = out.iter().find_map(|p| match p {
@@ -1453,6 +1458,57 @@ fn jump_in_the_air_with_a_glider_starts_falling_flying() {
     assert!((p.eye_height() - 0.4).abs() < 1e-6, "{}", p.eye_height());
     // The glide already moves this tick (it sinks from the look-ahead pitch 0).
     assert!(p.state.pos.y < 100.0, "{}", p.state.pos);
+}
+
+/// Within one tick, `LocalPlayer.sendChanges` sends the input packet after `aiStep` — whose
+/// START_FALL_FLYING and abilities toggle went out first — and before the sprint command and
+/// the movement (`Minecraft.tick`'s order: aiStep, then the player's sendChanges).
+#[test]
+fn the_input_packet_follows_ai_step_within_the_tick() {
+    let (mut p, _) = spawned();
+    equip_glider(&mut p, 42);
+    airborne(&mut p);
+    let out = names(&tick(
+        &mut p,
+        &InputState {
+            jump: true,
+            forward: true,
+            ..Default::default()
+        },
+    ));
+    // The fresh keys make this a jump-glide tick with an input change.
+    let fall_flying = out
+        .iter()
+        .position(|n| *n == "command")
+        .expect("START_FALL_FLYING");
+    let input = out.iter().position(|n| *n == "input").expect("input");
+    let movement = out
+        .iter()
+        .position(|n| matches!(*n, "pos" | "pos_rot" | "rot"))
+        .expect("movement");
+    assert!(fall_flying < input, "{out:?}");
+    assert!(input < movement, "{out:?}");
+}
+
+/// `Minecraft.tick` ends with ClientTickEnd every tick a level exists — before the player
+/// is loaded, and with a screen open (the earlier ticks of `spawned` and the login-waiting
+/// tests above cover the loaded case).
+#[test]
+fn client_tick_end_flows_before_the_player_is_loaded() {
+    let mut p = LocalPlayer::with_entity(ME, GameMode::Survival);
+    let mut out = Vec::new();
+    // No position yet: only the tick end.
+    for _ in 0..3 {
+        p.tick_with(
+            &InputState::default(),
+            &world(),
+            &TestShapes::default(),
+            &TestShapes::default(),
+            None,
+            &mut out,
+        );
+    }
+    assert_eq!(names(&out), ["tick_end", "tick_end", "tick_end"]);
 }
 
 #[test]

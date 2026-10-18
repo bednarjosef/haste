@@ -2,12 +2,16 @@
 //! local player and produces the serverbound packets a vanilla client sends for each tick.
 //!
 //! Per tick, in this order (the order a vanilla client is observed to send them in):
-//! 1. `player_input` when the held movement keys changed since the last one sent,
-//! 2. physics (`haste_physics::tick_with`),
-//! 3. `player_abilities` when flight was toggled or ended by landing,
-//! 4. `player_command` start/stop sprinting when the sprint state changed,
-//! 5. one of `move_player_pos_rot` / `_pos` / `_rot` / `_status_only` (send rules below),
-//! 6. `client_tick_end`.
+//! 1. `set_carried_item` when the hotbar slot changed underneath the last value sent
+//!    (`gameMode.tick` -> `ensureHasSentCarriedItem`),
+//! 2. the interactions (hotbar keys, clicks, held use, `continueAttack` — `handleKeybinds`),
+//! 3. physics (`haste_physics::tick_with`) with `player_command` START_FALL_FLYING and
+//!    `player_abilities` from `aiStep`,
+//! 4. `player_input` when the held movement keys changed since the last one sent
+//!    (`sendChanges` runs after `aiStep`),
+//! 5. `player_command` start/stop sprinting when the sprint state changed,
+//! 6. one of `move_player_pos_rot` / `_pos` / `_rot` / `_status_only` (send rules below),
+//! 7. `client_tick_end` — every tick a world exists, before `player_loaded` too.
 //!
 //! Movement send rules (wiki "Java Edition protocol", "Set Player Position"; checked against the
 //! vanilla server's movement checks): the position is sent when it moved more than 2.0E-4 blocks
@@ -874,6 +878,9 @@ impl LocalPlayer {
         // check below): their durations and blend states drive the screen effects.
         self.int.tick_effects();
         if !(self.has_position && self.loaded) {
+            // `Minecraft.tick` ends with ClientTickEnd every tick a level exists — before
+            // `player_loaded`, and with a screen open. Nothing else leaves the client yet.
+            out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
             return;
         }
 
@@ -912,25 +919,31 @@ impl LocalPlayer {
             self.interact_step(look, input.sneak, ctx.world, env, out);
         }
 
-        // 1. player_input when the held keys change (raw keys, as pressed). While riding this
-        // is how the vehicle learns our keys (steering, and sneak to dismount: the shift flag
-        // makes the server answer with a set_passengers that removes us).
+        // `LocalPlayer.sendInput`: the input packet leaves with `sendChanges`, after `aiStep`
+        // (physics, START_FALL_FLYING, the abilities toggle) and before the sprint command
+        // and the movement. While riding this is how the vehicle learns our keys (steering,
+        // and sneak to dismount: the shift flag makes the server answer with a
+        // set_passengers that removes us).
         let flags = input_bits(input);
-        if self.sent.input != Some(flags) {
-            out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags }));
-            self.sent.input = Some(flags);
-        }
+        let send_input = |p: &mut Self, out: &mut Vec<ServerboundPlay>| {
+            if p.sent.input != Some(flags) {
+                out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags }));
+                p.sent.input = Some(flags);
+            }
+        };
 
         // 2. The passenger tick (vanilla `rideTick`) replaces physics: a passenger sends
         // rotation only, never position packets (the server owns a passenger's position).
         if self.vehicle.is_some() {
             // The vehicle's own tick first (vanilla `ClientLevel.tickNonPassenger`), then the
-            // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the rotation
-            // and, for a vehicle we control, the `move_vehicle` that carries its simulation.
+            // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the
+            // input, the rotation and, for a vehicle we control, the `move_vehicle` that
+            // carries its simulation.
             self.boat_tick(ctx, out);
             self.horse_tick(input, look, ctx, out);
             self.item_steered_tick(look, vehicle, ctx);
             self.ride_tick(input, look, vehicle);
+            send_input(self, out);
             self.send_rotation(out);
             let item_steered = self.steered_by_item();
             let steered = match (&self.boat, &self.horse, item_steered) {
@@ -1140,6 +1153,10 @@ impl LocalPlayer {
                 flags: f,
             }));
         }
+
+        // `LocalPlayer.sendChanges` opens with the input packet (after `aiStep`, whose
+        // START_FALL_FLYING and abilities toggle went out above).
+        send_input(self, out);
 
         // 5. Sprint state.
         if self.state.sprinting != self.sent.sprinting {
