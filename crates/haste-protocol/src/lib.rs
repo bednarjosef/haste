@@ -33,10 +33,13 @@ pub mod wire;
 pub use haste_core;
 
 pub use auth::MsaTokens;
-pub use chat::{ChatSigner, LastSeenMessages, MessageSignature};
+pub use chat::{
+    ChatSigner, LastSeenMessagesTracker, LocalChatSession, MessageSignature, ProfileKeyPair,
+};
 pub use connection::{
-    ping, resource_pack_status, Account, Arrived, ConnectOptions, Connection, CookieJar, Login,
-    ProtocolError, ResourcePackPolicy, ServerStatus, StatsSnapshot, SyncedRegistries,
+    pack_push_asks, ping, resource_pack_status, Account, Arrived, ConnectOptions, Connection,
+    CookieJar, Login, PackAnswer, PackPromptHook, PackPrompter, PendingPackPush, ProtocolError,
+    ResourcePackPolicy, ServerStatus, StatsSnapshot, SyncedRegistries, REQUIRED_PACK_DISCONNECT,
 };
 pub use packets::play::{ClientboundPlay, ServerboundPlay};
 pub use packets::{PacketIds, ProtocolTables};
