@@ -362,7 +362,9 @@ fn impulse(state: &PlayerState, input: &InputState, attrs: &PlayerAttributes) ->
     // stack's `use_effects` speed multiplier (`LocalPlayer.itemUseSpeedMultiplier`, 1.0 when no
     // item is in use). Vanilla also skips it while riding (`isPassenger()`); riding never
     // reaches here, because the player's own physics tick does not run while in a vehicle.
-    if state.slow_using_item {
+    // `using_item`, not `slow_using_item`: an item whose `use_effects` can sprint still slows
+    // (a stack can carry can_sprint true with a speed multiplier below 1).
+    if state.using_item {
         imp.strafe *= state.item_use_speed;
         imp.forward *= state.item_use_speed;
     }
@@ -985,7 +987,7 @@ mod tests {
         let attrs = PlayerAttributes::default();
         let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
         settle(&w, &mut s, &attrs, &shapes);
-        s.slow_using_item = true;
+        s.using_item = true;
         s.item_use_speed = 0.2;
         let input = InputState {
             forward: true,
@@ -1022,7 +1024,7 @@ mod tests {
         let run = |using: bool, speed: f32| {
             let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
             settle(&w, &mut s, &attrs, &shapes);
-            s.slow_using_item = using;
+            s.using_item = using;
             s.item_use_speed = speed;
             for _ in 0..10 {
                 tick(&mut s, &input, &attrs, &w, &shapes, &shapes);

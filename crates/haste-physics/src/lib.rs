@@ -97,8 +97,13 @@ pub struct PlayerState {
     /// may-fly ability). Set by the client each tick; stops a sprint and keeps it from starting.
     #[serde(default)]
     pub sprint_blocked: bool,
-    /// Slowed by the item in use (vanilla `LocalPlayer.isSlowDueToUsingItem`): a sprint cannot
-    /// start. Set by the client each tick.
+    /// An item is being used over time (vanilla `LivingEntity.isUsingItem`). Set by the client
+    /// each tick.
+    #[serde(default)]
+    pub using_item: bool,
+    /// Slowed by the item in use (vanilla `LocalPlayer.isSlowDueToUsingItem`: using and the
+    /// stack's `use_effects` `can_sprint` false): a sprint cannot start. Set by the client each
+    /// tick.
     #[serde(default)]
     pub slow_using_item: bool,
     /// The used item's `minecraft:use_effects` speed multiplier (vanilla
