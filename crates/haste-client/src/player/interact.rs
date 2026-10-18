@@ -57,6 +57,7 @@ mod pick;
 mod place;
 mod step;
 mod use_item;
+pub(crate) use consume_effects::{should_emit, ConsumeEffects};
 use effects::EffectIds;
 pub(crate) use effects::{LightmapEffectIds, MovementEffectIds};
 pub use pick::Target;
