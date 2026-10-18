@@ -37,8 +37,9 @@ impl Renderer {
 
     /// The per-state shape tables from haste-data's shape data: the AO occluder table
     /// (vanilla `getShadeBrightness <= 0.2`) and the fluid face-occlusion shapes
-    /// (`BlockState.getOcclusionShape`). Applies to sections meshed afterwards: call it
-    /// before the first chunks.
+    /// (`BlockState.getOcclusionShape`), plus the face-skip rules from the class dump
+    /// (`BlockBehaviour.skipRendering`, see `mesher/skip.rs`). Applies to sections meshed
+    /// afterwards: call it before the first chunks.
     pub fn set_shapes(
         &mut self,
         states: &dyn haste_core::view::BlockStateTable,
@@ -51,6 +52,7 @@ impl Renderer {
             shapes,
             &self.baked,
         ));
+        tables.skip = Arc::new(crate::mesher::SkipTable::load(states));
         self.mesher.set_tables(tables);
     }
 

@@ -56,6 +56,8 @@ public final class ServerDumps {
             HasteRecorderMod.LOGGER.info("entity_dimensions.json: {} entity types", entities);
             int blocks = dumpBlockProperties(outDir);
             HasteRecorderMod.LOGGER.info("block_properties.json: {} blocks", blocks);
+            int classes = BlockClassDump.dump(outDir);
+            HasteRecorderMod.LOGGER.info("block_classes.json: {} blocks", classes);
             HasteRecorderMod.LOGGER.info("oracle dumps complete in {} ms", (System.nanoTime() - t0) / 1_000_000);
         } catch (Throwable t) {
             HasteRecorderMod.LOGGER.error("oracle dump failed", t);

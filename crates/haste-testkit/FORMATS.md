@@ -160,6 +160,29 @@ block's default (in 26.3 only the decorated pot's `cracked` variant does).
 `friction` is the block's slipperiness; `speed_factor`/`jump_factor` are multipliers applied while
 the entity is standing on the block. Defaults for blocks not overriding: 0.6 / 1.0 / 1.0.
 
+## block_classes.json
+
+For every block id, the simple names of its Java class and superclasses up to `Block`
+(exclusive of `BlockBehaviour`). Which face-skip rule (`BlockBehaviour.skipRendering`) a block
+uses is a property of its class, so the mesher maps class names to culling rules from this dump
+instead of a hand-written block list (mods add blocks). Dumped by the recorder mod's
+`BlockClassDump` (called from `ServerDumps.dumpAll`).
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "blocks": {
+    "minecraft:glass":  ["GlassBlock", "TransparentBlock", "HalfTransparentBlock", "Block"],
+    "minecraft:iron_bars": ["IronBarsBlock", "CrossCollisionBlock", "Block"]
+    // ... every registered block, [] never occurs (every block extends at least Block)
+  }
+}
+```
+
+Blocks absent from the dump use the default rule (no skip); the loader never panics on unknown
+ids.
+
 ## traces/<name>.json
 
 Physics traces recorded from the vanilla client (Task 3). One file per scripted input sequence.

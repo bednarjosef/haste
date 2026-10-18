@@ -1370,6 +1370,8 @@ dependencies = [
  "parking_lot",
  "pollster",
  "rayon",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

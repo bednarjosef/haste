@@ -72,6 +72,8 @@ pub struct MeshTables {
     pub ao: Arc<AoTable>,
     /// Fluid face-occlusion shapes per state (vanilla occlusion shape).
     pub fluid_occluders: Arc<crate::fluid::FluidOccluders>,
+    /// Face-skip rules per state (vanilla `BlockBehaviour.skipRendering`).
+    pub skip: Arc<crate::mesher::skip::SkipTable>,
     /// Set identity for the mesher's per-state cache: a fresh value per
     /// constructed set (monotonic counter), so a new Renderer's tables
     /// never alias a previous set's pointer identities after a reconnect.
@@ -90,6 +92,7 @@ impl MeshTables {
         fluids: Arc<crate::fluid::FluidTable>,
         ao: Arc<AoTable>,
         fluid_occluders: Arc<crate::fluid::FluidOccluders>,
+        skip: Arc<crate::mesher::skip::SkipTable>,
     ) -> MeshTables {
         MeshTables {
             tints,
@@ -97,6 +100,7 @@ impl MeshTables {
             fluids,
             ao,
             fluid_occluders,
+            skip,
             generation: TABLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -112,6 +116,8 @@ impl Default for MeshTables {
             Arc::new(AoTable::all_solid(0)),
             // No shape data known: fluid faces fall back to full-if-opaque.
             Arc::new(crate::fluid::FluidOccluders::absent()),
+            // No class dump known: no face skips (the mesher draws every face).
+            Arc::new(crate::mesher::skip::SkipTable::absent()),
         )
     }
 }

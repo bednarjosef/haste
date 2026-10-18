@@ -11,12 +11,14 @@ mod dispatch;
 mod lighting;
 mod merge;
 mod sink;
+mod skip;
 mod snapshot;
 mod tables;
 #[cfg(test)]
 mod tests;
 
 pub use dispatch::{Mesher, SnapshotSource};
+pub use skip::SkipTable;
 pub use snapshot::MeshSnapshot;
 pub use tables::{AoTable, MeshTables};
 
@@ -384,21 +386,21 @@ pub fn mesh_section_with(
 
                     for quad in &info.quads {
                         // Cullface: skip the face when the neighbour is a full
-                        // opaque block (vanilla's model culling), or when the
-                        // neighbour's opaque quads cover this quad's extent on
-                        // the shared plane (vanilla `Block.shouldRenderFace`'s
-                        // shape comparison: snow layers against snow layers,
-                        // slabs against slabs).
+                        // opaque block (vanilla's model culling), when the
+                        // state's skipRendering rule skips it (skip.rs), or
+                        // when the neighbour's opaque quads cover this quad's
+                        // extent on the shared plane (the shape comparison:
+                        // snow layers against snow layers, slabs against
+                        // slabs).
                         if let Some(cull) = quad.cullface {
                             let o = cull.offset();
                             let neighbor = ctx.cell(lx + 1 + o[0], ly + 1 + o[1], lz + 1 + o[2]);
-                            if ctx.baked.is_full_opaque(neighbor.state) {
-                                continue;
-                            }
-                            if ctx
-                                .state_info(neighbor.state)
-                                .cover
-                                .covers(cull, &quad.positions)
+                            if ctx.baked.is_full_opaque(neighbor.state)
+                                || ctx.tables.skip.skips(state, neighbor.state, cull)
+                                || ctx
+                                    .state_info(neighbor.state)
+                                    .cover
+                                    .covers(cull, &quad.positions)
                             {
                                 continue;
                             }
