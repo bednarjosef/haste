@@ -5,6 +5,7 @@
 pub mod chunk;
 pub mod light;
 pub mod palette;
+mod sky_light;
 pub mod wire;
 pub mod world;
 pub mod world_error;

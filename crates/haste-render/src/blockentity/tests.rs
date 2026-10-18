@@ -1344,3 +1344,62 @@ fn emit_object_vertices(inst: &BlockEntityInstance, orientation: glam::Quat) -> 
     );
     out
 }
+
+#[test]
+fn chest_and_shulker_textures_match_legacy_format() {
+    let materials = [
+        (ChestMaterial::Normal, "normal"),
+        (ChestMaterial::Trapped, "trapped"),
+        (ChestMaterial::Christmas, "christmas"),
+    ];
+    for (m, prefix) in materials {
+        for (half, suffix) in [
+            (ChestHalf::Single, ""),
+            (ChestHalf::Left, "_left"),
+            (ChestHalf::Right, "_right"),
+        ] {
+            assert_eq!(
+                chest_texture(m, half).path(),
+                format!("entity/chest/{prefix}{suffix}")
+            );
+        }
+    }
+    for half in [ChestHalf::Single, ChestHalf::Left, ChestHalf::Right] {
+        assert_eq!(
+            chest_texture(ChestMaterial::Ender, half).path(),
+            "entity/chest/ender"
+        );
+    }
+
+    let names = [
+        "white",
+        "orange",
+        "magenta",
+        "light_blue",
+        "yellow",
+        "lime",
+        "pink",
+        "gray",
+        "light_gray",
+        "cyan",
+        "purple",
+        "blue",
+        "brown",
+        "green",
+        "red",
+        "black",
+    ];
+    assert_eq!(shulker_texture(None).path(), "entity/shulker/shulker");
+    for (i, name) in names.iter().enumerate() {
+        assert_eq!(
+            shulker_texture(Some(i as u8)).path(),
+            format!("entity/shulker/shulker_{name}")
+        );
+    }
+}
+
+#[test]
+#[should_panic]
+fn shulker_texture_out_of_range_panics() {
+    let _ = shulker_texture(Some(16));
+}
