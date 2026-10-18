@@ -117,10 +117,11 @@ impl CollisionShapes for NoBlocks {
 }
 
 /// The `#strider_warm_blocks` test for the strider the player steers, wired from the game
-/// data's block table and the block tags the server synced (`update_tags`).
+/// data's block table and the block tags the server synced (`update_tags`). The tag's
+/// members are looked up once per tick, not per block.
 struct StriderWarm<'a> {
     data: &'a haste_data::GameData,
-    tags: &'a haste_physics::mining::BlockTags,
+    warm: &'a HashSet<u32>,
 }
 
 impl crate::item_based_steering::WarmBlocks for StriderWarm<'_> {
@@ -128,10 +129,7 @@ impl crate::item_based_steering::WarmBlocks for StriderWarm<'_> {
         self.data
             .blocks
             .block_registry_index_of_state(state)
-            .is_some_and(|i| {
-                self.tags
-                    .contains(&crate::item_based_steering::strider_warm_blocks(), i.0)
-            })
+            .is_some_and(|i| self.warm.contains(&i.0))
     }
 }
 
@@ -1932,10 +1930,12 @@ impl Session {
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
+                let warm_tag = crate::item_based_steering::strider_warm_blocks();
                 let warm = self
                     .block_tags
                     .as_ref()
-                    .map(|tags| StriderWarm { data, tags });
+                    .and_then(|tags| tags.members(&warm_tag))
+                    .map(|warm| StriderWarm { data, warm });
                 let env = crate::player::interact::InteractEnv {
                     data,
                     entities: &self.entity_boxes,
