@@ -1059,6 +1059,10 @@ fn drain_packets(
     drop(entities);
     skins::request_profiles(&shared.skins, &mut driver.session.profiles);
     let mut dirty = world.take_dirty_sections();
+    // The sections of forgotten chunks ride the same dirty set: the render thread's
+    // mesh workers find no chunk for them and free the resident meshes (vanilla drops
+    // a chunk's render data with the chunk, `ClientChunkCache.drop`).
+    dirty.append(gone);
     if !dirty.is_empty() {
         shared.dirty.lock().append(&mut dirty);
     }
@@ -2143,5 +2147,49 @@ mod tests {
         let (pos, _, _) =
             third_person_camera(Perspective::ThirdPersonBehind, EYE, -90.0, 0.0, &w, &s);
         assert!((pos.x - (0.5 - (0.03f64).sqrt())).abs() < EPS, "{pos:?}");
+    }
+
+    /// A forgotten chunk lists every section it had, so the dirty set reaches the renderer
+    /// and its resident meshes are freed (vanilla drops the render data with the chunk,
+    /// `ClientChunkCache.drop`). Needs the data generator reports in the cache.
+    #[test]
+    #[ignore = "needs cache/datagen/26.3/reports (GameData::load)"]
+    fn tracked_world_lists_gone_sections() {
+        let data = crate::net::load_game_data().unwrap();
+        let dim = DimensionInfo::overworld();
+        let mut world = World::new_with_biomes(dim.clone(), data.clone(), 8);
+        let c = haste_world::chunk::synthetic_chunk_data(
+            ChunkPos::new(3, -2),
+            dim.min_section(),
+            dim.section_count(),
+            |s, _, _, _| {
+                if s < 2 {
+                    BlockStateId(1)
+                } else {
+                    BlockStateId::AIR
+                }
+            },
+        );
+        WorldSink::load_chunk(&mut world, &c).unwrap();
+        let mut gone = Vec::new();
+        let mut tracked = TrackedWorld {
+            world: &mut world,
+            gone: &mut gone,
+        };
+        tracked.unload_chunk(ChunkPos::new(3, -2));
+        assert!(world.chunk(ChunkPos::new(3, -2)).is_none());
+        // Every section of the chunk, exactly once, and nothing else.
+        let min = dim.min_section();
+        let expect: std::collections::HashSet<SectionPos> = (min..min + dim.section_count() as i32)
+            .map(|y| SectionPos::new(3, y, -2))
+            .collect();
+        assert_eq!(gone.len(), expect.len());
+        assert!(gone.iter().all(|p| expect.contains(p)));
+        // The world itself dirties only the neighbours: without `gone` riding the dirty
+        // set, no packet would ever mention these sections again.
+        assert!(world
+            .take_dirty_sections()
+            .into_iter()
+            .all(|p| p.chunk() != ChunkPos::new(3, -2)));
     }
 }

@@ -1700,6 +1700,22 @@ impl Renderer {
     fn upload_mesh(&mut self, mesh: SectionMesh) {
         let pos = mesh.pos;
         let si = pos.y - self.min_section;
+        if mesh.is_removal() {
+            // The chunk is gone (or the section was mined to air): drop the resident
+            // mesh and its visibility data — the walk treats a section without data
+            // as see-through, like vanilla's empty sections (`ClientChunkCache.drop`
+            // releases the render data with the chunk).
+            let mut vis = self.section_vis.lock();
+            let had_vis = vis.remove(&(ChunkPos::new(pos.x, pos.z), si)).is_some();
+            drop(vis);
+            if let Some(old) = self.sections.remove(&pos) {
+                self.arenas.free(&old);
+            }
+            if had_vis || self.bonus.remove(&(ChunkPos::new(pos.x, pos.z), si)) {
+                self.vis_dirty = true;
+            }
+            return;
+        }
         let mut vis = self.section_vis.lock();
         let prev = vis.insert((ChunkPos::new(pos.x, pos.z), si), mesh.visibility);
         drop(vis);

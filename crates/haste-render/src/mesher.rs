@@ -30,6 +30,24 @@ pub struct SectionMesh {
 }
 
 impl SectionMesh {
+    /// The marker a mesh worker sends for a section whose chunk is gone: `upload_mesh`
+    /// frees the resident mesh and visibility entry instead of storing geometry.
+    pub fn removed(pos: SectionPos) -> SectionMesh {
+        SectionMesh {
+            pos,
+            vertices: Vec::new(),
+            layers: Vec::new(),
+            aabb: ([0.0; 3], [0.0; 3]),
+            visibility: crate::occlusion::VisibilitySet::none(),
+        }
+    }
+
+    /// Whether this mesh carries no geometry and only asks the renderer to drop what
+    /// is resident at its position (a forgotten chunk, or a section mined to air).
+    pub fn is_removal(&self) -> bool {
+        self.vertices.is_empty() && self.layers.is_empty()
+    }
+
     /// GPU bytes the vertices will occupy in an arena.
     pub fn vertex_bytes(&self) -> u64 {
         (self.vertices.len() as u64) * std::mem::size_of::<PackedVertex>() as u64
@@ -1562,9 +1580,14 @@ impl Mesher {
         let in_flight = self.in_flight.clone();
         rayon::spawn(move || {
             jobs.into_par_iter().for_each(|pos| {
-                if let Some(snapshot) = source.capture(pos, radius) {
-                    let _ = tx.send(mesh_section_with(&snapshot, &baked, &*atlas, &tables, pos));
-                }
+                // A `None` capture is a chunk the server forgot: send the removal
+                // marker so the renderer frees the section (vanilla drops the
+                // chunk's render data with the chunk, `ClientChunkCache.drop`).
+                let mesh = match source.capture(pos, radius) {
+                    Some(snapshot) => mesh_section_with(&snapshot, &baked, &*atlas, &tables, pos),
+                    None => SectionMesh::removed(pos),
+                };
+                let _ = tx.send(mesh);
                 in_flight.fetch_sub(1, Ordering::Relaxed);
             });
         });
