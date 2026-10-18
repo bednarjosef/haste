@@ -2175,8 +2175,7 @@ fn open_sounds(
         // Vanilla's load-time check (SoundManager.prepare's validateSoundResource): a
         // file listed in sounds.json but absent from the assets is dropped from its
         // event now, so it can never be picked and fail to play later.
-        let dropped =
-            events.retain_files(|path| assets.read_asset(&format!("assets/{path}")).is_ok());
+        let dropped = events.retain_files(|path| assets.has_asset(&format!("assets/{path}")));
         if dropped > 0 {
             tracing::warn!("{dropped} sound files listed in sounds.json are missing");
         }

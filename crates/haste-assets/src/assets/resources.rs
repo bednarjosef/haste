@@ -183,6 +183,23 @@ impl Assets {
             .with_context(|| format!("asset {key} not found"))
     }
 
+    /// Whether the asset `key` (`assets/<ns>/<path>`) exists in a selected pack, the
+    /// downloaded objects or the jar, without reading it: the same sources, in the same
+    /// order, as [`Assets::read_asset`] (for load-time checks like vanilla's
+    /// `SoundManager.validateSoundResource`).
+    pub fn has_asset(&self, key: &str) -> bool {
+        if self.packs.contains(key) {
+            return true;
+        }
+        let index_key = key.strip_prefix("assets/").unwrap_or(key);
+        if let (Some(objects), Some(hash)) = (&self.objects_dir, self.index_hashes.get(index_key)) {
+            if objects.join(&hash[..2]).join(hash).is_file() {
+                return true;
+            }
+        }
+        self.jar.index_for_name(key).is_some()
+    }
+
     /// The downloaded assets (index + objects) take precedence over the jar: the jar carries
     /// stubs for what the launcher downloads (`font/include/unifont.json` is empty in the jar).
     /// Index keys have no `assets/` prefix. Selected resource packs override both (vanilla
