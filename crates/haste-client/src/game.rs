@@ -533,6 +533,15 @@ pub struct Shared {
     /// resolving what each stored block entity is; the static registry's order when the server
     /// did not sync one (vanilla servers' ids agree with the data generator's).
     pub block_entity_names: Vec<haste_core::Identifier>,
+    /// The game thread's last extracted block entity render data (vanilla's per-tick
+    /// `extractRenderState`): the drawable instances with tick-end values, replaced once per
+    /// tick by the extraction (`app::block_entity_extract`). The render thread clones the
+    /// `Arc` per frame and folds the partial tick in.
+    pub block_entity_tick: Mutex<Arc<crate::app::block_entity_extract::BlockEntityTickFrame>>,
+    /// The renderer's text metrics (the font, for wrapping sign lines), set by the render
+    /// thread on its first frame; the game thread's sign text parsing waits for it (signs
+    /// draw without text until then, retried every tick).
+    pub sign_text_metrics: std::sync::OnceLock<Arc<dyn haste_core::gui::TextMetrics>>,
     /// Biome climates of the synced registry (index = biome id), for the fog's per-biome
     /// environment attributes (`FogRenderer` resolves them from the camera biome).
     pub biome_climates: Vec<haste_render::BiomeClimate>,
@@ -696,6 +705,10 @@ impl Shared {
             block_entity_spins: Mutex::new(Vec::new()),
             block_entity_anims: Mutex::new(std::collections::HashMap::new()),
             block_entity_names,
+            block_entity_tick: Mutex::new(Arc::new(
+                crate::app::block_entity_extract::BlockEntityTickFrame::default(),
+            )),
+            sign_text_metrics: std::sync::OnceLock::new(),
             biome_climates,
             particles: Mutex::new(particles),
             weather_scratch: Mutex::new(haste_render::WeatherFrame::default()),
@@ -841,6 +854,8 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
     // and rate are unchanged.
     let mut drained_wakes = 0u64;
     let mut failure: Option<String> = None;
+    // The block entity render data's extractor (per-tick caches; see the module).
+    let mut extractor = crate::app::block_entity_extract::BlockEntityExtractor::new();
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
@@ -854,6 +869,7 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
             &mut gone,
             &mut jvm,
             &mut server_packs_version,
+            &mut extractor,
         ) {
             break format!("tick failed: {e:#}");
         }
@@ -1091,6 +1107,7 @@ fn tick_once(
     gone: &mut Vec<SectionPos>,
     jvm: &mut HudSlot,
     server_packs_version: &mut u64,
+    extractor: &mut crate::app::block_entity_extract::BlockEntityExtractor,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
     // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
@@ -1733,6 +1750,13 @@ fn tick_once(
         spinning_time: screen.spinning_time(),
         spinning_speed: screen.spinning_speed(),
     };
+    drop(view);
+    // The block entities' render data for the next tick's frames (vanilla's per-tick
+    // `extractRenderState`): everything that changes only per tick (block states, lights,
+    // payloads, the anims' tick ends) is extracted here, off the render thread; the render
+    // thread only folds the partial tick into the animatable fields. Runs after the view
+    // update so the camera chunk, view radius and world age are this tick's.
+    extractor.extract(shared, feet, shared.view.lock().view_distance, s.world_age);
     Ok(())
 }
 
