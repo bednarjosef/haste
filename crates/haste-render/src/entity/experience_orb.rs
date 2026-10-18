@@ -53,8 +53,10 @@ impl EntityRenderer {
         assets: &mut Assets,
     ) {
         let icon = experience_orb_icon(value);
-        let texture = Identifier::minecraft("entity/experience/experience_orb");
-        let rect = self.texture_rect(&texture, assets);
+        static TEXTURE: std::sync::OnceLock<Identifier> = std::sync::OnceLock::new();
+        let texture =
+            TEXTURE.get_or_init(|| Identifier::minecraft("entity/experience/experience_orb"));
+        let rect = self.texture_rect(texture, assets);
         let (rc, _gc, bc) = experience_orb_color(age);
         let u0 = (icon % 4 * 16) as f32 / 64.0;
         let u1 = u0 + 16.0 / 64.0;
