@@ -1782,6 +1782,21 @@ impl InputRouter {
         shared: &Shared,
     ) -> bool {
         self.mouse = (x, y);
+        // Vanilla `MouseHandler.onScroll`: an open screen takes the wheel first; then, for a
+        // spectator, it is the flying speed — before the UI's own no-screen hotbar handling.
+        let screen_open = ui.is_some_and(|ui| ui.screen_open());
+        if !screen_open && shared.view.lock().spectator {
+            if !self.grabbed {
+                return false;
+            }
+            self.scroll += dy;
+            let steps = self.scroll.trunc() as i32;
+            if steps != 0 {
+                self.scroll -= steps as f64;
+                shared.input.lock().spectator_scroll += steps as f32;
+            }
+            return true;
+        }
         if let Some(ui) = ui {
             if ui.scroll(x, y, dx, dy) {
                 return true;
@@ -1794,11 +1809,6 @@ impl InputRouter {
         let steps = self.scroll.trunc() as i32;
         if steps != 0 {
             self.scroll -= steps as f64;
-            // Spectator: the wheel steps the flying speed (`MouseHandler.onScroll`), not the slot.
-            if shared.view.lock().spectator {
-                shared.input.lock().spectator_scroll += steps as f32;
-                return true;
-            }
             let current = self
                 .hotbar
                 .map_or(shared.view.lock().held_slot, |s| s as i32);
