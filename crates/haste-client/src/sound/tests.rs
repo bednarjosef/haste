@@ -452,25 +452,185 @@ fn level_events_play_the_block_sound_at_its_centre() {
     assert!(requests.is_empty());
 }
 
-/// The place (`BlockItem.place`: (v+1)/2, p*0.8) and fall
-/// (`LivingEntity.playBlockFallSound`: v*0.5, p*0.75) factors, and vanilla's
+/// One landing's requests, decoded to (event name, volume, pitch).
+fn landed_requests(
+    fall_distance: f64,
+    may_fly: bool,
+    rule: FallBlockRule,
+    landed_on: Option<LandedOn<'_>>,
+) -> Vec<(String, f32, f32)> {
+    let mut falls = FallSounds::new();
+    let mut requests = Vec::new();
+    falls.landed(
+        DVec3::ZERO,
+        fall_distance,
+        may_fly,
+        landed_on,
+        rule,
+        &mut requests,
+    );
+    requests
+        .into_iter()
+        .map(|r| match r {
+            SoundRequest::Play(p) => match p.sound {
+                SoundRef::Inline(name) => (name, p.volume, p.pitch),
+                other => panic!("not an inline event: {other:?}"),
+            },
+            other => panic!("not a play: {other:?}"),
+        })
+        .collect()
+}
+
+/// A landing a stone-like block plays nothing below vanilla's safe fall distance
+/// (`LivingEntity.calculateFallDamage`: `floor(fall + 1.0E-6 - 3.0)` <= 0), one small
+/// fall sound and the block fall sound from damage 1 on, and the big fall sound only
+/// above damage 4 (`LivingEntity.getFallDamageSound`).
+#[test]
+fn fall_sound_only_with_damage_small_then_big() {
+    let stone = LandedOn {
+        sound: &stone_type(),
+    };
+    // 3.5 blocks: damage floor(3.5 + 1e-6 - 3) = 0 — no sound at all.
+    let requests = landed_requests(3.5, false, FallBlockRule::Default, Some(stone));
+    assert!(
+        requests.is_empty(),
+        "no fall sound without damage: {requests:?}"
+    );
+    // 4.5 blocks: damage 1 — the small fall sound plus the block fall sound
+    // (`block.stone.fall` at volume 1.0 * 0.5, pitch 1.0 * 0.75).
+    let requests = landed_requests(4.5, false, FallBlockRule::Default, Some(stone));
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].0, "minecraft:entity.player.small_fall");
+    assert!((requests[0].1 - 1.0).abs() < 1e-6);
+    assert!((requests[0].2 - 1.0).abs() < 1e-6);
+    assert_eq!(requests[1].0, "minecraft:block.stone.fall");
+    assert!((requests[1].1 - 0.5).abs() < 1e-6);
+    assert!((requests[1].2 - 0.75).abs() < 1e-6);
+    // Damage exactly 4 (fall 7.0) is still small; damage 5 (fall 8.0) is the first big.
+    let requests = landed_requests(7.0, false, FallBlockRule::Default, Some(stone));
+    assert_eq!(requests[0].0, "minecraft:entity.player.small_fall");
+    let requests = landed_requests(8.0, false, FallBlockRule::Default, Some(stone));
+    assert_eq!(requests[0].0, "minecraft:entity.player.big_fall");
+}
+
+/// `Player.causeFallDamage`: with `mayfly` (creative and spectator players) a landing
+/// plays no fall sound, whatever the distance.
+#[test]
+fn no_fall_sound_with_may_fly() {
+    let stone = LandedOn {
+        sound: &stone_type(),
+    };
+    let requests = landed_requests(20.0, true, FallBlockRule::Default, Some(stone));
+    assert!(requests.is_empty(), "mayfly plays nothing: {requests:?}");
+}
+
+/// The block fall-damage rules (`Block.fallOn` overrides): hay and honey need
+/// damage 13+ for a sound (modifier 0.2), honey plays its slide sound and the block
+/// fall sound twice, slime and powder snow never take the damage path, powder snow
+/// plays the small/big fall sound by distance alone, and a bed halves the distance.
+#[test]
+fn block_fall_damage_rules() {
+    let on = LandedOn {
+        sound: &stone_type(),
+    };
+    // Hay (`HayBlock.fallOn`, modifier 0.2): 4.5 blocks is damage 0 — silent.
+    let requests = landed_requests(4.5, false, FallBlockRule::Hay, Some(on));
+    assert!(
+        requests.is_empty(),
+        "hay silences small falls: {requests:?}"
+    );
+    // 13.5 blocks: damage floor(10.5 * 0.2) = 2 — sounds.
+    let requests = landed_requests(13.5, false, FallBlockRule::Hay, Some(on));
+    assert_eq!(requests.len(), 2, "hay at damage 2: {requests:?}");
+    // Slime (`SlimeBlock.fallOn`, modifier 0.0): never a sound.
+    let requests = landed_requests(50.0, false, FallBlockRule::Slime, Some(on));
+    assert!(requests.is_empty(), "slime plays nothing: {requests:?}");
+    // Honey (`HoneyBlock.fallOn`): slide sound always, damage chain at 0.2, and the
+    // block fall sound twice (its own fallOn plus playBlockFallSound).
+    let requests = landed_requests(4.5, false, FallBlockRule::Honey, Some(on));
+    assert_eq!(requests.len(), 1, "honey at damage 0: {requests:?}");
+    assert_eq!(requests[0].0, "minecraft:block.honey_block.slide");
+    let requests = landed_requests(13.5, false, FallBlockRule::Honey, Some(on));
+    assert_eq!(requests.len(), 4, "honey at damage 2: {requests:?}");
+    assert_eq!(requests[0].0, "minecraft:block.honey_block.slide");
+    assert_eq!(requests[1].0, "minecraft:entity.player.small_fall");
+    assert_eq!(requests[2].0, "minecraft:block.stone.fall");
+    assert_eq!(requests[3].0, "minecraft:block.stone.fall");
+    // Powder snow (`PowderSnowBlock.fallOn`): no damage, small from 4, big from 7,
+    // never the block fall sound.
+    let requests = landed_requests(3.9, false, FallBlockRule::PowderSnow, Some(on));
+    assert!(requests.is_empty(), "powder snow below 4: {requests:?}");
+    let requests = landed_requests(5.0, false, FallBlockRule::PowderSnow, Some(on));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "minecraft:entity.player.small_fall");
+    let requests = landed_requests(8.0, false, FallBlockRule::PowderSnow, Some(on));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "minecraft:entity.player.big_fall");
+    // A bed (`BlockBehaviour.fallDistanceReduction` 0.5): 7.5 blocks halve to 3.75,
+    // damage 0 — silent where stone would play.
+    let requests = landed_requests(7.4, false, FallBlockRule::HalvesFallDistance, Some(on));
+    assert!(requests.is_empty(), "bed halves the fall: {requests:?}");
+}
+
+/// `FallBlockRule::of` against the real block table: the four class-override blocks
+/// by registry name, and beds through `#minecraft:beds` (which vanilla's tag provider
+/// fills from the coloured bed list — the straw bed is not in it). Without the tags
+/// nothing halves; unknown blocks take the default rule.
+#[test]
+#[ignore = "needs cache/ (data generator reports)"]
+fn fall_block_rules_resolve_from_the_block_table() {
+    let data = static_game_data();
+    let state = |name: &str| {
+        data.blocks
+            .default_state(&haste_core::Identifier::parse(name).unwrap())
+            .unwrap()
+    };
+    let of = |s: haste_core::BlockStateId| FallBlockRule::of(s, None, Some(&data.blocks));
+    assert_eq!(of(state("minecraft:hay_block")), FallBlockRule::Hay);
+    assert_eq!(of(state("minecraft:slime_block")), FallBlockRule::Slime);
+    assert_eq!(of(state("minecraft:honey_block")), FallBlockRule::Honey);
+    assert_eq!(
+        of(state("minecraft:powder_snow")),
+        FallBlockRule::PowderSnow
+    );
+    assert_eq!(of(state("minecraft:stone")), FallBlockRule::Default);
+    // With the beds tag synced, a red bed halves and the straw bed does not.
+    let beds = haste_physics::mining::BlockTags::new([(
+        haste_core::Identifier::minecraft("beds"),
+        vec![
+            data.blocks
+                .block_index(&haste_core::Identifier::parse("minecraft:red_bed").unwrap())
+                .unwrap()
+                .0 as i32,
+        ],
+    )]);
+    let tagged = |name: &str| FallBlockRule::of(state(name), Some(&beds), Some(&data.blocks));
+    assert_eq!(
+        tagged("minecraft:red_bed"),
+        FallBlockRule::HalvesFallDistance
+    );
+    assert_eq!(tagged("minecraft:straw_bed"), FallBlockRule::Default);
+    // The shelf mushroom halves by name (not in the beds tag).
+    assert_eq!(
+        tagged("minecraft:shelf_mushroom"),
+        FallBlockRule::HalvesFallDistance
+    );
+}
+
+/// The place factors (`BlockItem.place`: (v+1)/2, p*0.8) and vanilla's
 /// "no sound" event (`intentionally_empty`) plays nothing.
 #[test]
-fn place_and_fall_factors_and_the_empty_event() {
+fn place_factors_and_the_empty_event() {
     let mut own = OwnBlockSounds::new();
     let mut wool = stone_type();
     wool.volume = 0.8;
     wool.pitch = 1.2;
     let mut requests = Vec::new();
     own.block_placed(DVec3::ZERO, &wool, &mut requests);
-    own.landed_hard(DVec3::ZERO, &wool, &mut requests);
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     let (_, place_v, place_p) = step_request(&requests[0]);
     assert!((place_v - 0.9).abs() < 1e-6, "place volume {place_v}");
     assert!((place_p - 0.96).abs() < 1e-6, "place pitch {place_p}");
-    let (_, fall_v, fall_p) = step_request(&requests[1]);
-    assert!((fall_v - 0.4).abs() < 1e-6, "fall volume {fall_v}");
-    assert!((fall_p - 0.9).abs() < 1e-6, "fall pitch {fall_p}");
     // A sound type whose event is intentionally_empty (RED_SHRUB's step) plays
     // nothing rather than a silent event.
     let mut quiet = stone_type();

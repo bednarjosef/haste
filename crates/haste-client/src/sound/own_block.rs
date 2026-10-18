@@ -1,6 +1,6 @@
-//! Block sounds: the local player's own (footsteps, mining, breaking, placing,
-//! falling) and the ones the server's `level_event` asks for (a break, a mining
-//! tick).
+//! Block sounds: the local player's own (footsteps, mining, breaking, placing)
+//! and the ones the server's `level_event` asks for (a break, a mining tick).
+//! The fall sounds live in `falls.rs`.
 
 use glam::DVec3;
 use haste_audio::random::LegacyRandom;
@@ -31,11 +31,7 @@ use super::{PlayRequest, SoundPos, SoundRef, SoundRequest};
 /// - place: `BlockItem.place` plays on both sides; the client plays it when
 ///   it sends `use_item_on` with a block item (the server's copy never
 ///   reaches us — same `playSound(player, ...)` exclusion). Volume
-///   `(v + 1) / 2`, pitch `p * 0.8`;
-/// - fall/landing: `LivingEntity.causeFallDamage` → `playBlockFallSound`
-///   plays the block's fall sound (volume `v * 0.5`, pitch `p * 0.75`) when
-///   fall damage lands (dmg > 0), alongside the hurt sound. We play it when
-///   landing with `fall_distance` above vanilla's safe distance.
+///   `(v + 1) / 2`, pitch `p * 0.8`.
 ///
 /// Blocks whose sound type the dump does not know (mods) play nothing — no
 /// guess, no panic. Every request goes through the normal `SoundRequest`
@@ -142,25 +138,6 @@ impl OwnBlockSounds {
             pos,
             (t.volume + 1.0) / 2.0,
             t.pitch * 0.8,
-            requests,
-        );
-    }
-
-    /// Landed from a fall far enough to hurt: the block's fall sound.
-    pub fn landed_hard(
-        &mut self,
-        player_pos: DVec3,
-        t: &haste_data::BlockSoundType,
-        requests: &mut Vec<SoundRequest>,
-    ) {
-        // LivingEntity.playBlockFallSound: fall at v*0.5, pitch*0.75, PLAYER source.
-        play_event(
-            self.random.next_long(),
-            &t.fall_sound,
-            CATEGORY_PLAYERS,
-            player_pos,
-            t.volume * 0.5,
-            t.pitch * 0.75,
             requests,
         );
     }

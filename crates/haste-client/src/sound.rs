@@ -25,7 +25,9 @@ use haste_protocol::wire::{IdOr, SoundEvent as InlineSoundEvent};
 use haste_protocol::ClientboundPlay;
 use haste_protocol::SyncedRegistries;
 
+mod falls;
 mod own_block;
+pub use falls::{FallBlockRule, FallSounds, LandedOn};
 pub use own_block::{level_event_sound, OwnBlockSounds};
 
 /// The `MUSIC_VOLUME` environment attribute's default (vanilla's
