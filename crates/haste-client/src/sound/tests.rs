@@ -555,12 +555,13 @@ fn the_listener_is_the_camera_position_and_look() {
         l > r,
         "east of a south-looking camera is on the left ({l} vs {r})"
     );
-    // Turning the camera west makes the same sound right of the listener.
-    sounds.tick(DVec3::ZERO, 90.0, 0.0, MusicSituation::Game);
+    // Turning the camera north (yaw 180) makes the same sound right of the listener:
+    // east is a north-looking camera's right.
+    sounds.tick(DVec3::ZERO, 180.0, 0.0, MusicSituation::Game);
     let (l, r) = sounds.system.engine_gains().next().unwrap();
     assert!(
         r > l,
-        "east of a west-looking camera is on the right ({r} vs {l})"
+        "east of a north-looking camera is on the right ({r} vs {l})"
     );
     // Moving the camera away silences it by distance.
     sounds.tick(DVec3::new(1000.0, 0.0, 0.0), 0.0, 0.0, MusicSituation::Game);
