@@ -962,23 +962,16 @@ fn painting_facing_transform_matches_vanilla() {
     ));
 }
 
-/// Hand shading is world-oriented: the same face shades differently when looking up vs
-/// down, and at yaw 0 / pitch 0 it matches vanilla's inverse-view-rotation shading.
+/// Hand shading is world-oriented (`GameRenderer.renderItemInHand`): the face toward the
+/// camera faces world up when looking straight down (brightest) and world down when looking
+/// straight up (ambient only).
 #[test]
 fn hand_shade_is_world_oriented() {
-    let n = Vec3::new(0.0, 0.0, 1.0);
-    set_hand_normal_rotation(hand_normal_rotation(0.0, -60.0));
-    let up = entity_shade(n);
-    set_hand_normal_rotation(hand_normal_rotation(0.0, 60.0));
-    let down = entity_shade(n);
-    set_hand_normal_rotation(Mat3::IDENTITY);
-    assert_ne!(up, down);
-    let rot = hand_normal_rotation(0.0, 0.0);
-    let vanilla = entity_shade_base(rot * n);
-    set_hand_normal_rotation(rot);
-    let via_global = entity_shade(n);
-    set_hand_normal_rotation(Mat3::IDENTITY);
-    assert!((via_global - vanilla).abs() < 1e-6);
-    let via_helper = entity_shade_hand(n, 0.0, 0.0);
-    assert!((via_helper - vanilla).abs() < 1e-6);
+    let toward_camera = Vec3::new(0.0, 0.0, 1.0);
+    let down = hand_normal_rotation(0.0, 90.0) * toward_camera;
+    let up = hand_normal_rotation(0.0, -90.0) * toward_camera;
+    assert!(down.abs_diff_eq(Vec3::Y, 1e-5), "{down}");
+    assert!(up.abs_diff_eq(-Vec3::Y, 1e-5), "{up}");
+    assert!(entity_shade(down) > entity_shade(up));
+    assert!((entity_shade(up) - 0.4).abs() < 1e-6);
 }

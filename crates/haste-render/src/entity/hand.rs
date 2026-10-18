@@ -172,16 +172,16 @@ impl EntityRenderer {
             return;
         };
         // Hand normals are world-oriented: vanilla puts the inverse view rotation on the
-        // hand's pose stack (`GameRenderer.renderItemInHand`), so the fixed world light
-        // directions shade the arm/item as you look around. Rotate normals by the inverse
-        // camera rotation for the duration of this pass; positions are untouched.
-        let prev_normal_rotation = hand_normal_rotation_current();
-        set_hand_normal_rotation(hand_normal_rotation(view.0, view.1));
+        // hand's pose stack (`GameRenderer.renderItemInHand`) and the view rotation on the
+        // model-view, so the fixed world light directions shade the arm/item as you look
+        // around. Emit with the inverse rotation in front (world-oriented normals, so the
+        // baked shade is vanilla's), then rotate the positions back below.
+        let inv_view = hand_normal_rotation(view.0, view.1);
         // `FirstPerson::light` is (sky, block); the vertex wants (block, sky).
         let light = (fp.light.1, fp.light.0);
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
         let mut out = std::mem::take(&mut self.hand);
-        let root = prefix * hand_root_matrix(fp, view, partial);
+        let root = Mat4::from_mat3(inv_view) * prefix * hand_root_matrix(fp, view, partial);
         match item {
             Some(model) => {
                 let root = root * item_arm_matrix(fp, partial);
@@ -215,7 +215,10 @@ impl EntityRenderer {
                 );
             }
         }
-        set_hand_normal_rotation(prev_normal_rotation);
+        let to_view = inv_view.transpose();
+        for v in &mut out {
+            v.pos = (to_view * Vec3::from(v.pos)).into();
+        }
         self.hand = out;
         if self.hand.len() > self.hand_capacity {
             self.hand_capacity = self.hand.len().next_power_of_two();

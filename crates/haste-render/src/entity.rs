@@ -54,11 +54,8 @@ pub(crate) use model_parts::{
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
 pub(crate) use vertex::{
-    entity_shade, hand_normal_rotation, hand_normal_rotation_current, hurt_color,
-    max_local_raw_brightness, push_world_quad, set_hand_normal_rotation,
+    entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_world_quad,
 };
-#[allow(unused_imports, dead_code)]
-pub(crate) use vertex::{entity_shade_base, entity_shade_hand};
 pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
