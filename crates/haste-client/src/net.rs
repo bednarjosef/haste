@@ -20,6 +20,8 @@ use crate::player::LocalPlayer;
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// Vanilla `LivingEntity.damageCooldownTime` per hit (the HUD heart blink's window).
+const DAMAGE_COOLDOWN_TICKS: u32 = 20;
 /// The server's correction of the vehicle we steer is only taken when it moved the boat this far
 /// (vanilla `ClientPacketListener.handleMoveVehicle` compares the distance to 1.0E-5).
 const VEHICLE_CORRECTION_EPSILON: f64 = 1.0e-5;
@@ -54,6 +56,11 @@ pub struct Session {
     bell_states: Option<HashSet<BlockStateId>>,
     /// The decorated pot block states, for `block_event` action 1's wobble events.
     pot_states: Option<HashSet<BlockStateId>>,
+    /// The `minecraft:block_entity_type` registry id per block state whose block carries a
+    /// block entity (vanilla `BlockEntityTypes`' valid-block sets), filled from the game data
+    /// and the synced registry at join: a block update that places such a block creates its
+    /// block entity client-side, like vanilla `LevelChunk.setBlockState`.
+    block_entity_state_kinds: Option<HashMap<BlockStateId, u32>>,
     /// Bell rings waiting to be drawn, by block position: the click direction vanilla
     /// `BellBlockEntity.onHit` sends as the event's parameter.
     pub bells: HashMap<BlockPos, Option<Direction>>,
@@ -119,6 +126,18 @@ pub struct Session {
     /// (vanilla's `hurtDir`, the `hurt_animation` packet's yaw).
     pub hurt_ticks: u32,
     pub hurt_dir: f32,
+    /// Vanilla `LivingEntity.damageCooldownTime` (20 per hit, 10 on a heal): the HUD heart
+    /// blink's gate (`Hud.extractPlayerHealth` blinks while it is positive), ticked down in
+    /// `end_tick`.
+    pub damage_cooldown: u32,
+    /// Vanilla `LocalPlayer.flashOnSetHealth`: the first `set_health` of a player (join,
+    /// respawn) only stores the health; drops from then on tilt and blink.
+    pub health_seen: bool,
+    /// The hurt sounds' random (vanilla's per-entity `RandomSource`): hurt pitch and sound
+    /// variant seeds.
+    hurt_rng: haste_audio::random::LegacyRandom,
+    /// Entity types whose hurt sound fell back to the generic one (log once per type).
+    unknown_hurt_types: HashSet<String>,
     /// Ticks since the local player died (vanilla's `deathTime`, 0 while alive).
     pub death_ticks: u32,
     /// Ticks the current use item has been held (vanilla's `getTicksUsingItem`), and the held
@@ -201,6 +220,7 @@ impl Session {
             lid_states: None,
             bell_states: None,
             pot_states: None,
+            block_entity_state_kinds: None,
             bells: HashMap::new(),
             pots: HashMap::new(),
             entity_ids: HashSet::new(),
@@ -223,6 +243,15 @@ impl Session {
             old_fov_modifier: 0.0,
             hurt_ticks: 0,
             hurt_dir: 0.0,
+            damage_cooldown: 0,
+            health_seen: false,
+            hurt_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
+            unknown_hurt_types: HashSet::new(),
             death_ticks: 0,
             use_ticks: 0,
             use_item: None,
@@ -335,6 +364,8 @@ impl Session {
 
         // Hurt and death counters (LivingEntity.tick / tickDeath).
         self.hurt_ticks = self.hurt_ticks.saturating_sub(1);
+        // The damage cooldown the HUD heart blink reads (`LivingEntity.tick`).
+        self.damage_cooldown = self.damage_cooldown.saturating_sub(1);
         if p.health <= 0.0 {
             self.death_ticks = self.death_ticks.saturating_add(1);
         } else {
@@ -374,6 +405,11 @@ impl Session {
                 self.entity_id = EntityId(l.entity_id);
                 let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);
+                // A new player: no hurt tilt, no blink window, and the first
+                // `set_health` only stores the health (vanilla `flashOnSetHealth`).
+                self.hurt_ticks = 0;
+                self.damage_cooldown = 0;
+                self.health_seen = false;
                 self.breaking.clear();
                 self.lids.clear();
                 self.bells.clear();
@@ -408,10 +444,18 @@ impl Session {
                     ));
             }
         }
+        // `set_health`'s old value, for `LocalPlayer.hurtTo` after the player stored the
+        // new one (the health drop tilts the camera and starts the HUD blink's cooldown).
+        let health_before = matches!(p, P::SetHealth(_)).then(|| self.player.health);
         let player_packet = self.player.handle(&p, out);
+        if let (Some(old), P::SetHealth(h)) = (health_before, &p) {
+            damage::hurt_to(self, old, h.health);
+        }
         if player_packet {
-            for (pos, state) in self.player.take_world_edits() {
-                world.set_block(pos, state);
+            // The drain holds the player's borrow, so the edits apply from a collected copy.
+            let edits: Vec<_> = self.player.take_world_edits().collect();
+            for (pos, state) in edits {
+                self.set_block_with_block_entities(world, pos, state);
             }
             // The boat we steer is this side's authoritative instance of it (vanilla
             // `Entity.isLocalInstanceAuthoritative`): the entity the world draws sits where our
@@ -444,7 +488,7 @@ impl Session {
         let Some(p) = self.apply_chunk_updates(p, world) else {
             return;
         };
-        let Some(p) = self.apply_entities(p, own, world, entities, out) else {
+        let Some(p) = self.apply_entities(p, own, world, entities, regs, out) else {
             return;
         };
         let Some(p) = self.apply_chat(p) else {
@@ -455,10 +499,12 @@ impl Session {
 }
 
 pub mod account;
+mod block_entity_types;
 mod block_events;
 mod chat;
 pub mod chat_session;
 mod counters;
+pub(crate) mod damage;
 mod driver;
 mod effects;
 mod entities;
@@ -477,6 +523,7 @@ mod vehicle;
 mod weather;
 mod world;
 
+pub use block_entity_types::block_entity_type_path;
 pub use block_events::LidAnim;
 pub use counters::NetCounters;
 

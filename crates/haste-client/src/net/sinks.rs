@@ -34,6 +34,12 @@ pub trait WorldSink {
     }
     /// `World::set_block_entity`.
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData);
+    /// The block entity at `pos` (`World::block_entity`; `None` by default for fakes). Named
+    /// differently from the world's method so `World` (which has both) stays unambiguous.
+    fn block_entity_at(&self, pos: BlockPos) -> Option<&BlockEntityData> {
+        let _ = pos;
+        None
+    }
     /// `World::set_biome_zoom_seed` (vanilla `BiomeManager.biomeZoomSeed` from the spawn info).
     fn set_biome_zoom_seed(&mut self, seed: i64) {
         let _ = seed;
@@ -211,6 +217,9 @@ impl WorldSink for World {
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         World::set_block_entity(self, pos, data)
+    }
+    fn block_entity_at(&self, pos: BlockPos) -> Option<&BlockEntityData> {
+        World::block_entity(self, pos)
     }
     fn set_biome_zoom_seed(&mut self, seed: i64) {
         World::set_biome_zoom_seed(self, seed)

@@ -1,23 +1,20 @@
 //! What the render thread needs each frame of the local player and its hand (the per-tick
-//! "view state" copied out under a short lock): the own model instance for third person, the
-//! first-person hand's per-tick animation state, and the rain-fog helpers the tick's view
-//! update reads.
+//! "view state" copied out under a short lock): the first-person hand's per-tick animation
+//! state, and the rain-fog helpers the tick's view update reads. The own third-person model
+//! lives in [`super::player_model`] (its own `haste-entity` state, not a copy here).
 
 use std::time::Instant;
 
 use glam::DVec3;
 use haste_core::entity::Pose;
-use haste_core::math::Vec3;
-use haste_core::model::{BodyTransform, EntityInstance, PoseOverrides};
 use haste_core::view::BlockView;
-use haste_core::{BlockPos, Direction, EntityId, RegistryIndex};
+use haste_core::{BlockPos, Direction, RegistryIndex};
 use haste_protocol::haste_core::game::GameMode;
 
 use crate::player::interact::UseAnimation;
 
 use super::camera::eye_in_lava;
 use super::weather::{biome_has_precipitation, rain_fog_sky_light};
-use super::{interpolate, skins};
 
 /// The local player's pose for its own model: the physics pose's render equivalent (sleeping and
 /// other metadata-only poses are not modelled yet).
@@ -29,89 +26,6 @@ pub(super) fn player_pose(s: &crate::net::Session) -> Option<Pose> {
         PhysicsPose::Swimming => Some(Pose::Swimming),
         PhysicsPose::FallFlying => Some(Pose::FallFlying),
     }
-}
-
-/// The local player's own render instance for third person (the server does not spawn us as an
-/// entity, so it is not in the store): the humanoid model at the interpolated feet, body yaw
-/// and head pitched to the interpolated look, and its pose's adjustments like any player. The
-/// limb swing the store drives for other entities is omitted (no per-tick walk phase for the
-/// local player yet).
-pub fn player_instance(
-    id: EntityId,
-    view: &ViewState,
-    partial: f32,
-    skin: &haste_entity::skin::PlayerSkin,
-) -> EntityInstance {
-    let pos = interpolate(view.prev_feet, view.feet, partial);
-    let yaw = view.prev_look.0 + (view.look.0 - view.prev_look.0) * partial;
-    let pitch = view.prev_look.1 + (view.look.1 - view.prev_look.1) * partial;
-    let mut pose = PoseOverrides::default();
-    use haste_core::parts;
-    match view.pose {
-        Some(Pose::Crouching) => {
-            pose.set_rotation(parts::BODY, Vec3::new(0.5, 0.0, 0.0));
-            pose.set_rotation(parts::HEAD, Vec3::new(-0.5, 0.0, 0.0));
-        }
-        Some(Pose::Swimming | Pose::FallFlying | Pose::SpinAttack) => {
-            pose.set_rotation(
-                parts::BODY,
-                Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
-            );
-            pose.set_rotation(
-                parts::RIGHT_ARM,
-                Vec3::new(-std::f32::consts::FRAC_PI_2, 0.0, 0.4),
-            );
-            pose.set_rotation(
-                parts::LEFT_ARM,
-                Vec3::new(-std::f32::consts::FRAC_PI_2, 0.0, -0.4),
-            );
-        }
-        _ => {
-            // Head aim: the head follows the look's pitch (the body and head yaw are the same
-            // here, so no yaw component).
-            pose.set_rotation(parts::HEAD, Vec3::new(pitch.to_radians(), 0.0, 0.0));
-        }
-    }
-    let mut inst = EntityInstance {
-        id,
-        model: haste_entity::models::humanoid(false),
-        pos,
-        yaw,
-        pitch,
-        head_yaw: yaw,
-        scale: 1.0,
-        pose,
-        body: BodyTransform::default(),
-        body_scale: Vec3::ONE,
-        skin: None,
-        nametag: None,
-        below_name: None,
-        // `AvatarRenderer` passes shadowRadius 0.5 (LivingEntityRenderer, player scale 1).
-        shadow_radius: 0.5,
-        shadow_strength: 1.0,
-        invisible: false,
-        // `Entity.displayFireAnimation`: on fire and not a spectator.
-        display_fire: view.screen.on_fire && !view.spectator,
-        width: view.bb.0,
-        height: view.bb.1,
-        is_discrete: view.pose == Some(Pose::Crouching),
-        // `EntityAttachment.NAME_TAG` AT_HEIGHT fallback = the player's 1.8 bb height.
-        name_tag_y: 1.8,
-        // Our own model flashes red in third person like other entities: full strength on the
-        // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
-        hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
-            / crate::net::HURT_TILT_TICKS as f32),
-        // Full sky until the frame pass samples the world (`EntityInstance::sample_light`).
-        light: (15, 0),
-        overlays: Default::default(),
-        item: None,
-        decoration: None,
-        hands: [None, None],
-        equipment: Vec::new(),
-        head_item: None,
-    };
-    skins::dress_local(&mut inst, skin, view, partial);
-    inst
 }
 
 /// What the render thread needs each frame, copied out under a short lock.
@@ -451,7 +365,14 @@ pub(super) fn publish(
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.world_age = s.world_age;
     view.has_sky = s.dimension.has_skylight;
-    view.block_target = s.player.target();
+    view.block_target = if s.player.game_mode == GameMode::Spectator {
+        // Vanilla `GameRenderer.shouldRenderBlockOutline`: a spectator draws no block outline.
+        // (Its exception — a `MenuProvider` or portal target — needs a client-side table of
+        // menu blocks, which Haste does not have yet; see player/spectator.rs.)
+        None
+    } else {
+        s.player.target()
+    };
     view.eye_in_water = s.player.state.eyes_in_water;
     view.eye_in_lava = eye_in_lava(&shared.world.read(), &shared.data, eye);
     // The fog environment's player state (vanilla `FogRenderer.setupFog` reads these off the
@@ -509,6 +430,7 @@ pub(super) fn publish(
         nausea: s.player.int.nausea_blend_pair(),
         spinning_time: screen.spinning_time(),
         spinning_speed: screen.spinning_speed(),
+        spectator: view.spectator,
     };
     drop(view);
     feet

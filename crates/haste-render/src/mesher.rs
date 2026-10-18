@@ -6,6 +6,7 @@
 // brightness; the worker pool design follows Pomme's MeshDispatcher (bounded
 // result channel, buffer pool, nearest-first camera queue). See THIRD_PARTY.md.
 
+mod culling;
 mod dispatch;
 mod lighting;
 mod merge;
@@ -22,6 +23,7 @@ pub use tables::{AoTable, MeshTables};
 use haste_assets::RenderLayer;
 use haste_core::{BlockPos, BlockStateId, SectionPos};
 
+use crate::fluid_occlusion::Occluder;
 use crate::vertex::{pack_ao_shade, pack_light, PackedVertex};
 use lighting::{shade_index, vertex_light_for};
 use merge::{flush_staged, merge_face, MergeFace, MergeKey, MergeQuad, StagedQuad};
@@ -178,6 +180,10 @@ struct StateInfo {
     layer: RenderLayer,
     /// The state's fluid, if any.
     fluid: Option<crate::fluid::FluidState>,
+    /// Face-plane occlusion coverage (vanilla `Block.shouldRenderFace`'s shape
+    /// comparison): what this state's opaque quads hide of a neighbour's
+    /// flush face, per cullface direction.
+    cover: culling::FaceCover,
 }
 
 /// The per-section meshing context: snapshot access by local offset plus the
@@ -289,6 +295,7 @@ impl<'a> MeshContext<'a> {
                 })
                 .collect();
             self.states[idx] = Some(std::rc::Rc::new(StateInfo {
+                cover: culling::FaceCover::from_quads(self.baked.quads(state), self.atlas),
                 quads,
                 layer: self.baked.render_layer(state),
                 fluid: self.tables.fluids.fluid(state),
@@ -374,11 +381,22 @@ pub fn mesh_section_with(
 
                     for quad in &info.quads {
                         // Cullface: skip the face when the neighbour is a full
-                        // opaque block (vanilla's model culling).
+                        // opaque block (vanilla's model culling), or when the
+                        // neighbour's opaque quads cover this quad's extent on
+                        // the shared plane (vanilla `Block.shouldRenderFace`'s
+                        // shape comparison: snow layers against snow layers,
+                        // slabs against slabs).
                         if let Some(cull) = quad.cullface {
                             let o = cull.offset();
                             let neighbor = ctx.cell(lx + 1 + o[0], ly + 1 + o[1], lz + 1 + o[2]);
                             if ctx.baked.is_full_opaque(neighbor.state) {
+                                continue;
+                            }
+                            if ctx
+                                .state_info(neighbor.state)
+                                .cover
+                                .covers(cull, &quad.positions)
+                            {
                                 continue;
                             }
                         }
@@ -469,6 +487,8 @@ pub fn mesh_section_with(
 struct FluidView<'a> {
     snapshot: &'a MeshSnapshot,
     baked: &'a haste_assets::BakedBlockModels,
+    /// Per-state occlusion shapes (`fluid/occlusion.rs`).
+    occluders: &'a crate::fluid::FluidOccluders,
 }
 
 impl crate::fluid::FluidWorld for FluidView<'_> {
@@ -480,6 +500,11 @@ impl crate::fluid::FluidWorld for FluidView<'_> {
     }
     fn solid(&self, p: BlockPos) -> bool {
         crate::fluid::baked_solid(self.baked, self.snapshot.block_state(p))
+    }
+    fn face_occluder(&self, p: BlockPos, _dir: haste_assets::Direction) -> Occluder<'_> {
+        let state = self.snapshot.block_state(p);
+        self.occluders
+            .occluder(state, || self.baked.is_full_opaque(state))
     }
 }
 
@@ -505,6 +530,7 @@ fn mesh_fluid(
         let view = FluidView {
             snapshot: ctx.snapshot,
             baked: ctx.baked,
+            occluders: &ctx.tables.fluid_occluders,
         };
         crate::fluid::fluid_quads(&view, &ctx.tables.fluids, block_pos, fluid, &mut quads);
     }

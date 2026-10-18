@@ -17,6 +17,7 @@ mod animation;
 mod connectivity;
 mod hurt;
 mod item_entity;
+mod local_player;
 mod mob_animation;
 mod model_dump;
 mod models;

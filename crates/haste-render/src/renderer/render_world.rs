@@ -431,14 +431,7 @@ impl Renderer {
                 });
             }
         };
-        for (c, si) in self.visible_mask.ordered() {
-            emit(&mut buckets, SectionPos::new(c.x, si + min_section, c.z));
-        }
-        for &pos in &self.bonus_list {
-            if sections.get(pos).is_some_and(|s| s.bonus) {
-                emit(&mut buckets, pos);
-            }
-        }
+        self.for_each_visible_section(|pos| emit(&mut buckets, pos));
         // Group the opaque buckets by arena: the draw loop issues one multi-draw
         // call per run sharing a layer and an arena, and the visit order
         // interleaves the arenas, so ungrouped the frame pays thousands of draw
@@ -447,8 +440,11 @@ impl Renderer {
         for b in buckets.iter_mut().take(3) {
             b.sort_unstable_by_key(|d| d.arena);
         }
-        // Translucent back to front: the key is the negated distance.
-        buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
+        // Translucent back to front: the key is the negated distance, so
+        // ascending key order is far first.
+        if buckets[3].len() > 1 {
+            buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
+        }
         let mut draws = std::mem::take(&mut self.draw_list);
         draws.clear();
         for b in buckets.iter() {
@@ -523,10 +519,22 @@ impl Renderer {
                 }
             }
             self.entity.set_beam_radius_scale(radius_scale);
+            // Vanilla `BlockEntityRenderer.shouldRender`: the renderer's view distance (64
+            // blocks, the piston's 68, the beacon's render distance) bounds the draw; the fog
+            // band's end is the effective render distance in blocks.
+            let view_distance_blocks = fog_data.render_distance_end as f64;
             self.block_entities_drawn = self.entity.append_block_entities(
                 frame.block_entities,
                 cam,
                 |inst| {
+                    if !crate::blockentity::within_view_distance(
+                        &inst.kind,
+                        inst.pos,
+                        cam,
+                        view_distance_blocks,
+                    ) {
+                        return false;
+                    }
                     let pos = inst.pos;
                     let lo = [
                         pos.x as f32 - cam.x as f32,
@@ -552,13 +560,11 @@ impl Renderer {
 
         self.timings.cull_ms = lap(&mut mark);
         let mut ran = [false; 3];
-        // Main-pass sub-pass bracket state (timing.rs MAIN_SUBPASSES order): a bracket
-        // is open when its layer began drawing and not yet ended; `GpuTimer::close_terrain`
-        // ends the open terrain brackets (a wgpu query may only be written once per pass).
-        // Solid and CutoutMipped share one pipeline but get separate brackets ("solid" 1,
-        // "cutout_mipped" 3), since their arena runs interleave.
-        let mut sub_open = [false; 8];
-        let mut ran_sub = [false; 8];
+        // Main-pass sub-pass brackets (timing.rs `SubpassBrackets`): one bracket per sub-pass
+        // in MAIN_SUBPASSES order; solid and cutout_mipped share the solid pipeline but get
+        // separate brackets, since their arena runs interleave in the layer-major draw order.
+        let mut brackets = crate::timing::SubpassBrackets::default();
+        let timer = self.timer.as_ref();
         let mut draw_calls = 0u32;
         let mut encoder = self
             .gpu
@@ -596,15 +602,9 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(t) = self.timer.as_ref() {
-                ran_sub[0] |= t.begin_subpass(&mut pass, 0);
-                sub_open[0] = true;
-            }
+            brackets.begin(&mut pass, timer, crate::timing::SKY);
             draw_calls += self.sky.draw_background(&mut pass);
-            if let Some(t) = self.timer.as_ref() {
-                t.end_subpass(&mut pass, 0);
-                sub_open[0] = false;
-            }
+            brackets.end(&mut pass, timer, crate::timing::SKY);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
@@ -622,11 +622,7 @@ impl Renderer {
                 let instance = i;
                 // Entities after the opaque and cutout terrain, before translucent.
                 if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
-                    if let Some(t) = self.timer.as_ref() {
-                        t.close_terrain(&mut pass, &mut sub_open);
-                        ran_sub[5] |= t.begin_subpass(&mut pass, 5);
-                        sub_open[5] = true;
-                    }
+                    brackets.begin_entities(&mut pass, timer);
                     // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
                     // the entities, then the block entities' special passes: the end
                     // portal/gateway starfield and the beacon beams (inner opaque, glow
@@ -640,14 +636,9 @@ impl Renderer {
                     draw_calls += self.entity.draw_portals(&mut pass);
                     draw_calls += self.entity.draw_beams(&mut pass);
                     pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                    // End the entity bracket before the translucent terrain that
-                    // follows, or translucent draws are attributed to "entities".
-                    if let Some(t) = self.timer.as_ref() {
-                        if sub_open[5] {
-                            t.end_subpass(&mut pass, 5);
-                            sub_open[5] = false;
-                        }
-                    }
+                    // Close the entities bracket right after the entity draws, so the
+                    // translucent terrain below is not timed as "entities".
+                    brackets.end(&mut pass, timer, crate::timing::ENTITIES);
                     entities_drawn = true;
                     bound_layer = None;
                     bound_arena = u32::MAX;
@@ -663,12 +654,7 @@ impl Renderer {
                         haste_assets::RenderLayer::CutoutMipped => (&self.pipeline_cutout, 3),
                         haste_assets::RenderLayer::Translucent => (&self.pipeline_translucent, 4),
                     };
-                    if let Some(t) = self.timer.as_ref() {
-                        // Close the previous terrain bracket, open the new layer's.
-                        t.close_terrain(&mut pass, &mut sub_open);
-                        ran_sub[sub as usize] |= t.begin_subpass(&mut pass, sub);
-                        sub_open[sub as usize] = true;
-                    }
+                    brackets.begin_terrain_layer(&mut pass, timer, sub);
                     pass.set_pipeline(pipeline);
                     bound_layer = Some(d.layer);
                 }
@@ -704,11 +690,7 @@ impl Renderer {
                 }
             }
             if !entities_drawn {
-                if let Some(t) = self.timer.as_ref() {
-                    t.close_terrain(&mut pass, &mut sub_open);
-                    ran_sub[5] |= t.begin_subpass(&mut pass, 5);
-                    sub_open[5] = true;
-                }
+                brackets.begin_entities(&mut pass, timer);
                 draw_calls += self.entity.draw_shadows(&mut pass);
                 draw_calls += self.entity.draw(&mut pass);
                 pass.set_bind_group(1, &self.atlas_bind_group, &[]);
@@ -716,34 +698,16 @@ impl Renderer {
                 draw_calls += self.entity.draw_portals(&mut pass);
                 draw_calls += self.entity.draw_beams(&mut pass);
             }
-            if let Some(t) = self.timer.as_ref() {
-                // The last terrain layer leaves its bracket open: close it.
-                t.close_terrain(&mut pass, &mut sub_open);
-                if sub_open[5] {
-                    t.end_subpass(&mut pass, 5);
-                    sub_open[5] = false;
-                }
-                ran_sub[6] |= t.begin_subpass(&mut pass, 6);
-                sub_open[6] = true;
-            }
+            // Translucent is the last layer, so its bracket never sees a layer change:
+            // `begin_particles` closes whatever terrain bracket is still open.
+            brackets.begin_particles(&mut pass, timer);
             draw_calls += self.particles.draw(&mut pass);
-            if let Some(t) = self.timer.as_ref() {
-                if sub_open[6] {
-                    t.end_subpass(&mut pass, 6);
-                    sub_open[6] = false;
-                }
-                ran_sub[7] |= t.begin_subpass(&mut pass, 7);
-                sub_open[7] = true;
-            }
+            brackets.begin_overlays(&mut pass, timer);
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.clouds.draw(&mut pass);
             draw_calls += self.weather.draw(&mut pass);
             draw_calls += self.weather.draw_lightning(&mut pass);
-            if let Some(t) = self.timer.as_ref() {
-                if sub_open[7] {
-                    t.end_subpass(&mut pass, 7);
-                }
-            }
+            brackets.end(&mut pass, timer, crate::timing::OVERLAYS);
         }
 
         // First-person hand: its own pass over the world with the depth cleared, so it never
@@ -808,7 +772,7 @@ impl Renderer {
 
         // Submit, then present (wgpu 30: present lives on the queue).
         let resolved = match &mut self.timer {
-            Some(t) => t.resolve(&mut encoder, ran, ran_sub),
+            Some(t) => t.resolve(&mut encoder, ran, brackets.ran()),
             None => false,
         };
         self.timings.encode_ms = lap(&mut mark);
@@ -838,7 +802,7 @@ impl Renderer {
             frame_ms: started.elapsed().as_secs_f32() * 1000.0,
             chunk_sections_drawn: drawn,
             chunk_sections_total: sections_total,
-            meshes_pending: self.mesher.pending_len() as u32,
+            meshes_pending: self.meshes_pending() as u32,
             uploads: self.last_uploads.0,
             upload_bytes: self.last_uploads.1,
             indices_drawn,

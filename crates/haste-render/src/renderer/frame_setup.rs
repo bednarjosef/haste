@@ -31,6 +31,13 @@ impl Renderer {
         self.first_person = fp;
     }
 
+    /// The camera entity is a spectator this frame (`Camera.extractRenderState` reads it off
+    /// the player). With the camera inside a solid-render block, [`Self::sample_world`] turns
+    /// the section occlusion cull off for the frame.
+    pub fn set_camera_spectator(&mut self, spectator: bool) {
+        self.camera_spectator = spectator;
+    }
+
     /// Samples what this frame's overlays need from the world (the renderer holds
     /// no world): the targeted block's outline boxes, the states of breaking
     /// blocks. Call before `render` with the frame you are about to render.
@@ -41,6 +48,13 @@ impl Renderer {
         frame: &FrameInput,
     ) {
         self.prepare_shadows(world, shapes, frame);
+        // Vanilla `Camera.extractRenderState`: a spectator camera inside a solid-render
+        // block draws with `smartCull` off, so the caves around it draw.
+        let eye_block = haste_core::BlockPos::from_dvec3(frame.camera.pos);
+        self.cull_sections = cull_sections(
+            self.camera_spectator,
+            self.baked.is_full_opaque(world.block_state(eye_block)),
+        );
         let o = &mut self.overlay.world;
         o.target = frame.block_target.and_then(|(pos, _)| {
             let state = world.block_state(pos);
@@ -171,4 +185,11 @@ impl Renderer {
     pub fn set_particle_types(&mut self, types: &Arc<crate::particles::ParticleTypes>) {
         self.particles.set_types(types);
     }
+}
+
+/// Whether the section occlusion cull runs this frame. Vanilla `Camera.extractRenderState`
+/// sets `smartCull = false` for a spectator camera inside a solid-render block (the player is
+/// inside a hill: every section must draw or the screen goes empty).
+pub(super) fn cull_sections(camera_spectator: bool, camera_in_solid: bool) -> bool {
+    !(camera_spectator && camera_in_solid)
 }
