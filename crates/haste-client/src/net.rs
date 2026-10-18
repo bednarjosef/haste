@@ -1470,6 +1470,30 @@ impl Session {
                 {
                     self.block_particle_requests.push(r);
                 }
+                // The sound half of the two events that play one (vanilla
+                // `LevelEventHandler` cases 2001/2020). 2001's payload names the broken
+                // state; for 2020 the block is still in the world, so its state is read
+                // here (`ClientLevel.addBreakingBlockEffects` reads it at the same
+                // point). The server excludes the breaker from its 2001 broadcast
+                // (`Block.spawnDestroyByEntityParticles` with the player), so the local
+                // player's own break sound is not doubled.
+                if e.event == 2001 || e.event == 2020 {
+                    if let Some((_, data)) = world.physics() {
+                        let state = if e.event == 2001 {
+                            BlockStateId(e.data as u32)
+                        } else {
+                            world.block_state_at(e.pos)
+                        };
+                        if let Some(t) = data.block_sound_type(state) {
+                            crate::sound::level_event_sound(
+                                e.event,
+                                e.pos,
+                                t,
+                                &mut self.sound_requests,
+                            );
+                        }
+                    }
+                }
             }
             // The lightmap's effect inputs (night vision and darkness durations), boss-overlay
             // darkening and the lightning sky flash; these also ride the player's own handling.
@@ -2225,6 +2249,7 @@ impl NetDriver {
 pub mod account;
 mod block_events;
 pub mod chat_session;
+pub(crate) mod pack_prompt;
 mod vehicle;
 
 #[cfg(test)]

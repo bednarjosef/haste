@@ -131,9 +131,11 @@ pub(crate) fn travel_water(
     blocks: &dyn BlockPhysics,
     climb: &dyn ClimbableBlocks,
 ) {
-    // `LivingEntity.travelInFluid` decides `isFalling` from the velocity the tick started with,
-    // before the sneak sink, the swim steering, the acceleration and the move.
+    // `LivingEntity.travelInFluid` decides `isFalling` and the base gravity from the velocity
+    // the tick started with, before the sneak sink, the swim steering, the acceleration and the
+    // move (`getEffectiveGravity`: slow falling caps it at 0.01 while falling).
     let is_falling = state.velocity.y <= 0.0;
+    let base_gravity = crate::elytra::effective_gravity(attrs, state.velocity, state.slow_falling);
     let old_y = state.pos.y;
     if input.sneak {
         state.velocity.y -= SWIM_DOWN;
@@ -159,7 +161,7 @@ pub(crate) fn travel_water(
     state.velocity.y *= WATER_DRAG;
     state.velocity.z *= h_drag;
     state.velocity.y = fluid_falling_adjusted_movement(
-        attrs.gravity,
+        base_gravity,
         is_falling,
         state.sprinting,
         state.velocity.y,
@@ -177,6 +179,7 @@ pub(crate) fn travel_lava(
     blocks: &dyn BlockPhysics,
 ) {
     let is_falling = state.velocity.y <= 0.0;
+    let base_gravity = crate::elytra::effective_gravity(attrs, state.velocity, state.slow_falling);
     let old_y = state.pos.y;
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
@@ -191,7 +194,7 @@ pub(crate) fn travel_lava(
         state.velocity.y *= LAVA_DRAG_SHALLOW_VERTICAL;
         state.velocity.z *= LAVA_DRAG_SHALLOW;
         state.velocity.y = fluid_falling_adjusted_movement(
-            attrs.gravity,
+            base_gravity,
             is_falling,
             state.sprinting,
             state.velocity.y,
@@ -199,8 +202,8 @@ pub(crate) fn travel_lava(
     } else {
         state.velocity *= LAVA_DRAG;
     }
-    if attrs.gravity != 0.0 {
-        state.velocity.y -= attrs.gravity / LAVA_GRAVITY_DIVISOR;
+    if base_gravity != 0.0 {
+        state.velocity.y -= base_gravity / LAVA_GRAVITY_DIVISOR;
     }
     jump_out_of_fluid(state, attrs, old_y, world, shapes, blocks);
 }
@@ -468,6 +471,23 @@ mod tests {
         assert!(
             (s.velocity.y - (0.08 - 0.08 / 16.0)).abs() < 1e-12,
             "sinking velocity {:?}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
+    fn slow_falling_caps_the_fluid_base_gravity() {
+        // vanilla `LivingEntity.travelInFluid` computes baseGravity from `getEffectiveGravity`,
+        // so slow falling while sinking caps the water sink at 0.01 / 16.
+        let w = water_pool_eyes_dry();
+        let mut s = water_player();
+        s.velocity = DVec3::new(0.2, -0.1, 0.0);
+        s.slow_falling = true;
+        tick_once(&w, &mut s, &InputState::default());
+        // drag 0.8 on y, then baseGravity/16 (0.01/16) subtracted.
+        assert!(
+            (s.velocity.y - (-0.08 - 0.01 / 16.0)).abs() < 1e-12,
+            "sink velocity {:?}",
             s.velocity.y
         );
     }

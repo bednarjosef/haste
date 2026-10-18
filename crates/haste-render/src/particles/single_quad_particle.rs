@@ -29,8 +29,9 @@ impl Quad {
 }
 
 /// How the quad size changes over the particle's life (`getQuadSize` overrides).
+/// Public through the render snapshot's [`super::ParticleView`].
 #[derive(Clone, Copy, Debug)]
-pub(super) enum QuadGrowth {
+pub enum QuadGrowth {
     /// Unchanged (`SingleQuadParticle.getQuadSize`).
     Constant,
     /// `clamp((age + a) / lifetime * 32, 0, 1)`: full size after 1/32 of the life
@@ -45,7 +46,7 @@ pub(super) enum QuadGrowth {
 
 impl QuadGrowth {
     /// The multiplier for a normalized age `s` in 0..=1.
-    pub(super) fn scale(self, s: f32) -> f32 {
+    pub fn scale(self, s: f32) -> f32 {
         match self {
             QuadGrowth::Constant => 1.0,
             QuadGrowth::GrowEarly => (s * 32.0).clamp(0.0, 1.0),

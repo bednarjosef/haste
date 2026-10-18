@@ -240,6 +240,13 @@ impl BlockPhysics for GameData {
     fn is_honey(&self, state: BlockStateId) -> bool {
         self.is_minecraft_block(state, "honey_block")
     }
+    fn is_bubble_column(&self, state: BlockStateId) -> bool {
+        self.is_minecraft_block(state, "bubble_column")
+    }
+    /// `BubbleColumnBlock.DRAG_DOWN`: the state's `drag` property (true above magma).
+    fn bubble_column_drag_down(&self, state: BlockStateId) -> bool {
+        self.blocks.property_value(state, "drag") == Some("true")
+    }
     /// `Block.getBounceRestitution`: 1.0 for `minecraft:slime_block`, 0.0 otherwise. Vanilla
     /// 26.3 also gives the coloured beds and `minecraft:shelf_mushroom` 0.75
     /// (`Blocks.BED`/`Blocks.SHELF_MUSHROOM` `bounceRestitution`); those blocks are out of this

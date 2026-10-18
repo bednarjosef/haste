@@ -257,6 +257,68 @@ public final class Bridge {
             net.minecraft.network.chat.Component.translatable("disconnect.lost"), reason));
     }
 
+    /**
+     * The server resource pack prompt (vanilla's
+     * {@code ClientCommonPacketListenerImpl.PackConfirmScreen}, a ConfirmScreen): shown while
+     * connecting to (or playing on) a server that pushes a pack and whose per-server setting is
+     * "Prompt" (servers.dat {@code acceptTextures} absent). {@code forced} is the push's required
+     * flag (a required pack words the screen as mandatory and declines by disconnecting);
+     * {@code promptJson} is the push's optional prompt text (a text component in its JSON form).
+     *
+     * <p>Replaces an already-open prompt (vanilla's {@code addOrUpdatePackPrompt} rebuilds it for
+     * the pushes waiting now). The answer reaches Rust through
+     * {@link haste.rt.Native#packPromptAnswered(boolean)}; the screen the prompt opened over is
+     * restored then, like vanilla's {@code parentScreen}.
+     */
+    public void showPackPrompt(boolean forced, String promptJson) {
+        net.minecraft.network.chat.Component prompt = null;
+        if (promptJson != null && !promptJson.isEmpty()) {
+            prompt = net.minecraft.network.chat.ComponentSerialization.CODEC
+                .parse(com.mojang.serialization.JsonOps.INSTANCE, com.google.gson.JsonParser.parseString(promptJson))
+                .result().orElse(null);
+        }
+        // The title (line 1) and message (line 2) of vanilla's two wordings; a server prompt is
+        // folded into the message with vanilla's "message from server" wrapping.
+        net.minecraft.network.chat.Component title = forced
+            ? net.minecraft.network.chat.Component.translatable("multiplayer.requiredTexturePrompt.line1")
+            : net.minecraft.network.chat.Component.translatable("multiplayer.texturePrompt.line1");
+        net.minecraft.network.chat.Component message = forced
+            ? net.minecraft.network.chat.Component.translatable("multiplayer.requiredTexturePrompt.line2")
+                .withStyle(net.minecraft.ChatFormatting.YELLOW, net.minecraft.ChatFormatting.BOLD)
+            : net.minecraft.network.chat.Component.translatable("multiplayer.texturePrompt.line2");
+        if (prompt != null) {
+            message = net.minecraft.network.chat.Component.translatable("multiplayer.texturePrompt.serverPrompt",
+                message, prompt);
+        }
+        net.minecraft.network.chat.Component yes = forced
+            ? net.minecraft.network.chat.CommonComponents.GUI_PROCEED
+            : net.minecraft.network.chat.CommonComponents.GUI_YES;
+        net.minecraft.network.chat.Component no = forced
+            ? net.minecraft.network.chat.CommonComponents.GUI_DISCONNECT
+            : net.minecraft.network.chat.CommonComponents.GUI_NO;
+        // What the prompt returns to once answered (the connecting screen, the game, ...); a
+        // prompt already open keeps its parent (vanilla's PackConfirmScreen keeps its first).
+        Screen parent = ClientImpl.screen instanceof PackPromptScreen open ? open.parent : ClientImpl.screen;
+        Proxies.gui.setScreen(new PackPromptScreen(parent, accepted -> {
+            // vanilla's callback returns to the parent screen first, then answers
+            Proxies.gui.setScreen(parent);
+            haste.rt.Native.packPromptAnswered(accepted);
+        }, title, message, yes, no));
+    }
+
+    /** The server resource pack prompt: vanilla's ConfirmScreen wording, the answer to Rust. */
+    private static final class PackPromptScreen extends net.minecraft.client.gui.screens.ConfirmScreen {
+        /** What the prompt returns to once answered (vanilla's parentScreen). */
+        final Screen parent;
+
+        PackPromptScreen(Screen parent, it.unimi.dsi.fastutil.booleans.BooleanConsumer callback,
+            net.minecraft.network.chat.Component title, net.minecraft.network.chat.Component message,
+            net.minecraft.network.chat.Component yes, net.minecraft.network.chat.Component no) {
+            super(callback, title, message, yes, no);
+            this.parent = parent;
+        }
+    }
+
     /** F1: hides or shows the HUD (vanilla's toggle). */
     public void toggleHud() { Proxies.hud.toggle(); }
 

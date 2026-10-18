@@ -26,6 +26,7 @@ use frame::decode_frame;
 use haste_core::entity::ItemStackData;
 
 mod frame;
+mod pack_prompt;
 
 /// The vanilla screens Haste opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

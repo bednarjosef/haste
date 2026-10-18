@@ -1275,17 +1275,37 @@ impl Renderer {
         self.particles.set_types(types);
     }
 
-    /// Poses this frame's particles (billboards, interpolated at `partial`) and samples their
-    /// light from `world`. Like [`Self::sample_world`]: call before `render` with the frame
-    /// you are about to render (the renderer holds no world).
+    /// Poses this frame's particles from the game thread's per-tick snapshot (billboards,
+    /// interpolated at `partial`, frustum-culled like vanilla's `QuadParticleGroup
+    /// .extractRenderState`); no locks held — the snapshot is an `Arc` copy. Like
+    /// [`Self::sample_world`]: call before `render` with the frame you are about to render.
     pub fn prepare_particles(
         &mut self,
-        particles: &mut crate::particles::Particles,
-        world: &dyn BlockView,
+        snapshot: &crate::particles::ParticleSnapshot,
         camera: Camera,
         partial: f32,
+        spin: Option<SpinWarp>,
     ) {
-        self.particles.prepare(particles, camera, partial, world);
+        let aspect = self.size.0 as f32 / self.size.1 as f32;
+        // The camera-relative view-projection's planes, as the entity cull uses them.
+        let rot_view_proj = Self::view_projection(
+            &Camera {
+                pos: glam::DVec3::ZERO,
+                ..camera
+            },
+            aspect,
+            spin,
+        );
+        let planes = Self::frustum_planes(&rot_view_proj);
+        let yaw = camera.yaw.to_radians();
+        let pitch = camera.pitch.to_radians();
+        let forward = glam::Vec3::new(
+            -pitch.cos() * yaw.sin(),
+            -pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        );
+        self.particles
+            .prepare(snapshot, camera, partial, &planes, forward);
     }
 
     /// Sky and block light at each entity's position, sampled from the world by the caller

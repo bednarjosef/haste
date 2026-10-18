@@ -441,6 +441,14 @@ impl Session {
         // Server resource packs download into the game dir's `downloads`
         // (vanilla's layout) and apply on top of the selection.
         opts.downloads_dir = Some(game_dir().join("downloads"));
+        // The server's saved pack status (servers.dat); a push that asks opens vanilla's
+        // confirm screen over the connecting screen when menu mode's UI exists (without
+        // one, a `--server` run, it is accepted).
+        opts.resource_packs = net::pack_prompt::policy_for(address);
+        opts.pack_prompt = existing_ui.as_ref().map(|ui| {
+            std::sync::Arc::new(net::pack_prompt::ScreenPrompter::new(ui.clone(), address))
+                as haste_protocol::PackPromptHook
+        });
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
         driver.chat.set_keys(join.keys);
         let server_packs: Vec<std::path::PathBuf> = driver
@@ -572,6 +580,7 @@ impl Session {
         driver.session.set_lid_states(lid_states);
         driver.session.set_bell_states(bell_states);
         driver.session.set_pot_states(pot_states);
+        *shared.pack_prompt.lock() = net::pack_prompt::PlayPrompt::new(address);
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
@@ -3644,9 +3653,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
-            let world = shared.world.read();
-            let mut particles = shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+            let snapshot = shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial, spin);
         }
         stats = renderer.render(&frame)?;
         drop(weather_guard);
@@ -4389,9 +4400,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(shared.view.lock().world_age);
         {
-            let world = shared.world.read();
-            let mut particles = shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+            let snapshot = shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial, spin);
         }
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
@@ -4810,9 +4823,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
-            let world = shared.world.read();
-            let mut particles = shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+            let snapshot = shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial, None);
         }
         stats = renderer.render(&frame)?;
         drop(weather_guard);
@@ -4994,9 +5009,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
-            let world = shared.world.read();
-            let mut particles = shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial_tick);
+            let snapshot = shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial_tick, None);
         }
         let stats = renderer.render(&frame)?;
         drop(weather_guard);
@@ -5642,7 +5659,22 @@ impl App {
             Err(e) => {
                 tracing::warn!("joining {target} failed: {e:#}");
                 if let Some(ui) = &self.ui {
-                    let reason = haste_protocol::haste_core::Component::text(format!("{e:#}"));
+                    // Declining a required pack: vanilla's own reason (the confirm screen's
+                    // callback disconnects with it).
+                    let declined = e.chain().any(|c| {
+                        matches!(
+                            c.downcast_ref::<haste_protocol::ProtocolError>(),
+                            Some(haste_protocol::ProtocolError::RequiredPackDeclined)
+                        )
+                    });
+                    let reason = if declined {
+                        haste_protocol::haste_core::Component::translate(
+                            haste_protocol::REQUIRED_PACK_DISCONNECT,
+                            vec![],
+                        )
+                    } else {
+                        haste_protocol::haste_core::Component::text(format!("{e:#}"))
+                    };
                     ui.disconnected(&reason);
                 }
             }
@@ -5936,7 +5968,7 @@ impl App {
             weather,
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock),
-        // then the particles (one short read lock).
+        // then the particles (the per-tick snapshot; no locks).
         let session = self.session.as_ref().expect("the game path above");
         renderer.sample_world(
             &*session.shared.world.read(),
@@ -5944,9 +5976,12 @@ impl App {
             &frame,
         );
         {
-            let world = session.shared.world.read();
-            let mut particles = session.shared.particles.lock();
-            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+            let snapshot = session
+                .shared
+                .particle_snapshots
+                .take()
+                .unwrap_or_else(|| Arc::new(Default::default()));
+            renderer.prepare_particles(&snapshot, camera, partial, frame.spin);
         }
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(session.shared.view.lock().world_age);
