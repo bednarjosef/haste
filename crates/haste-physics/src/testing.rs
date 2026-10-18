@@ -49,7 +49,17 @@ pub mod states {
     pub const SCAFFOLDING: BlockStateId = BlockStateId(21);
     /// Open trapdoor facing north: climbable only over a north-facing ladder.
     pub const OPEN_TRAPDOOR: BlockStateId = BlockStateId(22);
-    pub const COUNT: usize = 23;
+    /// Bubble column dragging down (magma): default block state, `drag` = true.
+    pub const BUBBLE_COLUMN: BlockStateId = BlockStateId(23);
+    pub const BUBBLE_COLUMN_DOWN: BlockStateId = BlockStateId(23);
+    pub const BUBBLE_COLUMN_DRAG_DOWN: BlockStateId = BlockStateId(23);
+    pub const BUBBLE_COLUMN_DRAG: BlockStateId = BlockStateId(23);
+    pub const BUBBLE_COLUMN_MAGMA: BlockStateId = BlockStateId(23);
+    /// Bubble column pushing up (soul sand): `drag` = false.
+    pub const BUBBLE_COLUMN_UP: BlockStateId = BlockStateId(24);
+    pub const BUBBLE_COLUMN_PUSH_UP: BlockStateId = BlockStateId(24);
+    pub const BUBBLE_COLUMN_SOUL_SAND: BlockStateId = BlockStateId(24);
+    pub const COUNT: usize = 25;
 }
 
 /// Shapes and per-block physics properties for the ids in [`states`].
@@ -147,6 +157,10 @@ impl BlockPhysics for TestShapes {
                 kind: FluidKind::Water,
                 height: 8.0 / 9.0,
             }),
+            s if s.0 == 23 || s.0 == 24 => Some(FluidInfo {
+                kind: FluidKind::Water,
+                height: 8.0 / 9.0,
+            }),
             states::LAVA_SOURCE => Some(FluidInfo {
                 kind: FluidKind::Lava,
                 height: 8.0 / 9.0,
@@ -168,6 +182,12 @@ impl BlockPhysics for TestShapes {
     }
     fn is_honey(&self, s: BlockStateId) -> bool {
         s == states::HONEY
+    }
+    fn is_bubble_column(&self, s: BlockStateId) -> bool {
+        s.0 == 23 || s.0 == 24
+    }
+    fn bubble_column_drag_down(&self, s: BlockStateId) -> bool {
+        s.0 == 23
     }
     fn bounce_restitution(&self, s: BlockStateId) -> f32 {
         if s == states::SLIME {

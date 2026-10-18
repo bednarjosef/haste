@@ -33,7 +33,9 @@ pub mod wire;
 pub use haste_core;
 
 pub use auth::MsaTokens;
-pub use chat::{ChatSigner, LastSeenMessages, MessageSignature};
+pub use chat::{
+    ChatSigner, LastSeenMessagesTracker, LocalChatSession, MessageSignature, ProfileKeyPair,
+};
 pub use connection::{
     ping, resource_pack_status, Account, Arrived, ConnectOptions, Connection, CookieJar, Login,
     ProtocolError, ResourcePackPolicy, ServerStatus, StatsSnapshot, SyncedRegistries,

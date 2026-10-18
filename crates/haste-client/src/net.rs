@@ -1470,6 +1470,30 @@ impl Session {
                 {
                     self.block_particle_requests.push(r);
                 }
+                // The sound half of the two events that play one (vanilla
+                // `LevelEventHandler` cases 2001/2020). 2001's payload names the broken
+                // state; for 2020 the block is still in the world, so its state is read
+                // here (`ClientLevel.addBreakingBlockEffects` reads it at the same
+                // point). The server excludes the breaker from its 2001 broadcast
+                // (`Block.spawnDestroyByEntityParticles` with the player), so the local
+                // player's own break sound is not doubled.
+                if e.event == 2001 || e.event == 2020 {
+                    if let Some((_, data)) = world.physics() {
+                        let state = if e.event == 2001 {
+                            BlockStateId(e.data as u32)
+                        } else {
+                            world.block_state_at(e.pos)
+                        };
+                        if let Some(t) = data.block_sound_type(state) {
+                            crate::sound::level_event_sound(
+                                e.event,
+                                e.pos,
+                                t,
+                                &mut self.sound_requests,
+                            );
+                        }
+                    }
+                }
             }
             // The lightmap's effect inputs (night vision and darkness durations), boss-overlay
             // darkening and the lightning sky flash; these also ride the player's own handling.
@@ -2078,6 +2102,8 @@ pub struct NetDriver {
     /// Packets the UI would use, seen while the HUD JVM was still starting (replayed by the
     /// game thread once the `Ui` exists; see `crate::ui::ui_handles`).
     ui_backlog: Vec<ClientboundPlay>,
+    /// Signed chat: the session, the last-seen window, signing outgoing `chat`.
+    pub chat: chat_session::ClientChat,
 }
 
 impl NetDriver {
@@ -2098,10 +2124,12 @@ impl NetDriver {
             login.dimension.clone(),
             particle_names,
         );
+        let chat = chat_session::ClientChat::new(conn.profile().uuid, None);
         Ok(Self {
             conn,
             login,
             session,
+            chat,
             out: Vec::new(),
             ui_backlog: Vec::new(),
         })
@@ -2164,6 +2192,7 @@ impl NetDriver {
             // is still starting the UI-bound packets are kept and replayed once it is up.
             let keep = ui.is_some() || crate::ui::ui_handles(&a.packet);
             let for_ui = keep.then(|| a.packet.clone());
+            self.chat.handle(&a.packet, &mut self.out);
             self.session
                 .apply(a.packet, world, entities, regs, &mut self.out);
             match (ui, for_ui) {
@@ -2207,7 +2236,8 @@ impl NetDriver {
     }
 
     fn flush(&mut self) -> anyhow::Result<()> {
-        for p in self.out.drain(..) {
+        for mut p in self.out.drain(..) {
+            self.chat.pack(&mut p);
             self.conn
                 .send(p)
                 .map_err(|e| anyhow::anyhow!("send: {e}"))?;
@@ -2216,7 +2246,9 @@ impl NetDriver {
     }
 }
 
+pub mod account;
 mod block_events;
+pub mod chat_session;
 mod vehicle;
 
 #[cfg(test)]

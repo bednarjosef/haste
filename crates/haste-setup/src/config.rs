@@ -53,6 +53,13 @@ pub struct PlayerCertificates {
     /// `refreshedAfter` as unix seconds; refetch the certificates at/after this time.
     #[serde(default)]
     pub refreshed_after: Option<i64>,
+    /// `expiresAt` in unix milliseconds: Mojang's signature covers the expiry to the
+    /// millisecond, so chat signing needs this exact value.
+    #[serde(default)]
+    pub expires_at_millis: Option<i64>,
+    /// `refreshedAfter` in unix milliseconds.
+    #[serde(default)]
+    pub refreshed_after_millis: Option<i64>,
 }
 
 /// TOML has no byte arrays: store `Vec<u8>` as standard base64 (no line wrapping).

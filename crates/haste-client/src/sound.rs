@@ -26,7 +26,7 @@ use haste_protocol::ClientboundPlay;
 use haste_protocol::SyncedRegistries;
 
 mod own_block;
-pub use own_block::OwnBlockSounds;
+pub use own_block::{level_event_sound, OwnBlockSounds};
 
 /// Vanilla's `SoundSource` order, 0..=10 (read from the 26.3 jar by the lead; the packet's
 /// category VarInt is the index in it). Matches `haste_audio::engine::SoundSource`.
