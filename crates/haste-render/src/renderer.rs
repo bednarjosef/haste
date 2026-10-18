@@ -479,7 +479,7 @@ pub struct Renderer {
     mesher: Mesher,
     /// Grass/foliage colormaps from the assets (biome colours are resolved against them).
     colormaps: crate::tint::Colormaps,
-    sections: ahash::AHashMap<SectionPos, ResidentSection>,
+    sections: crate::section_slab::SectionSlab,
     /// Shared vertex/index buffers the section meshes live in.
     arenas: MeshArenas,
     /// Cave culling: per-section sightline data (shared with the occlusion
@@ -498,8 +498,11 @@ pub struct Renderer {
     walk_in_flight: bool,
     /// Newly uploaded sections next to a visible one, drawn until the new mask
     /// arrives (vanilla propagates from newly loaded sections on the render
-    /// thread). Reused across frames.
-    bonus: ahash::AHashSet<(ChunkPos, i32)>,
+    /// thread). A dense list plus a bit on each named slab record (so a
+    /// re-upload at the same position keeps its bonus), cleared when a new
+    /// mask arrives. Reused across frames.
+    bonus_list: Vec<SectionPos>,
+    bonus_dirty: bool,
     /// The worker thread running the walks.
     walk: crate::occlusion::AsyncOcclusionWalker,
     /// Sightline data changed since the last schedule; walks for that are at
@@ -512,6 +515,9 @@ pub struct Renderer {
     view_distance: i32,
     /// Per-frame draw list and section origins (instance-rate), reused across frames.
     draw_list: Vec<SectionDraw>,
+    /// Per-layer scratch lists the cull fills in walk order (Solid, Cutout,
+    /// CutoutMipped, Translucent), concatenated into `draw_list` per frame.
+    layer_buckets: [Vec<SectionDraw>; 4],
     origins: Vec<[i32; 3]>,
     origin_buffer: wgpu::Buffer,
     origin_capacity: usize,
@@ -1070,14 +1076,15 @@ impl Renderer {
             baked,
             mesher,
             colormaps,
-            sections: ahash::AHashMap::new(),
+            sections: crate::section_slab::SectionSlab::new(),
             arenas,
             section_vis,
             visible_mask: Default::default(),
             visible_for: None,
             scheduled_for: None,
             walk_in_flight: false,
-            bonus: ahash::AHashSet::new(),
+            bonus_list: Vec::new(),
+            bonus_dirty: false,
             walk,
             vis_dirty: false,
             last_walk: std::time::Instant::now(),
@@ -1085,6 +1092,7 @@ impl Renderer {
             section_count: 24,
             view_distance: 32,
             draw_list: Vec::new(),
+            layer_buckets: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             origins: Vec::new(),
             origin_buffer,
             origin_capacity: 4096,
@@ -1219,7 +1227,7 @@ impl Renderer {
         self.visible_for = None;
         self.scheduled_for = None;
         self.walk_in_flight = false;
-        self.bonus.clear();
+        self.clear_bonus();
     }
 
     /// This frame's dynamic lightmap inputs (flicker, brightness, night vision, darkness, boss
@@ -1235,8 +1243,8 @@ impl Renderer {
     /// arenas keep their GPU buffers: `sections` is emptied, not freed, so a rejoin uploads into
     /// the same arenas without reallocating them.
     pub fn clear_world(&mut self) {
-        for s in self.sections.values() {
-            self.arenas.free(s);
+        for s in self.sections.iter() {
+            self.arenas.free(&self.slab_identity(s));
         }
         self.sections.clear();
         self.section_vis.lock().clear();
@@ -1244,8 +1252,35 @@ impl Renderer {
         self.visible_for = None;
         self.scheduled_for = None;
         self.walk_in_flight = false;
-        self.bonus.clear();
+        self.clear_bonus();
         self.vis_dirty = false;
+    }
+
+    /// A slab record's arena identity (`MeshArenas::free` input): the packed
+    /// layer list is flat in the slab, so rebuild the record's shape.
+    fn slab_identity(&self, s: &crate::section_slab::SlabSection) -> ResidentSection {
+        ResidentSection {
+            pos: s.pos,
+            arena: s.arena,
+            base_vertex: s.base_vertex,
+            vertex_count: s.vertex_count,
+            index_start: s.index_start,
+            index_total: s.index_total,
+            layers: Vec::new(),
+            aabb: s.aabb,
+        }
+    }
+
+    /// Clear the bonus bits (a new mask arrived or the world went away); the
+    /// dense list names the sections, so it stays proportional to the bonus.
+    fn clear_bonus(&mut self) {
+        for &pos in &self.bonus_list {
+            if let Some(s) = self.sections.get_mut(pos) {
+                s.bonus = false;
+            }
+        }
+        self.bonus_list.clear();
+        self.bonus_dirty = false;
     }
 
     /// Vanilla `Options.menuBackgroundBlurriness`: the box-blur radius of an open screen's
@@ -1711,7 +1746,7 @@ impl Renderer {
             self.arenas.free(&old);
         }
         if let Some(resident) = self.arenas.upload(&mesh) {
-            self.sections.insert(pos, resident);
+            self.sections.insert(resident);
         }
     }
 
@@ -1761,7 +1796,13 @@ impl Renderer {
             }
             let column = self.visible_mask.column(ChunkPos::new(nx, nz));
             if column & (1u32 << nsi) != 0 {
-                self.bonus.insert((ChunkPos::new(pos.x, pos.z), si));
+                if let Some(s) = self.sections.get_mut(pos) {
+                    if !s.bonus {
+                        s.bonus = true;
+                        self.bonus_list.push(pos);
+                    }
+                    self.bonus_dirty = true;
+                }
                 return;
             }
         }
@@ -2163,7 +2204,7 @@ impl Renderer {
             self.visible_mask = mask;
             self.visible_for = self.scheduled_for.take();
             self.walk_in_flight = false;
-            self.bonus.clear();
+            self.clear_bonus();
         }
         let cam_section = SectionPos::new(
             (cam.x.floor() as i32) >> 4,
@@ -2185,14 +2226,26 @@ impl Renderer {
             self.vis_dirty = false;
             self.last_walk = std::time::Instant::now();
         }
-        let mut draws = std::mem::take(&mut self.draw_list);
-        draws.clear();
-        for s in self.sections.values() {
-            let si = s.pos.y - self.min_section;
-            let column = self.visible_mask.column(ChunkPos::new(s.pos.x, s.pos.z));
-            let bonus = self.bonus.contains(&(ChunkPos::new(s.pos.x, s.pos.z), si));
-            if !(0..32).contains(&si) || (column & (1u32 << si) == 0 && !bonus) {
-                continue;
+        // Emit draws in the occlusion walk's visit (BFS) order — vanilla draws
+        // its sections in `SectionOcclusionGraph`'s node order
+        // (`addSectionsInFrustum` appends as the graph is visited), so the
+        // opaque layers need no sort; only translucent is sorted back to front
+        // (vanilla reverses the list for that layer). Bonus sections (newly
+        // uploaded next to visible ones) follow; they are a few per frame. The
+        // per-layer buckets replace the old layer-major sort of the whole list.
+        let mut buckets = std::mem::take(&mut self.layer_buckets);
+        for b in buckets.iter_mut() {
+            b.clear();
+        }
+        let min_section = self.min_section;
+        let sections = &self.sections;
+        let emit = |buckets: &mut [Vec<SectionDraw>; 4], pos: SectionPos| {
+            let Some(s) = sections.get(pos) else {
+                return;
+            };
+            let si = s.pos.y - min_section;
+            if !(0..32).contains(&si) {
+                return;
             }
             let lo = [
                 (s.aabb.0[0] as f64 - cam.x) as f32,
@@ -2205,7 +2258,7 @@ impl Renderer {
                 (s.aabb.1[2] as f64 - cam.z) as f32,
             ];
             if !Self::aabb_visible(&planes, lo, hi) {
-                continue;
+                return;
             }
             let d = glam::Vec3::new(
                 (lo[0] + hi[0]) * 0.5,
@@ -2213,9 +2266,17 @@ impl Renderer {
                 (lo[2] + hi[2]) * 0.5,
             )
             .length_squared();
-            for l in &s.layers {
+            for l in sections.layers(s) {
+                // Sort key: ascending distance for opaque (early depth),
+                // negated for translucent so ascending = far first.
                 let translucent = l.layer == haste_assets::RenderLayer::Translucent;
-                draws.push(SectionDraw {
+                let i = match l.layer {
+                    haste_assets::RenderLayer::Solid => 0,
+                    haste_assets::RenderLayer::Cutout => 1,
+                    haste_assets::RenderLayer::CutoutMipped => 2,
+                    haste_assets::RenderLayer::Translucent => 3,
+                };
+                buckets[i].push(SectionDraw {
                     layer: l.layer,
                     arena: s.arena,
                     key: if translucent { -d } else { d },
@@ -2225,14 +2286,26 @@ impl Renderer {
                     origin: [s.pos.x << 4, s.pos.y << 4, s.pos.z << 4],
                 });
             }
+        };
+        for (c, si) in self.visible_mask.ordered() {
+            emit(&mut buckets, SectionPos::new(c.x, si + min_section, c.z));
         }
-        // Opaque front to back (early depth), translucent back to front; grouped by arena.
-        draws.sort_unstable_by(|a, b| {
-            a.layer
-                .cmp(&b.layer)
-                .then(a.arena.cmp(&b.arena))
-                .then(a.key.total_cmp(&b.key))
-        });
+        for &pos in &self.bonus_list {
+            if sections.get(pos).is_some_and(|s| s.bonus) {
+                emit(&mut buckets, pos);
+            }
+        }
+        // Translucent back to front: the key is the negated distance, so
+        // ascending key order is far first.
+        if buckets[3].len() > 1 {
+            buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
+        }
+        let mut draws = std::mem::take(&mut self.draw_list);
+        draws.clear();
+        for b in buckets.iter() {
+            draws.extend_from_slice(b);
+        }
+        self.layer_buckets = buckets;
         let sections_total = self.sections.len() as u32;
         let drawn = draws.len() as u32;
         let indices_drawn: u32 = draws.iter().map(|d| d.index_count).sum();
@@ -2279,7 +2352,7 @@ impl Renderer {
         // decide; vanilla compiles block entities into their section's render lists the same way.
         if !frame.block_entities.is_empty() {
             let planes_ref = &planes;
-            let bonus = &self.bonus;
+            let sections = &self.sections;
             let min_section = self.min_section;
             let column = |c: ChunkPos| self.visible_mask.column(c);
             // The conduit's eye is billboarded to the camera (vanilla `ConduitRenderer` reads
@@ -2318,7 +2391,7 @@ impl Renderer {
                     let section = pos.section();
                     let si = section.y - min_section;
                     let c = ChunkPos::new(section.x, section.z);
-                    column(c) & (1u32 << si) != 0 || bonus.contains(&(c, si))
+                    column(c) & (1u32 << si) != 0 || sections.get(section).is_some_and(|s| s.bonus)
                 },
                 frame.partial_tick,
                 &mut self.assets,
