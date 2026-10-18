@@ -3519,7 +3519,7 @@ fn menu_frame(
         options.force_unicode_font,
     );
     let (gw, gh) = gui_scaled_size(w, h, scale);
-    let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
+    let gui = ui.take_frame(gw, gh, scale, input.mouse, 0.0);
     (gui, menu_camera(), menu_sky(), 0.0)
 }
 
@@ -3651,7 +3651,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 session.options.force_unicode_font,
             );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
-            gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
+            gui = u.take_frame(gw, gh, scale, (0.0, 0.0), partial);
         }
         // The screen effects around the HUD frame, like the window draws them.
         let spin = {
@@ -3930,8 +3930,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut shots: Vec<String> = Vec::new();
     // Set when a resource pack selection rebuilt the renderer (`wait_until reloaded`).
     let mut resource_packs_reloaded = false;
-    // The last rendered GUI frame (click_text finds its label in it).
-    let mut last_gui = GuiFrame::default();
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
     let mut f2_pending = false;
     // The last screen transition (its class and when), for the click-to-screen timings.
@@ -4189,9 +4187,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                         // A click on the widget whose label is `text`, at the label's position
                         // plus `(dx, dy)`: the label's place in the last rendered frame, so the
                         // check does not depend on the GUI scale or window size. A slider's
-                        // label is centred, so `(dx, dy)` moves the click onto its track.
+                        // label is centred, so `(dx, dy)` moves the click onto its track. The
+                        // frame the last render drew is still in `gui` (the screen effects
+                        // appended to it draw no text, so the label positions are the same).
                         script::Action::ClickText(text, dx, dy) => {
-                            match gui_text_pos(&last_gui, &text) {
+                            match gui_text_pos(&gui, &text) {
                                 Some((x, y)) => {
                                     let (x, y) = (f64::from(x + dx), f64::from(y + dy));
                                     input.mouse_moved(x, y, ui.as_ref());
@@ -4300,8 +4300,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     options.force_unicode_font,
                 );
                 let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
-                gui = u.frame(gw, gh, scale, input.mouse, 0.0).clone();
-                last_gui = gui.clone();
+                gui = u.take_frame(gw, gh, scale, input.mouse, 0.0);
             }
             let frame = FrameInput {
                 camera: menu_camera(),
@@ -4396,8 +4395,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 options.force_unicode_font,
             );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
-            gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
-            last_gui = gui.clone();
+            gui = u.take_frame(gw, gh, scale, input.mouse, partial);
         }
         // The screen effects around the HUD frame, like the window draws them.
         let spin = {
@@ -5944,7 +5942,7 @@ impl App {
                 self.options.force_unicode_font,
             );
             let (gw, gh) = gui_scaled_size(w, h, scale);
-            self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
+            self.gui = ui.take_frame(gw, gh, scale, mouse, partial);
         }
         // The screen effects around the HUD frame (vanilla's `ScreenEffectRenderer.submit`'s
         // level-pass overlays and `Hud.extractCameraOverlays`'s own).
