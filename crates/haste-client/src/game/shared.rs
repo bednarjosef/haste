@@ -221,6 +221,7 @@ impl Shared {
                 blindness: None,
                 water_vision: 0.0,
                 spectator: false,
+                bb: (0.6, 1.8),
                 fire_resistance: false,
                 boss_world_fog: false,
                 held_slot: 0,

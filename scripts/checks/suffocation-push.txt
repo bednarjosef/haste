@@ -1,0 +1,8 @@
+# Suffocation push-out live check (scripts/checks/suffocation-push.sh) against the running
+# test server on 127.0.0.1:25691. The runner builds a small stone platform in this branch's
+# own area, stands the player on it, then RCON /setblock sand at the player's feet and head
+# so `LocalPlayer.moveTowardsClosestSpace` must push the player out, and reads the server's
+# own position for the player over the next 20 ticks. No server is started.
+wait_until joined
+wait_until settled
+wait 1200
