@@ -141,4 +141,10 @@ impl Ui {
     pub fn set_attack_strength(&self, charge: haste_jvm::AttackStrengthHud) {
         self.state(|s| s.attack_strength = charge);
     }
+
+    /// Whether the crosshair picks a living, alive entity in reach this tick (vanilla
+    /// `Minecraft.crosshairPickEntity`): the attack indicator's full icon.
+    pub fn set_crosshair_pick(&self, pick: bool) {
+        self.state(|s| s.crosshair_pick_living = pick);
+    }
 }

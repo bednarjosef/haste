@@ -952,4 +952,34 @@ fn the_attack_indicator_bar_follows_the_mirrored_charge() {
         "no indicator at full charge: {:?}",
         texts(&full)
     );
+    // The full icon: a living, alive entity under the crosshair and a slow item (a sword's
+    // 12.5 ticks > vanilla Hud.MIN_CROSSHAIR_ATTACK_SPEED's 5).
+    ui.gui().with_state(|s| {
+        s.attack_strength = haste_jvm::AttackStrengthHud {
+            ticker: 12.5,
+            delay: 12.5,
+        };
+        s.crosshair_pick_living = true;
+    });
+    let icon = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+    assert_eq!(
+        attack_sprites(&icon),
+        vec!["hud/crosshair_attack_indicator_full"],
+        "full icon on a picked living entity: {:?}",
+        texts(&icon)
+    );
+    // A fist (delay exactly 5) shows no full icon even on a mob: vanilla requires
+    // delay > MIN_CROSSHAIR_ATTACK_SPEED.
+    ui.gui().with_state(|s| {
+        s.attack_strength = haste_jvm::AttackStrengthHud {
+            ticker: 5.0,
+            delay: 5.0,
+        };
+    });
+    let fist = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+    assert!(
+        attack_sprites(&fist).is_empty(),
+        "no full icon for the bare hand: {:?}",
+        texts(&fist)
+    );
 }

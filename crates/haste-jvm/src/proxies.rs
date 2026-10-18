@@ -247,6 +247,8 @@ pub(crate) mod mirror {
     pub const F_MOUNT_LIVING: i32 = 512;
     /// Steering a vehicle that can jump (the jump bar replaces the experience bar).
     pub const F_MOUNT_JUMPABLE: i32 = 1024;
+    /// The crosshair picks a living, alive entity (the attack indicator's full icon).
+    pub const F_CROSSHAIR_PICK: i32 = 2048;
 }
 
 impl GameState {
@@ -273,7 +275,8 @@ impl GameState {
             | flag(self.immediate_respawn, F_IMMEDIATE_RESPAWN)
             | flag(self.debug_shown, F_DEBUG_SHOWN)
             | flag(self.mount.is_some(), F_MOUNT_LIVING)
-            | flag(self.mount.is_some_and(|m| m.jumpable), F_MOUNT_JUMPABLE);
+            | flag(self.mount.is_some_and(|m| m.jumpable), F_MOUNT_JUMPABLE)
+            | flag(self.crosshair_pick_living, F_CROSSHAIR_PICK);
         let dbg = &self.debug;
         i[I_FPS] = dbg.fps;
         i[I_CHUNKS] = dbg.chunks;
@@ -378,6 +381,9 @@ pub struct GameState {
     pub mount: Option<MountHud>,
     /// The attack indicator's charge (crosshair bar and hotbar icon), see [`AttackStrengthHud`].
     pub attack_strength: AttackStrengthHud,
+    /// The crosshair picks a living, alive entity in reach (vanilla
+    /// `Minecraft.crosshairPickEntity`): the attack indicator's full icon.
+    pub crosshair_pick_living: bool,
     /// What the F3 overlay shows.
     pub debug: DebugInfo,
     /// Whether the F3 overlay is on (vanilla's `DebugScreenEntryList.isOverlayVisible`; the
@@ -445,6 +451,7 @@ impl Default for GameState {
             vitals: PlayerVitals::default(),
             mount: None,
             attack_strength: AttackStrengthHud::default(),
+            crosshair_pick_living: false,
             debug: DebugInfo::default(),
             debug_shown: false,
             in_world: false,

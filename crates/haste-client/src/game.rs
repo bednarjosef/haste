@@ -1673,10 +1673,17 @@ fn tick_once(
         Some(fp)
     };
     // The attack indicator's charge for this tick (the crosshair bar and the hotbar icon),
-    // published after the hand's tick so the HUD sees this tick's value like vanilla's render.
+    // published after the hand's tick so the HUD sees this tick's value like vanilla's render,
+    // and whether the crosshair picks a living, alive entity (the full icon's condition).
     if let Some(ui) = shared.ui.lock().as_ref() {
         let (ticker, delay) = driver.session.player.hand.attack_strength_charge();
         ui.set_attack_strength(haste_jvm::AttackStrengthHud { ticker, delay });
+        ui.set_crosshair_pick(
+            driver
+                .session
+                .player
+                .crosshair_pick_living(&*shared.entities.read()),
+        );
     }
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);

@@ -27,7 +27,7 @@ final class Mirror {
         D_ATTACK_STRENGTH_DELAY = 18, DOUBLES = 19;
     static final int F_HARDCORE = 1, F_EYE_IN_WATER = 2, F_INVULNERABLE = 4, F_FLYING = 8, F_MAY_FLY = 16,
         F_INSTABUILD = 32, F_IN_WORLD = 64, F_IMMEDIATE_RESPAWN = 128, F_DEBUG_SHOWN = 256,
-        F_MOUNT_LIVING = 512, F_MOUNT_JUMPABLE = 1024;
+        F_MOUNT_LIVING = 512, F_MOUNT_JUMPABLE = 1024, F_CROSSHAIR_PICK = 2048;
 
     static final int[] I = new int[INTS];
     static final double[] D = new double[DOUBLES];
@@ -51,6 +51,8 @@ final class Mirror {
     static float attackStrengthTicker() { return (float) D[D_ATTACK_STRENGTH_TICKER]; }
     /** The held item's attack delay (vanilla Player.getCurrentItemAttackStrengthDelay). */
     static float attackStrengthDelay() { return (float) D[D_ATTACK_STRENGTH_DELAY]; }
+    /** The crosshair picks a living, alive entity in reach (vanilla Minecraft.crosshairPickEntity). */
+    static boolean crosshairPickLiving() { return flag(F_CROSSHAIR_PICK); }
 
     private static boolean callbackSet;
 
@@ -83,5 +85,8 @@ final class Mirror {
         p.setXRot((float) D[D_PITCH]);
         int sel = I[I_SELECTED];
         if (sel >= 0 && sel < 9 && Proxies.inventory.getSelectedSlot() != sel) Proxies.inventory.setSelectedSlot(sel);
+        // Vanilla picks every frame (Minecraft.pick) and stores the entity here for the HUD's
+        // attack indicator; Haste's pick is Rust's, so the flag stands the proxy in and out.
+        Proxies.minecraft.crosshairPickEntity = crosshairPickLiving() ? Proxies.crosshairPick : null;
     }
 }
