@@ -34,6 +34,7 @@ mod sound;
 mod strider;
 mod travel;
 mod ui;
+mod world_border;
 
 #[derive(Parser, Debug)]
 #[command(

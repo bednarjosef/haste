@@ -1595,6 +1595,8 @@ struct InputRouter {
     attack_clicks: u8,
     use_clicks: u8,
     pick_block: bool,
+    /// Ctrl held at the middle-click press (`pickBlockOrEntity`'s `hasControlDown`).
+    pick_block_ctrl: bool,
     drop_item: bool,
     drop_stack: bool,
     swap_offhand: bool,
@@ -1621,6 +1623,7 @@ impl Default for InputRouter {
             attack_clicks: 0,
             use_clicks: 0,
             pick_block: false,
+            pick_block_ctrl: false,
             drop_item: false,
             drop_stack: false,
             swap_offhand: false,
@@ -1748,7 +1751,10 @@ impl InputRouter {
                     self.use_clicks = self.use_clicks.saturating_add(1);
                 }
             }
-            2 if pressed => self.pick_block = true,
+            2 if pressed => {
+                self.pick_block = true;
+                self.pick_block_ctrl = self.mods.0;
+            }
             _ => {}
         }
         false
@@ -1882,6 +1888,10 @@ impl InputRouter {
                 .use_clicks
                 .saturating_add(std::mem::take(&mut self.use_clicks));
             i.pick_block |= std::mem::take(&mut self.pick_block);
+            if self.pick_block_ctrl {
+                i.pick_block_ctrl = true;
+                self.pick_block_ctrl = false;
+            }
             if let Some(ui) = ui {
                 // The action mappings' clicks (hotbar, drop, swap, jump), consumed once per
                 // frame and handed to the game thread through the shared input.

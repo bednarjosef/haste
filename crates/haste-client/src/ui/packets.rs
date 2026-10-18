@@ -300,8 +300,11 @@ impl Ui {
                 }
             }
             P::SetHeldSlot(h) => {
+                // Vanilla's handleSetHeldSlot only sets the inventory slot: the next
+                // `gameMode.tick`'s `ensureHasSentCarriedItem` echoes `set_carried_item` back
+                // (the player's own `ensure_carried_item` in `tick_inner`, and this side's
+                // `sent_slot` follows with it). Marking it sent here would swallow the echo.
                 self.state(|s| s.selected_slot = h.slot);
-                self.shared.sent_slot.store(h.slot, Ordering::Relaxed);
             }
             P::EntityEvent(e) if e.entity_id == local => {
                 // 24..=28: operator permission level 0..=4
