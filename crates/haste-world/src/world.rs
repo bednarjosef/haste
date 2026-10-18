@@ -154,6 +154,7 @@ impl World {
         let chunk_pos = pos.chunk();
         let sec_y = pos.y >> 4;
         let direct_bits = self.direct_bits;
+        let blocks = &self.data.blocks;
         let Some(chunk) = self.chunks.get_mut(&chunk_pos.to_packed()) else {
             return;
         };
@@ -163,10 +164,14 @@ impl World {
         let lx = (pos.x & 15) as u8;
         let ly = (pos.y & 15) as u8;
         let lz = (pos.z & 15) as u8;
+        let old = section.get(lx, ly, lz);
         section.set(lx, ly, lz, state, direct_bits);
-        // a replaced block drops its block entity (the server resends one if the new
-        // block has one)
-        chunk.block_entities.remove(&pos);
+        // A replaced block drops its block entity (the server resends one if the new block
+        // has one); a state change of the same block keeps it (vanilla
+        // `LevelChunk.setBlockState`: removed only when `!oldState.is(newBlock)`).
+        if blocks.block_of(old) != blocks.block_of(state) {
+            chunk.block_entities.remove(&pos);
+        }
         // per axis, the section offsets of the block's 3x3x3 neighbourhood: {0} plus {-1}
         // when on the low border, {+1} when on the high border (at most 2 per axis)
         let offs = |l: u8| -> &[i32] {
