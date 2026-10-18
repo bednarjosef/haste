@@ -916,13 +916,19 @@ fn item_frame_facing_transform_matches_vanilla() {
 #[test]
 fn item_frame_item_rotates_45_degrees_per_step_at_half_scale() {
     // `ItemFrameRenderer.submit`: `rotateDegrees(ZP, rotation * 45)`, then scale 0.5.
-    let rest = item_frame_item_transform(0);
+    let rest = item_frame_item_transform(0, false);
     assert!(close(
         rest,
         Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375)) * Mat4::from_scale(Vec3::splat(0.5)),
         1e-6
     ));
-    let one = item_frame_item_transform(1);
+    // An invisible frame draws no border, so its item sits flush against the wall.
+    assert!(close(
+        item_frame_item_transform(0, true),
+        Mat4::from_translation(Vec3::new(0.0, 0.0, 0.5)) * Mat4::from_scale(Vec3::splat(0.5)),
+        1e-6
+    ));
+    let one = item_frame_item_transform(1, false);
     assert!(close(
         one,
         Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375))

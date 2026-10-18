@@ -3,8 +3,10 @@
 //! `target/render-checks/invisible*.png`. Needs the client jar, the datagen reports and a
 //! Vulkan driver (source scripts/env.sh).
 
-use haste_core::model::{BodyTransform, EntityInstance, PoseOverrides};
-use haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, SectionPos};
+use haste_core::model::{
+    BodyTransform, Decoration, EntityInstance, ItemFrameDecoration, PoseOverrides,
+};
+use haste_core::{BlockPos, BlockStateId, ChunkPos, Direction, EntityId, SectionPos};
 use haste_render::{Camera, Renderer, SkyState};
 
 struct Flat {
@@ -151,11 +153,17 @@ fn invisible_entities_offscreen() {
     // the equipment layers on invisible entities.
     let sword = data
         .registries
-        .index("minecraft:item", &haste_core::Identifier::minecraft("iron_sword"))
+        .index(
+            "minecraft:item",
+            &haste_core::Identifier::minecraft("iron_sword"),
+        )
         .expect("iron_sword in the item registry");
     let chest = data
         .registries
-        .index("minecraft:item", &haste_core::Identifier::minecraft("iron_chestplate"))
+        .index(
+            "minecraft:item",
+            &haste_core::Identifier::minecraft("iron_chestplate"),
+        )
         .expect("iron_chestplate in the item registry");
     let chest_eq = data.item_components.equippable(chest).expect("equippable");
     let mut armed = invisible.clone();
@@ -179,7 +187,12 @@ fn invisible_entities_offscreen() {
             .count()
     };
     // Visible: the body is drawn.
-    let img = render_scene(&mut renderer, &world, std::slice::from_ref(&visible), camera);
+    let img = render_scene(
+        &mut renderer,
+        &world,
+        std::slice::from_ref(&visible),
+        camera,
+    );
     assert!(diff(&empty, &img) > 2000, "the visible body draws");
     assert_eq!(renderer.entities_drawn(), 1);
     // Invisible with nothing on: exactly the empty frame (no body, no name tag, no shadow).
@@ -192,7 +205,11 @@ fn invisible_entities_offscreen() {
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
     img.save(out.join("invisible.png")).unwrap();
-    assert_eq!(diff(&empty, &img), 0, "the bare invisible body draws nothing");
+    assert_eq!(
+        diff(&empty, &img),
+        0,
+        "the bare invisible body draws nothing"
+    );
     assert_eq!(renderer.entities_drawn(), 0, "no geometry was posed");
     // Invisible but equipped: the armour and sword still draw (vanilla keeps the
     // equipment layers), and nothing else does.
@@ -217,4 +234,156 @@ fn invisible_entities_offscreen() {
         diff(&empty, &img) > invisible_changed,
         "the visible body draws more than the invisible one's equipment"
     );
+}
+
+/// A hanging decoration instance with the frame's item (the model is unused; the renderer
+/// draws the decoration).
+fn decoration(
+    id: i32,
+    pos: glam::DVec3,
+    invisible: bool,
+    frame: ItemFrameDecoration,
+) -> EntityInstance {
+    EntityInstance {
+        id: EntityId(id),
+        model: haste_entity::models::box_for(1.0, 1.0),
+        pos,
+        yaw: 0.0,
+        pitch: 0.0,
+        head_yaw: 0.0,
+        scale: 1.0,
+        pose: PoseOverrides::default(),
+        body: BodyTransform::default(),
+        body_scale: glam::Vec3::ONE,
+        skin: None,
+        nametag: None,
+        below_name: None,
+        shadow_radius: 0.0,
+        shadow_strength: 1.0,
+        invisible,
+        is_discrete: false,
+        name_tag_y: 1.0,
+        hurt: 0.0,
+        overlays: Default::default(),
+        item: None,
+        decoration: Some(Decoration::ItemFrame(frame)),
+        hands: [None, None],
+        equipment: Vec::new(),
+        head_item: None,
+    }
+}
+
+/// An invisible item frame draws no border but keeps its item, pushed flush to the wall
+/// (`ItemFrameRenderer.extractRenderState` clears the frame model; `submit` moves the item
+/// from z 0.4375 to 0.5): one with an item still draws (fewer pixels than a visible frame),
+/// an empty one draws nothing at all. Saves `target/render-checks/invisible_frame.png`.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn invisible_item_frame_offscreen() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
+    renderer.set_item_registry(&data.registries);
+    let world = Flat {
+        stone: data
+            .blocks
+            .default_state(&haste_core::Identifier::minecraft("stone"))
+            .unwrap(),
+    };
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+        .collect();
+    renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
+    for _ in 0..200 {
+        renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let camera = Camera {
+        pos: glam::DVec3::new(0.0, 2.2, -4.0),
+        yaw: 0.0,
+        pitch: 5.0,
+        fov_deg: 70.0,
+        hand_fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    };
+    let diamond = data
+        .registries
+        .index(
+            "minecraft:item",
+            &haste_core::Identifier::minecraft("diamond"),
+        )
+        .expect("diamond item");
+    let frame = |id: i32, invisible: bool, item: Option<haste_core::RegistryIndex>| {
+        decoration(
+            id,
+            glam::DVec3::new(0.0, 1.5, 0.5),
+            invisible,
+            ItemFrameDecoration {
+                facing: Direction::North,
+                rotation: 0,
+                glow: false,
+                item,
+            },
+        )
+    };
+    let visible = frame(1, false, Some(diamond));
+    let invisible = frame(2, true, Some(diamond));
+    let empty_invisible = frame(3, true, None);
+
+    for _ in 0..2 {
+        let _ = render_scene(&mut renderer, &world, &[], camera);
+    }
+    let empty = render_scene(&mut renderer, &world, &[], camera);
+    let diff = |a: &image::RgbaImage, b: &image::RgbaImage| {
+        a.pixels()
+            .zip(b.pixels())
+            .filter(|(p, q)| p.0 != q.0)
+            .count()
+    };
+    // Visible: the border and the item.
+    let img = render_scene(
+        &mut renderer,
+        &world,
+        std::slice::from_ref(&visible),
+        camera,
+    );
+    assert!(diff(&empty, &img) > 500, "the visible frame draws");
+    assert_eq!(renderer.entities_drawn(), 1);
+    let visible_changed = diff(&empty, &img);
+    // Invisible with an item: the item still draws, the border does not.
+    let img = render_scene(
+        &mut renderer,
+        &world,
+        std::slice::from_ref(&invisible),
+        camera,
+    );
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    img.save(out.join("invisible_frame.png")).unwrap();
+    let item_changed = diff(&empty, &img);
+    assert!(
+        item_changed > 40,
+        "the framed item draws without the border ({item_changed} pixels)"
+    );
+    assert!(
+        item_changed < visible_changed,
+        "the invisible frame draws less than the visible one ({item_changed} vs {visible_changed})"
+    );
+    assert_eq!(renderer.entities_drawn(), 1);
+    // Invisible and empty: nothing at all.
+    let img = render_scene(
+        &mut renderer,
+        &world,
+        std::slice::from_ref(&empty_invisible),
+        camera,
+    );
+    assert_eq!(
+        diff(&empty, &img),
+        0,
+        "the empty invisible frame draws nothing"
+    );
+    assert_eq!(renderer.entities_drawn(), 0);
 }
