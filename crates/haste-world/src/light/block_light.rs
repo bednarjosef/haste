@@ -3,9 +3,7 @@
 
 use haste_core::view::BlockPhysics;
 
-use super::engine::{
-    decrease_all_directions, increase_light_from_emission, Queues, PULL_LIGHT_IN,
-};
+use super::engine::{decrease_all_directions, increase_light_from_emission, Queues, PULL_LIGHT_IN};
 use super::storage::{Layer, Storage};
 
 /// Queues the light updates for a changed block, vanilla `BlockLightEngine.checkNode`:
@@ -30,7 +28,7 @@ pub(super) fn check_node(store: &mut Storage<'_>, queues: &mut Queues, node: u64
             node,
             increase_light_from_emission(
                 emission,
-                state.map_or(true, |s| store.game_data().shapes.is_empty_shape(s)),
+                state.is_none_or(|s| store.game_data().shapes.is_empty_shape(s)),
             ),
         );
     }

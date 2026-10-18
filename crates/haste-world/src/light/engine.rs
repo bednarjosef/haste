@@ -56,7 +56,8 @@ pub(super) const fn decrease_all_directions(level: u8) -> u32 {
 /// An increase that raises the node itself to `level` before spreading
 /// (vanilla `QueueEntry.increaseLightFromEmission`).
 pub(super) const fn increase_light_from_emission(level: u8, from_empty_shape: bool) -> u32 {
-    entry_level(ALL_DIRECTIONS, level) | FROM_EMISSION
+    entry_level(ALL_DIRECTIONS, level)
+        | FROM_EMISSION
         | if from_empty_shape {
             FROM_EMPTY_SHAPE
         } else {
@@ -238,7 +239,7 @@ fn propagate_increase(
                         to,
                         increase_skip_one_direction(
                             new_to_level,
-                            to_state.map_or(true, |s| store.game_data().shapes.is_empty_shape(s)),
+                            to_state.is_none_or(|s| store.game_data().shapes.is_empty_shape(s)),
                             d.opposite(),
                         ),
                     );
@@ -313,7 +314,7 @@ fn propagate_decrease(
                         to,
                         increase_light_from_emission(
                             emission,
-                            to_state.map_or(true, |s| store.game_data().shapes.is_empty_shape(s)),
+                            to_state.is_none_or(|s| store.game_data().shapes.is_empty_shape(s)),
                         ),
                     );
                 }
@@ -323,7 +324,10 @@ fn propagate_decrease(
         } else {
             // brighter: it has another source; re-seed it from here (vanilla passes an
             // empty-shape flag of false: the state is read back when the test needs it)
-            queues.enqueue_increase(to, increase_only_one_direction(to_level, false, d.opposite()));
+            queues.enqueue_increase(
+                to,
+                increase_only_one_direction(to_level, false, d.opposite()),
+            );
         }
     }
 }

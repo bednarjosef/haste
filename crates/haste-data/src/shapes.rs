@@ -5,7 +5,7 @@
 //! file replaces it once oracles records the dump.
 
 use haste_core::view::{FluidInfo, FluidKind};
-use haste_core::{Aabb, BlockStateId, Direction, DVec3};
+use haste_core::{Aabb, BlockStateId, DVec3, Direction};
 
 use crate::blocks::BlockStates;
 
@@ -313,8 +313,14 @@ impl BlockShapes {
     /// `direction` (a bottom slab blocks down through its bottom face but not sideways
     /// through its open half). False on old dumps without the flags, which is the
     /// pre-shape behaviour. Ids outside the table resolve to the placeholder's entry.
-    pub fn shape_occludes(&self, from: BlockStateId, to: BlockStateId, direction: Direction) -> bool {
-        self.face_occlusion.occludes(self.row(from), self.row(to), direction)
+    pub fn shape_occludes(
+        &self,
+        from: BlockStateId,
+        to: BlockStateId,
+        direction: Direction,
+    ) -> bool {
+        self.face_occlusion
+            .occludes(self.row(from), self.row(to), direction)
     }
 
     /// Vanilla `LightEngine.isEmptyShape`: `!canOcclude || !useShapeForLightOcclusion`,

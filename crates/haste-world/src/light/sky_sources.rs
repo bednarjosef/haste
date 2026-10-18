@@ -35,10 +35,7 @@ fn index(x: u8, z: u8) -> usize {
 /// direction DOWN compares the top state's bottom face with the bottom state's top face).
 #[inline]
 fn is_edge_occluded(data: &GameData, top: BlockStateId, bottom: BlockStateId) -> bool {
-    light_dampening(data, bottom) != 0
-        || data
-            .shapes
-            .shape_occludes(top, bottom, Direction::Down)
+    light_dampening(data, bottom) != 0 || data.shapes.shape_occludes(top, bottom, Direction::Down)
 }
 
 /// One column's lowest source y, walked from the world top downwards

@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use haste_core::{Aabb, Direction, DVec3};
+use haste_core::{Aabb, DVec3, Direction};
 
 use super::OracleState;
 
@@ -399,3 +399,6 @@ fn is_full_cube(boxes: &[Aabb]) -> bool {
     }
     (volume - 1.0).abs() < 1e-6
 }
+
+#[cfg(test)]
+mod tests;
