@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// A GUI frame size to draw into (GUI pixels at scale 4 of 1920x1080).

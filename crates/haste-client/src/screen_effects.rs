@@ -36,12 +36,8 @@ pub use camera_overlay::camera_overlay;
 #[cfg(test)]
 use draw::argb;
 use draw::white;
-#[allow(unused_imports)]
-pub use in_block::view_probe_points;
 use in_block::BLOCK_OVERLAY_TINT;
 pub use mob_effect::Effect;
-#[allow(unused_imports)]
-pub use portal::is_portal_block;
 pub use portal::PortalEffects;
 use powder_snow::powder_snow_outline;
 pub use powder_snow::{percent_frozen, tick_frozen};
