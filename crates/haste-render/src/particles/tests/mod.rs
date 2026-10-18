@@ -1,3 +1,4 @@
+mod snapshot;
 mod terrain_particle;
 mod vanilla_numbers;
 

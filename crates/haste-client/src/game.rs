@@ -38,7 +38,8 @@ use block_entity_ticks::{tick_model_anims, TickModelAnims, MODEL_RNG};
 
 /// The particle pool: filled from `level_particles` packets (the renderer's atlas-backed
 /// particle types, so unknown/mod types are skipped there), ticked at 20 Hz by the game
-/// thread. The render thread reads it per frame under this lock (no GPU state inside).
+/// thread, which then publishes [`Shared::particle_snapshots`] for the render thread (no
+/// GPU state inside).
 pub type SharedParticles = Mutex<haste_render::Particles>;
 
 /// How far the third-person camera sits from the eye when nothing is in the way (vanilla's
@@ -204,36 +205,34 @@ pub fn player_instance(
     let yaw = view.prev_look.0 + (view.look.0 - view.prev_look.0) * partial;
     let pitch = view.prev_look.1 + (view.look.1 - view.prev_look.1) * partial;
     let mut pose = PoseOverrides::default();
+    use haste_core::parts;
     match view.pose {
         Some(haste_core::entity::Pose::Crouching) => {
-            pose.rotations
-                .push(("body".into(), Vec3::new(0.5, 0.0, 0.0)));
-            pose.rotations
-                .push(("head".into(), Vec3::new(-0.5, 0.0, 0.0)));
+            pose.set_rotation(parts::BODY, Vec3::new(0.5, 0.0, 0.0));
+            pose.set_rotation(parts::HEAD, Vec3::new(-0.5, 0.0, 0.0));
         }
         Some(
             haste_core::entity::Pose::Swimming
             | haste_core::entity::Pose::FallFlying
             | haste_core::entity::Pose::SpinAttack,
         ) => {
-            pose.rotations.push((
-                "body".into(),
+            pose.set_rotation(
+                parts::BODY,
                 Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
-            ));
-            pose.rotations.push((
-                "right_arm".into(),
+            );
+            pose.set_rotation(
+                parts::RIGHT_ARM,
                 Vec3::new(-std::f32::consts::FRAC_PI_2, 0.0, 0.4),
-            ));
-            pose.rotations.push((
-                "left_arm".into(),
+            );
+            pose.set_rotation(
+                parts::LEFT_ARM,
                 Vec3::new(-std::f32::consts::FRAC_PI_2, 0.0, -0.4),
-            ));
+            );
         }
         _ => {
             // Head aim: the head follows the look's pitch (the body and head yaw are the same
             // here, so no yaw component).
-            pose.rotations
-                .push(("head".into(), Vec3::new(pitch.to_radians(), 0.0, 0.0)));
+            pose.set_rotation(parts::HEAD, Vec3::new(pitch.to_radians(), 0.0, 0.0));
         }
     }
     let mut inst = EntityInstance {
@@ -533,12 +532,25 @@ pub struct Shared {
     /// resolving what each stored block entity is; the static registry's order when the server
     /// did not sync one (vanilla servers' ids agree with the data generator's).
     pub block_entity_names: Vec<haste_core::Identifier>,
+    /// The game thread's last extracted block entity render data (vanilla's per-tick
+    /// `extractRenderState`): the drawable instances with tick-end values, replaced once per
+    /// tick by the extraction (`app::block_entity_extract`). The render thread clones the
+    /// `Arc` per frame and folds the partial tick in.
+    pub block_entity_tick: Mutex<Arc<crate::app::block_entity_extract::BlockEntityTickFrame>>,
+    /// The renderer's text metrics (the font, for wrapping sign lines), set by the render
+    /// thread on its first frame; the game thread's sign text parsing waits for it (signs
+    /// draw without text until then, retried every tick).
+    pub sign_text_metrics: std::sync::OnceLock<Arc<dyn haste_core::gui::TextMetrics>>,
     /// Biome climates of the synced registry (index = biome id), for the fog's per-biome
     /// environment attributes (`FogRenderer` resolves them from the camera biome).
     pub biome_climates: Vec<haste_render::BiomeClimate>,
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
+    /// The particles' per-tick render snapshot: written by the game thread's particle
+    /// tick (under the locks it already holds), taken by the render thread each frame
+    /// (an `Arc` copy; no world read lock, no particle mutex, no waiting on the tick).
+    pub particle_snapshots: haste_render::ParticleSnapshots,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// The sound and music output (None until the client sets it up; headless leaves it
@@ -580,6 +592,8 @@ pub struct Shared {
     /// new download joins them so a reload layers every server pack, not only
     /// the newest.
     pub applied_server_packs: Mutex<Vec<std::path::PathBuf>>,
+    /// The server resource pack confirm screen in play (vanilla's `PackConfirmScreen`).
+    pub pack_prompt: Mutex<crate::net::pack_prompt::PlayPrompt>,
     /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
     /// thread from the connection's counters.
     pub debug_tx: AtomicU64,
@@ -696,8 +710,13 @@ impl Shared {
             block_entity_spins: Mutex::new(Vec::new()),
             block_entity_anims: Mutex::new(std::collections::HashMap::new()),
             block_entity_names,
+            block_entity_tick: Mutex::new(Arc::new(
+                crate::app::block_entity_extract::BlockEntityTickFrame::default(),
+            )),
+            sign_text_metrics: std::sync::OnceLock::new(),
             biome_climates,
             particles: Mutex::new(particles),
+            particle_snapshots: haste_render::ParticleSnapshots::default(),
             weather_scratch: Mutex::new(haste_render::WeatherFrame::default()),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
@@ -711,6 +730,7 @@ impl Shared {
             options_version: AtomicU64::new(1),
             resource_pack_reload: Mutex::new(None),
             applied_server_packs: Mutex::new(Vec::new()),
+            pack_prompt: Mutex::default(),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
             chunks_loaded: AtomicU64::new(0),
@@ -841,6 +861,8 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
     // and rate are unchanged.
     let mut drained_wakes = 0u64;
     let mut failure: Option<String> = None;
+    // The block entity render data's extractor (per-tick caches; see the module).
+    let mut extractor = crate::app::block_entity_extract::BlockEntityExtractor::new();
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
@@ -854,6 +876,7 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
             &mut gone,
             &mut jvm,
             &mut server_packs_version,
+            &mut extractor,
         ) {
             break format!("tick failed: {e:#}");
         }
@@ -1059,6 +1082,10 @@ fn drain_packets(
     drop(entities);
     skins::request_profiles(&shared.skins, &mut driver.session.profiles);
     let mut dirty = world.take_dirty_sections();
+    // The sections of forgotten chunks ride the same dirty set: the render thread's
+    // mesh workers find no chunk for them and free the resident meshes (vanilla drops
+    // a chunk's render data with the chunk, `ClientChunkCache.drop`).
+    dirty.append(gone);
     if !dirty.is_empty() {
         shared.dirty.lock().append(&mut dirty);
     }
@@ -1091,6 +1118,7 @@ fn tick_once(
     gone: &mut Vec<SectionPos>,
     jvm: &mut HudSlot,
     server_packs_version: &mut u64,
+    extractor: &mut crate::app::block_entity_extract::BlockEntityExtractor,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
     // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
@@ -1527,6 +1555,12 @@ fn tick_once(
         }
         driver.session.ambient_spawns = ambient;
         particles.tick();
+        // The render snapshot for the coming frames (vanilla's per-frame
+        // `ParticleEngine.extract` folded into the tick: light sampled at the tick
+        // position, see `build_snapshot`), published while the locks are still held —
+        // the render thread only ever takes an `Arc` copy.
+        let world = shared.world.read();
+        particles.publish_snapshot(&*world, &shared.particle_snapshots);
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The mount HUD's values for this tick (the vehicle's hearts and the charged jump bar),
@@ -1577,6 +1611,11 @@ fn tick_once(
         }
         ui.drain_outgoing(&mut ui_out);
     }
+    // A pushed pack waiting for the player (vanilla's `PackConfirmScreen` in play).
+    shared
+        .pack_prompt
+        .lock()
+        .tick(driver.connection(), shared.ui.lock().as_ref());
     for p in ui_out {
         driver.queue(p);
     }
@@ -1736,6 +1775,13 @@ fn tick_once(
         spinning_time: screen.spinning_time(),
         spinning_speed: screen.spinning_speed(),
     };
+    drop(view);
+    // The block entities' render data for the next tick's frames (vanilla's per-tick
+    // `extractRenderState`): everything that changes only per tick (block states, lights,
+    // payloads, the anims' tick ends) is extracted here, off the render thread; the render
+    // thread only folds the partial tick into the animatable fields. Runs after the view
+    // update so the camera chunk, view radius and world age are this tick's.
+    extractor.extract(shared, feet, shared.view.lock().view_distance, s.world_age);
     Ok(())
 }
 
@@ -2146,5 +2192,49 @@ mod tests {
         let (pos, _, _) =
             third_person_camera(Perspective::ThirdPersonBehind, EYE, -90.0, 0.0, &w, &s);
         assert!((pos.x - (0.5 - (0.03f64).sqrt())).abs() < EPS, "{pos:?}");
+    }
+
+    /// A forgotten chunk lists every section it had, so the dirty set reaches the renderer
+    /// and its resident meshes are freed (vanilla drops the render data with the chunk,
+    /// `ClientChunkCache.drop`). Needs the data generator reports in the cache.
+    #[test]
+    #[ignore = "needs cache/datagen/26.3/reports (GameData::load)"]
+    fn tracked_world_lists_gone_sections() {
+        let data = crate::net::load_game_data().unwrap();
+        let dim = DimensionInfo::overworld();
+        let mut world = World::new_with_biomes(dim.clone(), data.clone(), 8);
+        let c = haste_world::chunk::synthetic_chunk_data(
+            ChunkPos::new(3, -2),
+            dim.min_section(),
+            dim.section_count(),
+            |s, _, _, _| {
+                if s < 2 {
+                    BlockStateId(1)
+                } else {
+                    BlockStateId::AIR
+                }
+            },
+        );
+        WorldSink::load_chunk(&mut world, &c).unwrap();
+        let mut gone = Vec::new();
+        let mut tracked = TrackedWorld {
+            world: &mut world,
+            gone: &mut gone,
+        };
+        tracked.unload_chunk(ChunkPos::new(3, -2));
+        assert!(world.chunk(ChunkPos::new(3, -2)).is_none());
+        // Every section of the chunk, exactly once, and nothing else.
+        let min = dim.min_section();
+        let expect: std::collections::HashSet<SectionPos> = (min..min + dim.section_count() as i32)
+            .map(|y| SectionPos::new(3, y, -2))
+            .collect();
+        assert_eq!(gone.len(), expect.len());
+        assert!(gone.iter().all(|p| expect.contains(p)));
+        // The world itself dirties only the neighbours: without `gone` riding the dirty
+        // set, no packet would ever mention these sections again.
+        assert!(world
+            .take_dirty_sections()
+            .into_iter()
+            .all(|p| p.chunk() != ChunkPos::new(3, -2)));
     }
 }

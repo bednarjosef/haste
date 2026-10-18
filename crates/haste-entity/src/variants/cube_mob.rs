@@ -19,7 +19,7 @@ pub fn scale_for(kind: RegistryIndex, metadata: &Metadata) -> f32 {
     let Some(name) = crate::registry::entity_type_name(kind) else {
         return 1.0;
     };
-    if !matches!(name.as_str(), "minecraft:slime" | "minecraft:magma_cube") {
+    if !matches!(name, "minecraft:slime" | "minecraft:magma_cube") {
         return 1.0;
     }
     size as f32

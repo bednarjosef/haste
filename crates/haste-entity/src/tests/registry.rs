@@ -151,7 +151,7 @@ fn render_instances_picks_up_variant_models() {
         eprintln!("skipped: no registries.json in the cache");
         return;
     };
-    let Some((kind, _)) = names.iter().find(|(_, n)| n.as_str() == "minecraft:pig") else {
+    let Some((kind, _)) = names.iter().find(|(_, n)| **n == "minecraft:pig") else {
         eprintln!("skipped: minecraft:pig not in the registry");
         return;
     };
@@ -237,7 +237,7 @@ fn sheep_with_wool_metadata_is_not_a_shulker() {
         eprintln!("skipped: no registries.json in the cache");
         return;
     };
-    let Some((kind, _)) = names.iter().find(|(_, n)| n.as_str() == "minecraft:sheep") else {
+    let Some((kind, _)) = names.iter().find(|(_, n)| **n == "minecraft:sheep") else {
         eprintln!("skipped: minecraft:sheep not in the registry");
         return;
     };

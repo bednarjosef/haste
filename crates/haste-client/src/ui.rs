@@ -710,6 +710,21 @@ impl Ui {
         &self.frame
     }
 
+    /// [`Ui::frame`] moved out instead of borrowed: for callers that keep the frame for the
+    /// rest of the render (`App.gui`, the screenshot and script loops), so the whole
+    /// command list is moved rather than deep-cloned every frame.
+    pub fn take_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        scale: u32,
+        mouse: (f64, f64),
+        partial: f32,
+    ) -> GuiFrame {
+        self.frame(width, height, scale, mouse, partial);
+        std::mem::take(&mut self.frame)
+    }
+
     /// What the HUD drew of the player's vitals, at debug level (the frame path stays clean
     /// when debug logging is off): the game mode the HUD renders for and the heart and food
     /// sprite counts, so a "no health, no hunger" report can be traced to the side that has

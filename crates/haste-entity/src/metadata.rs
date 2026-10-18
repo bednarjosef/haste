@@ -62,6 +62,9 @@ pub struct Metadata {
     pub mob: MobFlags,
     /// `Entity.DATA_CUSTOM_NAME` (index 2): the entity's custom name, for the upside-down check.
     pub custom_name: Option<Component>,
+    /// The custom name flattened to plain text, computed when the metadata changes (name tags
+    /// and the upside-down check read it every frame without allocating).
+    pub custom_name_plain: Option<String>,
     /// `Creeper.DATA_SWELL_DIR` (index 16, an int: `AgeableMob` defines none for a creeper, so
     /// `Mob`'s 15 is followed by `Creeper`'s first accessor). The client advances its own swell
     /// count from this (`Creeper.tick`).
@@ -87,7 +90,14 @@ impl Metadata {
         for e in entries {
             match (e.index, &e.value) {
                 (0, MetadataValue::Byte(b)) => self.shared = SharedFlags::from_byte(*b),
-                (2, MetadataValue::OptionalComponent(c)) => self.custom_name = c.clone(),
+                (2, MetadataValue::OptionalComponent(c)) => {
+                    self.custom_name = c.clone();
+                    self.custom_name_plain = c.as_ref().map(|c| c.to_plain(&|_| None));
+                }
+                (2, MetadataValue::Component(c)) => {
+                    self.custom_name = Some(c.clone());
+                    self.custom_name_plain = Some(c.to_plain(&|_| None));
+                }
                 (6, MetadataValue::Pose(p)) => self.pose = Some(*p),
                 (15, MetadataValue::Byte(b)) => self.mob = MobFlags::from_byte(*b),
                 // Index 16 is `Creeper.DATA_SWELL_DIR` (int); `AgeableMob`'s baby flag at 16 is a
@@ -107,11 +117,13 @@ impl Metadata {
         self.entries.iter().find(|e| e.index == index)
     }
 
-    /// `Entity.DATA_CUSTOM_NAME` (index 2): the custom name in plain text, if set.
-    pub fn custom_name(&self) -> Option<String> {
+    /// `Entity.DATA_CUSTOM_NAME` (index 2): the custom name in plain text, if set. Computed
+    /// when the metadata changes; per-frame readers take it without allocating.
+    pub fn custom_name_plain(&self) -> Option<&str> {
         match self.get(2).map(|e| &e.value) {
-            Some(MetadataValue::OptionalComponent(Some(c))) => Some(c.to_plain(&|_| None)),
-            Some(MetadataValue::Component(c)) => Some(c.to_plain(&|_| None)),
+            Some(MetadataValue::OptionalComponent(Some(_))) | Some(MetadataValue::Component(_)) => {
+                self.custom_name_plain.as_deref()
+            }
             _ => None,
         }
     }
