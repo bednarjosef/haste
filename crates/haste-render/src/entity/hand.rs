@@ -171,6 +171,12 @@ impl EntityRenderer {
         let Some(fp) = fp else {
             return;
         };
+        // Hand normals are world-oriented: vanilla puts the inverse view rotation on the
+        // hand's pose stack (`GameRenderer.renderItemInHand`), so the fixed world light
+        // directions shade the arm/item as you look around. Rotate normals by the inverse
+        // camera rotation for the duration of this pass; positions are untouched.
+        let prev_normal_rotation = hand_normal_rotation_current();
+        set_hand_normal_rotation(hand_normal_rotation(view.0, view.1));
         // `FirstPerson::light` is (sky, block); the vertex wants (block, sky).
         let light = (fp.light.1, fp.light.0);
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
@@ -209,6 +215,7 @@ impl EntityRenderer {
                 );
             }
         }
+        set_hand_normal_rotation(prev_normal_rotation);
         self.hand = out;
         if self.hand.len() > self.hand_capacity {
             self.hand_capacity = self.hand.len().next_power_of_two();

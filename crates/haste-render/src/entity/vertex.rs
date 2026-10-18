@@ -59,11 +59,52 @@ pub(crate) fn push_world_quad(
 }
 
 /// World-space entity shading: two directional lights at 0.6 and 0.4 ambient (the same
-/// lighting model as GUI items, with the light directions in world space).
-pub(crate) fn entity_shade(n: Vec3) -> f32 {
+/// lighting model as GUI items, with the light directions in world space). `n` is already in
+/// the space the lights live in (world space for entities, view space for the hand before its
+/// normals are rotated).
+pub(crate) fn entity_shade_base(n: Vec3) -> f32 {
     let l0 = Vec3::new(0.2, 1.0, -0.7).normalize();
     let l1 = Vec3::new(-0.2, 1.0, 0.7).normalize();
     ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0)
+}
+
+thread_local! {
+    /// The rotation applied to a hand normal before shading, so the hand's normals are
+    /// world-oriented (vanilla `GameRenderer.renderItemInHand` puts the inverse view
+    /// rotation on the hand's pose stack). Identity outside the hand pass.
+    static HAND_NORMAL_ROTATION: std::cell::RefCell<Mat3> =
+        const { std::cell::RefCell::new(Mat3::IDENTITY) };
+}
+
+/// Rotate the hand's view-space normals into world space with the inverse camera rotation
+/// before shading them. `None` resets to identity.
+pub(crate) fn set_hand_normal_rotation(rot: Mat3) {
+    HAND_NORMAL_ROTATION.with(|r| *r.borrow_mut() = rot);
+}
+
+pub(crate) fn hand_normal_rotation_current() -> Mat3 {
+    HAND_NORMAL_ROTATION.with(|r| *r.borrow())
+}
+
+/// World-space entity shading, with the hand's current normal rotation applied (identity
+/// outside the hand pass). This is what the render path calls.
+pub(crate) fn entity_shade(n: Vec3) -> f32 {
+    let rot = HAND_NORMAL_ROTATION.with(|r| *r.borrow());
+    entity_shade_base(rot * n)
+}
+
+/// The inverse camera rotation (yaw/pitch) vanilla puts on the hand's pose stack, as a
+/// normal-space rotation. Roll is not part of vanilla's camera rotation.
+pub(crate) fn hand_normal_rotation(yaw: f32, pitch: f32) -> Mat3 {
+    let view = Mat4::from_rotation_x(pitch.to_radians())
+        * Mat4::from_rotation_y((yaw + 180.0).to_radians());
+    Mat3::from_mat4(view.inverse())
+}
+
+/// Shade a hand face whose view-space normal is `n`, as vanilla does (world-oriented).
+#[allow(dead_code)]
+pub(crate) fn entity_shade_hand(n: Vec3, yaw: f32, pitch: f32) -> f32 {
+    entity_shade_base(hand_normal_rotation(yaw, pitch) * n)
 }
 
 /// One shadow quad (four vertices, two triangles) with a flat white colour at `alpha`. The
