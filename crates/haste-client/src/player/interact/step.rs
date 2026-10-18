@@ -16,6 +16,7 @@ impl LocalPlayer {
     pub(crate) fn interact_step(
         &mut self,
         look: (f32, f32),
+        sneak_key: bool,
         world: &dyn BlockView,
         env: &InteractEnv<'_>,
         out: &mut Vec<ServerboundPlay>,
@@ -116,13 +117,13 @@ impl LocalPlayer {
             }
             // while (keyUse.consumeClick()) startUseItem();
             for _ in 0..use_clicks {
-                self.start_use_item(look, world, env, out);
+                self.start_use_item(look, sneak_key, world, env, out);
             }
         }
 
         // if (keyUse.isDown() && rightClickDelay == 0 && !player.isUsingItem()) startUseItem();
         if input.use_item && self.int.use_delay == 0 && !self.int.is_using_item {
-            self.start_use_item(look, world, env, out);
+            self.start_use_item(look, sneak_key, world, env, out);
         }
 
         // `LivingEntity.tick` -> `updateUsingItem`: the remaining time ticks down each game tick,

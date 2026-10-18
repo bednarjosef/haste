@@ -9,7 +9,10 @@
 use std::collections::HashMap;
 
 use haste_core::entity::MetadataValue;
-use haste_core::model::{Decoration, ItemFrameDecoration, LightningDecoration, PaintingDecoration};
+use haste_core::model::{
+    Decoration, ExperienceOrbDecoration, ItemFrameDecoration, LightningDecoration,
+    PaintingDecoration,
+};
 use haste_core::{Direction, Identifier, RegistryIndex};
 
 /// `ItemFrame.DATA_ITEM`.
@@ -100,6 +103,7 @@ pub fn build(
     metadata: &crate::metadata::Metadata,
     variants: &HashMap<u32, PaintingVariant>,
     entity_id: i32,
+    age: f32,
 ) -> Option<Decoration> {
     // The lightning bolt is not hanging: it renders at the entity's own position, its
     // geometry from a seed (the entity id stands in for vanilla's per-bolt random).
@@ -109,6 +113,21 @@ pub fn build(
     ) {
         return Some(Decoration::Lightning(LightningDecoration {
             seed: entity_id as u32 as u64 | 0x5EED_0000_0000_0000,
+        }));
+    }
+    // Experience orbs render as a camera-facing quad with a value-tiered icon and a colour
+    // cycle; they are not hanging, so they keep the entity's own position.
+    if matches!(
+        crate::registry::decoration_kind(kind),
+        Some(crate::registry::DecorationKind::ExperienceOrb)
+    ) {
+        let value = match metadata.get(8).map(|e| &e.value) {
+            Some(haste_core::entity::MetadataValue::VarInt(v)) => *v,
+            _ => 0,
+        };
+        return Some(Decoration::ExperienceOrb(ExperienceOrbDecoration {
+            value,
+            age,
         }));
     }
     let facing = Direction::from_ordinal(u8::try_from(data).ok()?)?;
@@ -142,6 +161,8 @@ pub fn build(
         }
         // Handled before the facing is parsed (the bolt is not hanging).
         crate::registry::DecorationKind::LightningBolt => None,
+        // Handled before the facing is parsed (not hanging).
+        crate::registry::DecorationKind::ExperienceOrb => None,
     }
 }
 
@@ -176,11 +197,14 @@ pub fn render_center(
     metadata: &crate::metadata::Metadata,
     variants: &HashMap<u32, PaintingVariant>,
 ) -> haste_core::DVec3 {
-    // The lightning bolt hangs on nothing: its render origin is its own position (the spawn
-    // packet's).
+    // The lightning bolt and the experience orb hang on nothing: their render origin is their
+    // own position (the spawn packet's / entity position).
     if matches!(
         crate::registry::decoration_kind(kind),
-        Some(crate::registry::DecorationKind::LightningBolt)
+        Some(
+            crate::registry::DecorationKind::LightningBolt
+                | crate::registry::DecorationKind::ExperienceOrb
+        )
     ) {
         return block_pos;
     }
@@ -334,7 +358,7 @@ mod tests {
             },
         }]);
         // Unknown kind index: no decoration.
-        assert!(build(RegistryIndex(999), 2, &m, &variants, 1).is_none());
+        assert!(build(RegistryIndex(999), 2, &m, &variants, 1, 0.0).is_none());
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use crate::sounds::SoundVariant;
-use crate::spatial::{attenuation, clamp_pitch, pan, stereo_gains};
+use crate::spatial::{attenuation, clamp_pitch, pan, stereo_gains, ListenerTransform};
 
 /// The vanilla sound categories a sound can belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -75,6 +75,12 @@ impl SourceVolumes {
         }
     }
 
+    /// The source's index in the per-source arrays (`Master` has none: it scales the
+    /// others and carries no gain of its own).
+    pub(crate) fn index_for(source: SoundSource) -> Option<usize> {
+        Self::index(source)
+    }
+
     /// Effective gain multiplier of a source, as vanilla's `SoundEngine.calculateVolume`
     /// takes `Options.getFinalSoundSourceVolume` clamped to 0..=1: `master * source`, and
     /// the master volume alone for the master source (not master squared).
@@ -105,6 +111,16 @@ pub(crate) fn event_eq(stored: &str, queried: &str) -> bool {
     stored_ns == queried_ns && stored_path == queried_path
 }
 
+/// What playing a sound did, vanilla's `SoundEngine.PlayResult`: not started at all, or
+/// started (possibly silently — a volume-0 music track that keeps its channel so a later
+/// volume change can fade it in).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayResult {
+    Started,
+    StartedSilently,
+    NotStarted,
+}
+
 /// One sound currently tracked by the engine.
 #[derive(Clone, Debug)]
 struct PlayingSound {
@@ -121,6 +137,11 @@ struct PlayingSound {
     /// 0.5..=2.0.
     pitch: f32,
     attenuation_distance: u32,
+    /// Whether the sound's file has more than one channel, as the decoder found. OpenAL
+    /// plays a multi-channel buffer as-is, unpositioned (no distance, no panning), so a
+    /// stereo file (music, records) is global even when the server sent a position; the
+    /// output stage reports the channel count once the worker has decoded the file.
+    stereo: bool,
     /// (left, right) gains as of the last `tick()`.
     gains: (f32, f32),
 }
@@ -134,8 +155,11 @@ struct PlayingSound {
 pub struct SilentEngine {
     sounds: Vec<PlayingSound>,
     volumes: SourceVolumes,
-    listener_pos: DVec3,
-    listener_yaw: f32,
+    /// Extra per-source gains on top of the option volumes, vanilla's `gainBySource` map
+    /// (default 1.0 for a missing source): what `SoundEngine.updateCategoryVolume` sets
+    /// and what the music fade drives; `stopAll` clears it.
+    category_gains: [f32; 10],
+    listener: ListenerTransform,
 }
 
 impl Default for SilentEngine {
@@ -149,9 +173,35 @@ impl SilentEngine {
         Self {
             sounds: Vec::new(),
             volumes: SourceVolumes::default(),
-            listener_pos: DVec3::ZERO,
-            listener_yaw: 0.0,
+            category_gains: [1.0; 10],
+            listener: ListenerTransform::from_look(DVec3::ZERO, 0.0, 0.0),
         }
+    }
+
+    /// The whole gain multiplier of a sound's volume in `source` (the instance volume
+    /// times this is the channel volume): the option volumes times the category gain.
+    fn channel_gain(&self, source: SoundSource) -> f32 {
+        let gain = match SourceVolumes::index_for(source) {
+            Some(i) => self.category_gains[i],
+            None => return 1.0,
+        };
+        self.volumes.effective(source) * gain
+    }
+
+    /// Set one source's extra category gain, vanilla's
+    /// `SoundEngine.updateCategoryVolume(source, gain)`: the gain is clamped to 0..=1
+    /// and multiplies with the option volumes (the music fade drives this; at 1.0, the
+    /// default, it changes nothing).
+    pub fn update_category_volume(&mut self, source: SoundSource, gain: f32) {
+        if let Some(i) = SourceVolumes::index_for(source) {
+            self.category_gains[i] = gain.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Reset every category gain to its default of 1.0, vanilla's `SoundEngine.stopAll`
+    /// (which clears `gainBySource`), so a later fade starts from the full gain.
+    pub fn reset_category_gains(&mut self) {
+        self.category_gains = [1.0; 10];
     }
 
     /// Start tracking a sound. The variant's `volume`/`pitch` from sounds.json multiply
@@ -160,6 +210,10 @@ impl SilentEngine {
     /// without one play at full gain, centred. `event` is the sound event the sound was
     /// started with, kept for `stop`'s event filter and [`Self::is_event_playing`]; it is
     /// shared, so tracking it costs no allocation.
+    ///
+    /// Vanilla's volume-0 rule (`SoundEngine.play`): a sound whose whole volume works out
+    /// to 0 is not started — except music, which starts silently and keeps playing, so a
+    /// later volume change (or the music fade) can raise it without restarting the track.
     pub fn play(
         &mut self,
         variant: &SoundVariant,
@@ -168,7 +222,13 @@ impl SilentEngine {
         volume: f32,
         pitch: f32,
         event: Arc<str>,
-    ) {
+    ) -> PlayResult {
+        let instance_volume = (volume * variant.volume).clamp(0.0, 1.0);
+        let channel_volume = instance_volume * self.channel_gain(source);
+        if channel_volume == 0.0 && source != SoundSource::Music {
+            return PlayResult::NotStarted;
+        }
+        let started_silently = channel_volume == 0.0;
         self.sounds.push(PlayingSound {
             event,
             source,
@@ -176,15 +236,30 @@ impl SilentEngine {
             volume: volume * variant.volume,
             pitch: clamp_pitch(pitch * variant.pitch),
             attenuation_distance: variant.attenuation_distance,
+            stereo: false,
             gains: (0.0, 0.0),
         });
+        if started_silently {
+            PlayResult::StartedSilently
+        } else {
+            PlayResult::Started
+        }
+    }
+
+    /// Drop the most recently started sound, after a channel could not be acquired for it
+    /// (vanilla's `SoundEngine.play` gives up on the sound when `createHandle` fails, so
+    /// it is never tracked anywhere).
+    pub fn remove_last(&mut self) {
+        self.sounds.pop();
     }
 
     /// Set the listener (camera) position and yaw for attenuation and panning.
     /// Minecraft yaw: 0 = facing +Z (south), increasing clockwise seen from above.
-    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32) {
-        self.listener_pos = pos;
-        self.listener_yaw = yaw_deg;
+    /// Set the listener (the camera) for attenuation and panning: position and look
+    /// (yaw/pitch), as vanilla's `SoundEngine.updateSource(Camera)` feeds the camera's
+    /// position, forward and up into `Listener.setTransform`.
+    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32, pitch_deg: f32) {
+        self.listener = ListenerTransform::from_look(pos, yaw_deg, pitch_deg);
     }
 
     /// Set the volume of one sound source (or the master volume).
@@ -195,8 +270,13 @@ impl SilentEngine {
     /// Stop playing sounds. `None` on an axis matches everything; a sound is stopped
     /// when both the source filter and the event filter match it, as vanilla's
     /// `SoundManager.stop(Identifier, SoundSource)` does: both `None` stops everything,
-    /// one `None` stops that whole axis.
+    /// one `None` stops that whole axis. Stopping everything also resets the category
+    /// gains (vanilla's `SoundEngine.stopAll` clears `gainBySource`, so a faded music
+    /// source comes back at full gain for the next track).
     pub fn stop(&mut self, source: Option<SoundSource>, event: Option<&str>) {
+        if source.is_none() && event.is_none() {
+            self.reset_category_gains();
+        }
         self.sounds.retain(|s| {
             let source_matches = source.is_none_or(|src| s.source == src);
             let event_matches = event.is_none_or(|e| event_eq(&s.event, e));
@@ -210,21 +290,44 @@ impl SilentEngine {
         self.sounds.remove(index);
     }
 
+    /// Mark the sound at `index` (play order) as stereo (its file has more than one
+    /// channel). The output stage calls this when the worker has decoded the file and
+    /// found several channels; from then on the sound ignores its position, as OpenAL
+    /// plays multi-channel buffers unpositioned.
+    pub fn set_stereo(&mut self, index: usize) {
+        if let Some(sound) = self.sounds.get_mut(index) {
+            sound.stereo = true;
+        }
+    }
+
     /// Recompute the (left, right) gains of every playing sound from the current
     /// listener and source volumes.
     pub fn tick(&mut self) {
+        // Stack copies of the read-only state, so the loop can hold `&mut` sounds.
+        let volumes = self.volumes.clone();
+        let category_gains = self.category_gains;
+        let listener = self.listener;
         for sound in &mut self.sounds {
-            let effective = self.volumes.effective(sound.source);
-            let (gain, pan) = match sound.pos {
-                Some(pos) => (
-                    attenuation(
-                        (pos - self.listener_pos).length(),
-                        sound.volume,
-                        sound.attenuation_distance,
-                    ) * effective,
-                    pan(self.listener_pos, self.listener_yaw, pos),
-                ),
-                None => (sound.volume.min(1.0) * effective, 0.0),
+            let effective = match SourceVolumes::index_for(sound.source) {
+                Some(i) => volumes.effective(sound.source) * category_gains[i],
+                None => 1.0,
+            };
+            // A stereo file plays unpositioned, as OpenAL plays multi-channel buffers:
+            // full gain, centred, wherever it was asked to play.
+            let (gain, pan) = if sound.stereo {
+                (sound.volume.min(1.0) * effective, 0.0)
+            } else {
+                match sound.pos {
+                    Some(pos) => (
+                        attenuation(
+                            (pos - listener.position).length(),
+                            sound.volume,
+                            sound.attenuation_distance,
+                        ) * effective,
+                        pan(&listener, pos),
+                    ),
+                    None => (sound.volume.min(1.0) * effective, 0.0),
+                }
             };
             sound.gains = stereo_gains(gain, pan);
         }

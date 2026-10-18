@@ -41,7 +41,8 @@ fn game_data() -> Arc<GameData> {
 const FIXTURE_BLOCKS: &str = r#"{
   "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
   "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
-  "minecraft:dirt": { "states": [ { "id": 2, "default": true } ] }
+  "minecraft:dirt": { "states": [ { "id": 2, "default": true } ] },
+  "minecraft:chest": { "states": [ { "id": 3, "default": true }, { "id": 4 } ] }
 }"#;
 
 const FIXTURE_REGISTRIES: &str = r#"{
@@ -50,7 +51,8 @@ const FIXTURE_REGISTRIES: &str = r#"{
     "entries": {
       "minecraft:air": { "protocol_id": 0 },
       "minecraft:stone": { "protocol_id": 1 },
-      "minecraft:dirt": { "protocol_id": 2 }
+      "minecraft:dirt": { "protocol_id": 2 },
+      "minecraft:chest": { "protocol_id": 3 }
     }
   }
 }"#;
@@ -387,8 +389,9 @@ fn light_apply_and_read() {
     // empty-marked section, ClientPacketListener.readSectionList), block 0
     assert_eq!(w.sky_light(BlockPos::new(0, 80, 0)), 0);
     assert_eq!(w.block_light(BlockPos::new(0, 80, 0)), 0);
-    // sections with no light data at all: sky 15, block 0
-    assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 15);
+    // section with no light data below a data section: sky reads the bottom row of the
+    // nearest section above (vanilla SkyLightSectionStorage.getLightValue), block 0
+    assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 0);
     assert_eq!(w.block_light(BlockPos::new(0, 0, 0)), 0);
     // light update dirties the changed section's neighbourhood
     assert!(!w.take_dirty_sections().is_empty());
@@ -645,6 +648,26 @@ fn set_block_drops_block_entity() {
     // the other one survives
     assert!(w.block_entity(BlockPos::new(11, 72, 11)).is_some());
     let _ = w.take_dirty_sections();
+}
+
+#[test]
+fn a_state_change_of_the_same_block_keeps_the_block_entity() {
+    // Vanilla `LevelChunk.setBlockState` removes the block entity only when the block changes
+    // (`!oldState.is(newBlock)`): a chest turning waterlogged or double keeps its entity.
+    let (mut w, sign, _chest) = world_with_block_entities();
+    w.set_block(sign, BlockStateId(3));
+    assert!(w.block_entity(sign).is_none(), "stone -> chest drops it");
+    w.set_block_entity(sign, block_entity(sign, 33));
+    w.set_block(sign, BlockStateId(4));
+    assert_eq!(
+        w.block_entity(sign).unwrap().kind,
+        33,
+        "chest state -> chest state keeps it"
+    );
+    w.set_block(sign, BlockStateId(4));
+    assert!(w.block_entity(sign).is_some(), "the same state keeps it");
+    w.set_block(sign, DIRT);
+    assert!(w.block_entity(sign).is_none(), "chest -> dirt drops it");
 }
 
 #[test]

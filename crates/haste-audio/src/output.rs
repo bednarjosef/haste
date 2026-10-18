@@ -30,7 +30,7 @@ use tracing::warn;
 mod decoded;
 mod system;
 
-use decoded::{decode, CachedSamples, DecodedSource, LruCache};
+use decoded::{decode, CachedSamples, DecodedSource, LruCache, StereoSamples};
 pub use system::SoundSystem;
 
 /// How many decoded non-streamed sounds the worker keeps.
@@ -48,7 +48,7 @@ type SoundId = u64;
 /// A sound to decode and start playing, sent to the worker thread.
 struct PlayRequest {
     id: SoundId,
-    /// The engine's sound identity, e.g. `sounds/dig/stone1.ogg`.
+    /// The engine's sound identity, e.g. `minecraft/sounds/dig/stone1.ogg`.
     path: String,
     /// The worker owns the assets after the first request: `Assets` reads need `&mut` and
     /// a thread cannot borrow another thread's, so the first request moves a reopened
@@ -68,14 +68,18 @@ struct SoundControls {
     id: SoundId,
     player: Weak<Player>,
     gains: Arc<Mutex<(f32, f32)>>,
+    /// A multi-channel file playing unpositioned: the tick sets the player's volume from
+    /// the gain instead of pushing per-channel gains.
+    stereo: bool,
 }
 
 impl SoundControls {
-    fn new(player: &Arc<Player>, gains: &Arc<Mutex<(f32, f32)>>, id: SoundId) -> Self {
+    fn new(playing: &Playing) -> Self {
         Self {
-            id,
-            player: Arc::downgrade(player),
-            gains: Arc::clone(gains),
+            id: playing.id,
+            player: Arc::downgrade(&playing.player),
+            gains: Arc::clone(&playing.gains),
+            stereo: playing.stereo,
         }
     }
 }
@@ -85,6 +89,9 @@ struct Playing {
     id: SoundId,
     player: Arc<Player>,
     gains: Arc<Mutex<(f32, f32)>>,
+    /// A multi-channel file playing unpositioned; its volume is the player's own instead
+    /// of the per-channel gains.
+    stereo: bool,
 }
 
 /// The decode worker: owns the assets, the LRU cache and the live players.
@@ -114,10 +121,7 @@ impl Worker {
 
     /// Queue one player's controls for the main thread.
     fn publish(&self, index: usize) {
-        let p = &self.playing[index];
-        let _ = self
-            .shared
-            .send(SoundControls::new(&p.player, &p.gains, p.id));
+        let _ = self.shared.send(SoundControls::new(&self.playing[index]));
     }
 
     /// Decode the request's sound and start playing it, then queue its controls.
@@ -135,34 +139,48 @@ impl Worker {
                     id: request.id,
                     player: Arc::new(Player::connect_new(&self.mixer)),
                     gains: Arc::new(Mutex::new((0.0, 0.0))),
+                    stereo: false,
                 });
                 self.publish(self.playing.len() - 1);
                 return;
             }
         };
-        // Per-channel (left, right) gains, updated by the main thread and applied to the
-        // source on the audio thread every GAIN_UPDATE_PERIOD.
-        let gains = Arc::new(Mutex::new(request.gains));
-        let updater = Arc::clone(&gains);
-        let balanced = ChannelVolume::new(source, vec![request.gains.0, request.gains.1])
-            .periodic_access(GAIN_UPDATE_PERIOD, move |channel_volume| {
-                let (left, right) = *updater.lock().unwrap();
-                channel_volume.set_volume(0, left);
-                channel_volume.set_volume(1, right);
-            });
+        let channels = source.channels();
         let player = Player::connect_new(&self.mixer);
         player.set_speed(request.pitch);
-        player.append(balanced);
+        let gains = Arc::new(Mutex::new(request.gains));
+        if channels > 1 {
+            // A multi-channel buffer plays as-is, unpositioned (OpenAL ignores the
+            // source position for it): no per-channel panning, which would average the
+            // file down to mono — the whole gain (equal on both channels) goes to the
+            // player's own volume instead.
+            player.set_volume(request.gains.0);
+            player.append(source);
+        } else {
+            // Per-channel (left, right) gains, updated by the main thread and applied to
+            // the source on the audio thread every GAIN_UPDATE_PERIOD.
+            let updater = Arc::clone(&gains);
+            let balanced = ChannelVolume::new(source, vec![request.gains.0, request.gains.1])
+                .periodic_access(GAIN_UPDATE_PERIOD, move |channel_volume| {
+                    let (left, right) = *updater.lock().unwrap();
+                    channel_volume.set_volume(0, left);
+                    channel_volume.set_volume(1, right);
+                });
+            player.append(balanced);
+        }
         self.playing.push(Playing {
             id: request.id,
             player: Arc::new(player),
             gains,
+            stereo: channels > 1,
         });
         self.publish(self.playing.len() - 1);
     }
 
     /// The decoded source for a request: streamed live, from the cache, or freshly
-    /// decoded (and cached). `None` when the sound is missing or undecodable.
+    /// decoded (and cached). `None` when the sound is missing or undecodable. A cached
+    /// file with more than one channel passes through interleaved (stereo), not averaged
+    /// down to mono.
     fn decode(&mut self, request: &PlayRequest) -> Option<DecodedSource> {
         if request.stream {
             let bytes = self.read(request)?;
@@ -174,20 +192,26 @@ impl Worker {
                 }
             }
         }
-        if let Some(sound) = self.cache.get(&request.path) {
-            return Some(DecodedSource::Cached(CachedSamples::new(&sound)));
-        }
-        let sound = self
-            .read(request)
-            .and_then(|bytes| decode(bytes, &request.path))?;
-        self.cache.insert(request.path.clone(), sound.clone());
-        Some(DecodedSource::Cached(CachedSamples::new(&sound)))
+        let cached = if let Some(sound) = self.cache.get(&request.path) {
+            sound
+        } else {
+            let sound = self
+                .read(request)
+                .and_then(|bytes| decode(bytes, &request.path))?;
+            self.cache.insert(request.path.clone(), sound.clone());
+            sound
+        };
+        Some(if cached.channels > 1 {
+            DecodedSource::Stereo(StereoSamples::new(&cached))
+        } else {
+            DecodedSource::Cached(CachedSamples::new(&cached))
+        })
     }
 
     /// The Ogg bytes of the request's sound, read from the assets.
     fn read(&mut self, request: &PlayRequest) -> Option<Vec<u8>> {
         let assets = self.assets.as_mut()?;
-        let key = format!("assets/minecraft/{}", request.path);
+        let key = format!("assets/{}", request.path);
         match assets.read_asset(&key) {
             Ok(bytes) => Some(bytes),
             Err(e) => {

@@ -25,8 +25,18 @@ use haste_protocol::wire::{IdOr, SoundEvent as InlineSoundEvent};
 use haste_protocol::ClientboundPlay;
 use haste_protocol::SyncedRegistries;
 
+mod falls;
 mod own_block;
+mod steps;
+pub use falls::{FallBlockRule, FallSounds, LandedOn};
 pub use own_block::{level_event_sound, OwnBlockSounds};
+pub use steps::{resolve_step_blocks, StepCtx, StepSounds};
+
+/// The `MUSIC_VOLUME` environment attribute's default (vanilla's
+/// `EnvironmentAttributes.MUSIC_VOLUME`): the target the music fade eases toward, on top
+/// of the music option volume. Lowered by the pale garden's biome data (0 there); reading
+/// the camera's biome attribute is a seam left for when the attribute probe exists.
+const MUSIC_VOLUME_ATTRIBUTE_DEFAULT: f32 = 1.0;
 
 /// Vanilla's `SoundSource` order, 0..=10 (read from the 26.3 jar by the lead; the packet's
 /// category VarInt is the index in it). Matches `haste_audio::engine::SoundSource`.
@@ -211,6 +221,12 @@ pub struct Sounds {
     situation: MusicSituation,
     /// The music event we started and believe is playing.
     music_event: Option<String>,
+    /// The target the music fade eases the music gain toward, vanilla's
+    /// `Minecraft.getMusicVolume`: the camera's `MUSIC_VOLUME` environment attribute,
+    /// 1.0 outside the biomes that lower it (the pale garden sets 0). This is on top of
+    /// the music option volume, which multiplies separately; resolving the camera's
+    /// biome attribute is not wired up yet, so it stays at the default.
+    music_volume: f32,
     /// Ids/events already logged as unknown (log once per id, no spam).
     unknown_logged: HashSet<String>,
 }
@@ -259,6 +275,7 @@ impl Sounds {
             music_variants: haste_audio::random::LegacyRandom::new(own_block::unseeded()),
             situation: MusicSituation::Menu,
             music_event: None,
+            music_volume: MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
             unknown_logged: HashSet::new(),
         }
     }
@@ -335,18 +352,32 @@ impl Sounds {
             .is_some_and(|event| self.system.is_event_playing(event))
     }
 
-    /// The end of a game tick (20 Hz): listener from the local player's eye and yaw, the music
-    /// situation, the music manager, then the system tick. The situation is recomputed where
-    /// vanilla recomputes it (`Minecraft.getSituationalMusic`: game mode, eye in water); the
-    /// manager follows vanilla's `MusicManager.tick` from there on.
-    pub fn tick(&mut self, eye: DVec3, yaw_deg: f32, situation: MusicSituation) {
-        self.system.set_listener(eye, yaw_deg);
+    /// The end of a game tick (20 Hz): listener from the camera (position and look —
+    /// vanilla's `SoundEngine.updateSource(Camera)`), the music situation, the music
+    /// manager, then the system tick. The situation is recomputed where vanilla recomputes
+    /// it (`Minecraft.getSituationalMusic`: game mode, eye in water); the manager follows
+    /// vanilla's `MusicManager.tick` from there on.
+    pub fn tick(
+        &mut self,
+        camera_pos: DVec3,
+        yaw_deg: f32,
+        pitch_deg: f32,
+        situation: MusicSituation,
+    ) {
+        self.system.set_listener(camera_pos, yaw_deg, pitch_deg);
         if situation != self.situation {
             self.music.set_situation(situation.clone());
             self.situation = situation;
         }
         let playing = self.music_playing();
-        if let Some(command) = self.music.tick(&mut self.music_rng, playing) {
+        let music_volume = self.music_volume;
+        let system = &mut self.system;
+        if let Some(command) = self
+            .music
+            .tick(&mut self.music_rng, playing, music_volume, |gain| {
+                system.update_category_volume(SoundSource::Music, gain)
+            })
+        {
             match command {
                 MusicCommand::Play(event) => {
                     // Vanilla's `SimpleSoundInstance.forMusic(soundEvent)`: no position (the

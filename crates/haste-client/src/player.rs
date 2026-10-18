@@ -268,6 +268,10 @@ pub struct LocalPlayer {
     toggle_flight: bool,
     /// The local player's own block sounds (client-side rules, sound.rs).
     pub(crate) own_sounds: crate::sound::OwnBlockSounds,
+    /// The local player's footsteps (client-side rules, sound/steps.rs).
+    steps: crate::sound::StepSounds,
+    /// The local player's own fall sounds (client-side rules, sound/falls.rs).
+    fall_sounds: crate::sound::FallSounds,
     /// Own-sound requests this tick, drained into `Session::sound_requests` by `end_tick`.
     pub(crate) sound_out: Vec<crate::sound::SoundRequest>,
     /// Own block particles this tick (our break prediction's destroy grid, the
@@ -337,6 +341,8 @@ impl LocalPlayer {
             attributes_dirty: false,
             toggle_flight: false,
             own_sounds: crate::sound::OwnBlockSounds::new(),
+            steps: crate::sound::StepSounds::new(),
+            fall_sounds: crate::sound::FallSounds::new(),
             sound_out: Vec::new(),
             block_particles_out: Vec::new(),
             jump_trigger_time: 0,
@@ -609,7 +615,7 @@ impl LocalPlayer {
             pick(teleport_flags::VEL_Z, v.z, p.velocity.z),
         );
         s.fall_distance = 0.0;
-        self.own_sounds.reset_steps();
+        self.steps.reset();
         self.set_look(yaw, pitch);
         tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
@@ -759,6 +765,7 @@ impl LocalPlayer {
             data,
             entities: &[],
             entity_types: &[],
+            warm_blocks: None,
         };
         self.tick_interact(input, world, &env, None, out);
     }
@@ -792,6 +799,7 @@ impl LocalPlayer {
                 shapes,
                 blocks,
                 env: None,
+                warm_blocks: None,
             },
             vehicle,
             out,
@@ -816,6 +824,7 @@ impl LocalPlayer {
                 shapes: &env.data.shapes,
                 blocks: env.data,
                 env: Some(env),
+                warm_blocks: env.warm_blocks,
             },
             vehicle,
             out,
@@ -875,7 +884,7 @@ impl LocalPlayer {
             (input.pitch + self.look_offset.1).clamp(-90.0, 90.0),
         );
         if let Some(env) = ctx.env {
-            self.interact_step(look, ctx.world, env, out);
+            self.interact_step(look, input.sneak, ctx.world, env, out);
         }
 
         // 1. player_input when the held keys change (raw keys, as pressed). While riding this
@@ -936,33 +945,27 @@ impl LocalPlayer {
         let mut phys_input = *input;
         phys_input.yaw = input.yaw + self.look_offset.0;
         phys_input.pitch = (input.pitch + self.look_offset.1).clamp(-90.0, 90.0);
-        if self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly {
-            phys_input.sprint = false;
-            self.state.sprinting = false;
-        }
+        // What the physics tick's sprint rules cannot see (vanilla `isSprintingPossible`'s
+        // blindness and food terms, `isSlowDueToUsingItem`).
+        self.state.sprint_blocked =
+            self.int.is_blind() || (self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly);
+        self.state.slow_using_item = self.is_using_item();
         // Vanilla `LocalPlayer.aiStep`'s double tap of forward, after `Player.aiStep` counted
         // `sprintTriggerTime` down above: sneak held, an item in use or the backward key
         // cancels the window. `hasForwardImpulse` is read from the PREVIOUS tick's input
         // (vanilla captures it before `input.tick()`), so the window arms on a tick without
         // forward and starts the sprint on the fresh press inside it. `canStartSprinting` is
-        // evaluated on the current keys — not sprinting, a forward impulse, `isSprintingPossible`
-        // (enough food or may-fly; the not-blind gate is vanilla's `Player.isMobilityRestricted`,
-        // not modelled here), not slowed by an item in use and not moving slowly
-        // (`isMovingSlowly`: crouching or the swimming pose out of water) unless under water.
+        // evaluated on the current keys (`haste_physics::can_start_sprinting`, the same rule the
+        // physics tick applies to the sprint key).
         // The window lasts `options.sprintWindow` ticks (default 7). The sprint key branch
         // (`keyPresses.sprint()`) is the physics tick's own `input.sprint` rule.
         let forward_impulse = input.forward && !input.back;
         if input.sneak || self.is_using_item() || input.back {
             self.sprint_trigger_time = 0;
         }
-        let moving_slowly = self.state.crouching
-            || (self.state.pose == haste_physics::Pose::Swimming && !self.state.in_water);
         let under_water = self.state.eyes_in_water && self.state.in_water;
-        let can_start_sprinting = !self.state.sprinting
-            && forward_impulse
-            && (self.food > SPRINT_FOOD_LEVEL || self.abilities.may_fly)
-            && !self.is_using_item()
-            && (!moving_slowly || under_water);
+        let can_start_sprinting =
+            haste_physics::can_start_sprinting(&self.state, forward_impulse, under_water);
         if can_start_sprinting && !last_input_forward {
             if self.sprint_trigger_time > 0 {
                 phys_input.sprint = true;
@@ -974,6 +977,9 @@ impl LocalPlayer {
         let was_on_ground = self.state.on_ground;
         let pre_tick_pos = self.state.pos;
         let pre_tick_fall = self.state.fall_distance;
+        // The velocity this tick's move starts with (vanilla's `getDeltaMovement` at
+        // `Entity.move`): the step rule's swim-sound volume reads it.
+        let pre_tick_velocity = self.state.velocity;
         // Vanilla's double tap: while the window is armed a fresh press of jump (or the input
         // layer's own double-tap signal) toggles flight; without it a press arms the window for
         // 7 ticks. Vanilla keeps the window while the player swims, and skips the toggle on a
@@ -1021,7 +1027,7 @@ impl LocalPlayer {
             }));
         }
         if self.state.flying != was_flying {
-            self.own_sounds.reset_steps();
+            self.steps.reset();
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
         if ctx.world.is_chunk_loaded(chunk) {
@@ -1040,25 +1046,64 @@ impl LocalPlayer {
                 ctx.blocks,
                 &climb,
             );
-            // Own block sounds of moving: the step rule on the block below the
-            // feet, the fall sound on a hard landing (vanilla plays both on
-            // the client; the server excludes the acting player).
+            // Own block sounds of moving: footsteps from vanilla's step rule, the
+            // fall sound on a hard landing (the server excludes the acting player
+            // from its broadcasts, so the client plays both itself).
             let movement = self.state.pos - pre_tick_pos;
             let sound_type = ctx.env.and_then(|e| {
                 supporting_block_state(self.state.pos, ctx.world)
                     .and_then(|s| e.data.block_sound_type(s))
             });
-            self.own_sounds
-                .after_move(movement, self.state.pos, sound_type, &mut self.sound_out);
-            if !was_on_ground
-                && self.state.on_ground
-                && pre_tick_fall > SAFE_FALL_DISTANCE
-                && !self.state.in_water
-                && !self.state.flying
-            {
-                if let Some(t) = sound_type {
-                    self.own_sounds
-                        .landed_hard(self.state.pos, t, &mut self.sound_out);
+            if let Some(e) = ctx.env {
+                let (supporting, effect, primary) = crate::sound::resolve_step_blocks(
+                    self.state.pos,
+                    &self.state.aabb(&self.attrs),
+                    self.state.on_ground,
+                    ctx.world,
+                    ctx.shapes,
+                    e.data,
+                    self.int.block_tags(),
+                );
+                let steps = crate::sound::StepCtx {
+                    player_pos: self.state.pos,
+                    movement,
+                    velocity: pre_tick_velocity,
+                    on_ground: self.state.on_ground,
+                    flying: self.state.flying,
+                    discrete: self.state.sneaking,
+                    crouching: self.state.crouching,
+                    swimming: self.state.swimming,
+                    in_water: self.state.in_water,
+                    supporting,
+                    effect,
+                    primary,
+                };
+                self.steps.after_move(&steps, &mut self.sound_out);
+            }
+            if !was_on_ground && self.state.on_ground {
+                // Vanilla `Entity.checkFallDamage` runs inside the move that grounds the
+                // player with the fall distance including this tick's final fall (our
+                // physics resets it on grounding, so it is added back here).
+                let fall = pre_tick_fall as f64 - movement.y.min(0.0);
+                let landed_on = supporting_block_state(self.state.pos, ctx.world).zip(sound_type);
+                let rule = ctx.env.and_then(|e| {
+                    landed_on.map(|(state, _)| {
+                        crate::sound::FallBlockRule::of(
+                            state,
+                            self.int.block_tags(),
+                            Some(&e.data.blocks),
+                        )
+                    })
+                });
+                if let (Some((_, t)), Some(rule)) = (landed_on, rule) {
+                    self.fall_sounds.landed(
+                        self.state.pos,
+                        fall,
+                        self.abilities.may_fly,
+                        Some(crate::sound::LandedOn { sound: t }),
+                        rule,
+                        &mut self.sound_out,
+                    );
                 }
             }
         } else {
@@ -1129,16 +1174,15 @@ impl LocalPlayer {
     }
 
     /// Movement send while riding (a passenger never sends position packets: the server owns
-    /// its position): rotation when it changed, else a status-only packet when on-ground or
-    /// collision changed. Sneak dismounts arrive as `player_input`'s shift flag, answered by
-    /// the server with `set_passengers`.
+    /// its position): `LocalPlayer.sendChanges` sends `MovePlayerPacket.Rot` every tick
+    /// unconditionally — the server reads a rider's rotation every tick. Sneak dismounts arrive
+    /// as `player_input`'s shift flag, answered by the server with `set_passengers`.
     fn send_rotation(&mut self, out: &mut Vec<ServerboundPlay>) {
         let s = &self.state;
         if !(s.yaw.is_finite() && s.pitch.is_finite()) {
             tracing::error!("non-finite player state, not sent: {s:?}");
             return;
         }
-        let rot_changed = s.yaw != self.sent.yaw || s.pitch != self.sent.pitch;
         let mut flags = 0;
         if s.on_ground {
             flags |= move_flags::ON_GROUND;
@@ -1146,21 +1190,13 @@ impl LocalPlayer {
         if s.horizontal_collision {
             flags |= move_flags::HORIZONTAL_COLLISION;
         }
-        let status_changed = s.on_ground != self.sent.on_ground
-            || s.horizontal_collision != self.sent.horizontal_collision;
-        if rot_changed {
-            out.push(ServerboundPlay::MovePlayerRot(sb::MovePlayerRot {
-                yaw: s.yaw,
-                pitch: s.pitch,
-                flags,
-            }));
-            self.sent.yaw = s.yaw;
-            self.sent.pitch = s.pitch;
-        } else if status_changed {
-            out.push(ServerboundPlay::MovePlayerStatusOnly(
-                sb::MovePlayerStatusOnly { flags },
-            ));
-        }
+        out.push(ServerboundPlay::MovePlayerRot(sb::MovePlayerRot {
+            yaw: s.yaw,
+            pitch: s.pitch,
+            flags,
+        }));
+        self.sent.yaw = s.yaw;
+        self.sent.pitch = s.pitch;
         self.sent.on_ground = s.on_ground;
         self.sent.horizontal_collision = s.horizontal_collision;
     }
@@ -1234,10 +1270,6 @@ impl LocalPlayer {
     }
 }
 
-/// Vanilla's safe fall distance (the `SAFE_FALL_DISTANCE` attribute's default):
-/// a landing from above this plays the block's fall sound; below it, nothing.
-pub const SAFE_FALL_DISTANCE: f32 = 3.0;
-
 /// The block supporting the player at `pos` (vanilla `Entity.getOnPosLegacy`:
 /// the block at feet y minus 0.2), for step and fall sounds.
 fn supporting_block_state(pos: DVec3, world: &dyn BlockView) -> Option<haste_core::BlockStateId> {
@@ -1277,6 +1309,8 @@ struct TickCtx<'a> {
     shapes: &'a dyn CollisionShapes,
     blocks: &'a dyn BlockPhysics,
     env: Option<&'a interact::InteractEnv<'a>>,
+    /// The `#strider_warm_blocks` resolution for the strider we steer, from the driver.
+    warm_blocks: Option<&'a dyn crate::item_based_steering::WarmBlocks>,
 }
 
 impl TickCtx<'_> {

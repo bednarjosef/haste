@@ -121,10 +121,26 @@ impl Source for CachedSamples {
     }
 }
 
-/// What the worker plays: a streamed decode (music) or a cached, already-decoded sound.
+/// What the worker plays: a streamed decode (music), a cached mono sound (channels
+/// averaged per frame), or a cached stereo file passed through interleaved and untouched.
 pub(super) enum DecodedSource {
     Streamed(Decoder<Cursor<Vec<u8>>>),
     Cached(CachedSamples),
+    Stereo(StereoSamples),
+}
+
+impl DecodedSource {
+    /// The file's channel count. OpenAL plays a multi-channel buffer as-is,
+    /// unpositioned, so everything above 1 bypasses the per-channel panning of
+    /// `ChannelVolume` (which would average the channels down to mono).
+    pub(super) fn channels(&self) -> u16 {
+        match self {
+            // The decoder reports the file's own channels.
+            DecodedSource::Streamed(decoder) => decoder.channels().get(),
+            DecodedSource::Cached(_) => 1,
+            DecodedSource::Stereo(stereo) => stereo.channels,
+        }
+    }
 }
 
 impl Iterator for DecodedSource {
@@ -134,6 +150,7 @@ impl Iterator for DecodedSource {
         match self {
             DecodedSource::Streamed(decoder) => decoder.next(),
             DecodedSource::Cached(cached) => cached.next(),
+            DecodedSource::Stereo(stereo) => stereo.next(),
         }
     }
 
@@ -141,6 +158,7 @@ impl Iterator for DecodedSource {
         match self {
             DecodedSource::Streamed(decoder) => decoder.size_hint(),
             DecodedSource::Cached(cached) => cached.size_hint(),
+            DecodedSource::Stereo(stereo) => stereo.size_hint(),
         }
     }
 }
@@ -150,6 +168,7 @@ impl Source for DecodedSource {
         match self {
             DecodedSource::Streamed(decoder) => decoder.current_span_len(),
             DecodedSource::Cached(cached) => cached.current_span_len(),
+            DecodedSource::Stereo(stereo) => stereo.current_span_len(),
         }
     }
 
@@ -157,6 +176,7 @@ impl Source for DecodedSource {
         match self {
             DecodedSource::Streamed(decoder) => decoder.channels(),
             DecodedSource::Cached(cached) => cached.channels(),
+            DecodedSource::Stereo(stereo) => stereo.channels(),
         }
     }
 
@@ -164,6 +184,7 @@ impl Source for DecodedSource {
         match self {
             DecodedSource::Streamed(decoder) => decoder.sample_rate(),
             DecodedSource::Cached(cached) => cached.sample_rate(),
+            DecodedSource::Stereo(stereo) => stereo.sample_rate(),
         }
     }
 
@@ -171,7 +192,66 @@ impl Source for DecodedSource {
         match self {
             DecodedSource::Streamed(decoder) => decoder.total_duration(),
             DecodedSource::Cached(cached) => cached.total_duration(),
+            DecodedSource::Stereo(stereo) => stereo.total_duration(),
         }
+    }
+}
+
+/// An interleaved multi-channel `Source` over an `Arc`ed, already-decoded sample buffer:
+/// the samples pass through untouched (no downmix), with the file's channel count.
+#[derive(Clone)]
+pub(super) struct StereoSamples {
+    samples: Arc<Vec<Sample>>,
+    channels: u16,
+    sample_rate: u32,
+    /// Sample cursor.
+    cursor: usize,
+}
+
+impl StereoSamples {
+    pub(super) fn new(sound: &DecodedSound) -> Self {
+        Self {
+            samples: Arc::clone(&sound.samples),
+            channels: sound.channels,
+            sample_rate: sound.sample_rate,
+            cursor: 0,
+        }
+    }
+}
+
+impl Iterator for StereoSamples {
+    type Item = Sample;
+
+    fn next(&mut self) -> Option<Sample> {
+        self.samples.get(self.cursor).map(|s| {
+            self.cursor += 1;
+            *s
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.samples.len() - self.cursor;
+        (left, Some(left))
+    }
+}
+
+impl Source for StereoSamples {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(self.channels).expect("validated non-zero at decode")
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(self.sample_rate).expect("validated non-zero at decode")
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        Some(Duration::from_secs_f64(
+            self.size_hint().0 as f64 / self.channels as f64 / self.sample_rate as f64,
+        ))
     }
 }
 
