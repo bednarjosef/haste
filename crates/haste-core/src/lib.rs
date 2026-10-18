@@ -17,6 +17,7 @@ pub mod ids;
 pub mod input;
 pub mod math;
 pub mod model;
+pub mod parts;
 pub mod paths;
 pub mod pos;
 pub mod text;

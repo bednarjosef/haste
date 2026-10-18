@@ -95,12 +95,15 @@ fn model_parts_hide_the_matching_layers() {
     assert!(!ModelParts(0).shown(PlayerModelPart::Cape));
     let mut pose = PoseOverrides::default();
     hide_layers(ModelParts::ALL, &mut pose);
-    assert!(pose.hidden.is_empty());
+    assert_eq!(pose.hidden().count(), 0);
     // everything but the hat (bit 6) and the right sleeve (bit 3)
     hide_layers(ModelParts(0x7f & !(1 << 6) & !(1 << 3)), &mut pose);
     assert_eq!(
-        pose.hidden,
-        vec!["hat".to_owned(), "right_sleeve".to_owned()]
+        pose.hidden().collect::<Vec<_>>(),
+        vec![
+            haste_core::parts::intern("hat"),
+            haste_core::parts::intern("right_sleeve")
+        ]
     );
 }
 

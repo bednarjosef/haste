@@ -22,6 +22,7 @@ pub(super) fn book_model() -> &'static CubeModel {
         tex_height: 32,
         root: ModelPart {
             name: "root".into(),
+            id: haste_core::parts::ROOT,
             pivot: Vec3::ZERO,
             rotation: Vec3::ZERO,
             visible: true,

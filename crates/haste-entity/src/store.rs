@@ -408,10 +408,10 @@ fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedIt
     })
 }
 
-/// Whether a model has a part with this name (humanoid models carry `right_arm`, which only the
+/// Whether a model has a part with this id (humanoid models carry `right_arm`, which only the
 /// armed/armoured layers need).
-fn model_has_part(part: &haste_core::model::ModelPart, name: &str) -> bool {
-    part.name == name || part.children.iter().any(|c| model_has_part(c, name))
+fn model_has_part(part: &haste_core::model::ModelPart, id: haste_core::parts::PartId) -> bool {
+    part.id == id || part.children.iter().any(|c| model_has_part(c, id))
 }
 
 /// The hands, equipment layers and custom head item of an entity: the item in each hand (main
@@ -947,7 +947,7 @@ impl EntityStore {
                                 slot.kind,
                                 &slot.metadata,
                                 baby,
-                                slot.nametag.as_deref(),
+                                slot.metadata.custom_name_plain(),
                                 self.world_age,
                             )
                         });
@@ -958,24 +958,18 @@ impl EntityStore {
                 // shulker's colour byte would).
                 let type_name = crate::registry::entity_type_name(slot.kind);
                 let variant = variant.or_else(|| {
-                    if type_name.as_deref() == Some("minecraft:tropical_fish") {
+                    if type_name == Some("minecraft:tropical_fish") {
                         crate::variants::tropical_fish_model(&slot.metadata)
                     } else {
                         None
                     }
                 });
-                let variant = match type_name.as_deref() {
+                let variant = match type_name {
                     Some("minecraft:shulker") => {
                         match crate::variants::shulker_texture(&slot.metadata) {
-                            Some(texture) => crate::registry::model_for_name("minecraft:shulker")
-                                .map(|mut m| {
-                                    if m.texture != texture {
-                                        let mut c = (*m).clone();
-                                        c.texture = texture.clone();
-                                        m = std::sync::Arc::new(c);
-                                    }
-                                    m
-                                }),
+                            // The colour texture swap is cached per texture (the model is cloned
+                            // once per colour, never per frame).
+                            Some(texture) => crate::variants::shulker_model_for(&texture),
                             None => variant,
                         }
                     }
@@ -988,9 +982,9 @@ impl EntityStore {
                     // have a head part, so the head aim stays on.
                     (Some(v), _) => (v, true, overlays),
                     (None, Some((head, m))) => {
-                        let baby_model = crate::registry::entity_type_name(slot.kind)
+                        let baby_model = type_name
                             .filter(|_| baby)
-                            .and_then(|n| crate::registry::baby_model_for_name(&n));
+                            .and_then(crate::registry::baby_model_for_name);
                         (baby_model.unwrap_or(m), head, overlays)
                     }
                     (None, None) => (
@@ -1028,7 +1022,6 @@ impl EntityStore {
             // renderer's base radius times the living/age scale (0.5 for babies). The player's
             // `AvatarRenderer` uses 0.5.
             let base_shadow = type_name
-                .as_deref()
                 .map(crate::registry::shadow_radius_for_name)
                 .unwrap_or(0.0);
             let shadow_scale = if is_baby { 0.5 } else { 1.0 };
@@ -1038,30 +1031,33 @@ impl EntityStore {
                 base_shadow * shadow_scale
             };
             let shadow_strength = type_name
-                .as_deref()
                 .map(crate::registry::shadow_strength_for_name)
                 .unwrap_or(1.0);
             let invisible = slot.metadata.shared.invisible;
             // `EntityRenderer.extractNameTags`/`shouldShowName`: players always show their name
             // (`Player.shouldShowName`), mobs only a visible custom name (`LivingEntity`), both
             // hidden while invisible (`isVisibleToPlayer`).
-            let custom_name = slot.metadata.custom_name();
             let nametag = if invisible {
                 None
             } else if slot.is_player_type {
                 slot.nametag.clone()
             } else if slot.metadata.custom_name_visible() {
-                custom_name.or_else(|| slot.nametag.clone())
+                // The plain custom name is computed when the metadata changes (it allocates),
+                // never per frame.
+                slot.metadata
+                    .custom_name_plain()
+                    .map(str::to_owned)
+                    .or_else(|| slot.nametag.clone())
             } else {
                 None
             };
             let name_tag_y = crate::registry::name_tag_offset_for_name(
-                type_name.as_deref().unwrap_or(""),
+                type_name.unwrap_or(""),
                 slot.dimensions.1,
             );
             // Equipment layers (held items, armour) are only drawn on humanoid models
             // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
-            let humanoid = has_head && model_has_part(&model.root, "right_arm");
+            let humanoid = has_head && model_has_part(&model.root, haste_core::parts::RIGHT_ARM);
             let (hands, equipment, head_item) = if humanoid {
                 equipment_of(slot, &self.item_components)
             } else {

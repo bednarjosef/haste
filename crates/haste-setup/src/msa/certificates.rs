@@ -53,6 +53,13 @@ pub fn pem_to_der(pem: &str) -> anyhow::Result<Vec<u8>> {
 /// date crate. Fractional seconds are truncated; the offset must be whole minutes (the values
 /// Mojang sends are UTC with milliseconds, but inputs with offsets are handled too).
 pub fn parse_rfc3339(s: &str) -> anyhow::Result<i64> {
+    Ok(parse_rfc3339_millis(s)?.div_euclid(1000))
+}
+
+/// [`parse_rfc3339`] in unix milliseconds (fractions below a millisecond truncated), as
+/// Java's `Instant.parse(..).toEpochMilli()` gives: the chat key's signed payload carries the
+/// expiry in milliseconds, so the seconds are not enough there.
+pub fn parse_rfc3339_millis(s: &str) -> anyhow::Result<i64> {
     let bytes = s.as_bytes();
     let bad = || anyhow!("not an RFC 3339 time: {s:?}");
     anyhow::ensure!(bytes.len() >= 20, "{}", bad());
@@ -89,15 +96,22 @@ pub fn parse_rfc3339(s: &str) -> anyhow::Result<i64> {
         "{}",
         bad()
     );
-    // optional fractional seconds: .fff... (truncated)
+    // optional fractional seconds: .fff... (truncated to milliseconds)
     let mut i = 19;
+    let mut millis = 0i64;
     if bytes.get(i) == Some(&b'.') {
         let start = i + 1;
         i = start;
         while i < bytes.len() && bytes[i].is_ascii_digit() {
+            if i - start < 3 {
+                millis = millis * 10 + i64::from(bytes[i] - b'0');
+            }
             i += 1;
         }
         anyhow::ensure!(i > start, "{}", bad());
+        for _ in (i - start)..3 {
+            millis *= 10;
+        }
     }
     // offset: Z / z / ±hh:mm
     let mut offset_secs = 0i64;
@@ -124,7 +138,7 @@ pub fn parse_rfc3339(s: &str) -> anyhow::Result<i64> {
     // days since 1970-01-01 (civil-from-days, valid for any year i64 can hold)
     let days = days_from_civil(y, mo, d);
     let secs = days * 86400 + h * 3600 + mi * 60 + sec - offset_secs;
-    Ok(secs)
+    Ok(secs * 1000 + millis)
 }
 
 /// Days since 1970-01-01 for a civil (year, month, day); Howard Hinnant's algorithm.
@@ -155,14 +169,40 @@ pub fn parse_player_certificates(json: &str) -> anyhow::Result<PlayerCertificate
             .map_err(|e| anyhow!("decoding publicKeySignatureV2: {e}"))?,
         expires_at: None,
         refreshed_after: None,
+        expires_at_millis: None,
+        refreshed_after_millis: None,
     };
     if !v.expires_at.is_empty() {
-        certs.expires_at = Some(parse_rfc3339(&v.expires_at)?);
+        let ms = parse_rfc3339_millis(&v.expires_at)?;
+        certs.expires_at = Some(ms.div_euclid(1000));
+        certs.expires_at_millis = Some(ms);
     }
     if !v.refreshed_after.is_empty() {
-        certs.refreshed_after = Some(parse_rfc3339(&v.refreshed_after)?);
+        let ms = parse_rfc3339_millis(&v.refreshed_after)?;
+        certs.refreshed_after = Some(ms.div_euclid(1000));
+        certs.refreshed_after_millis = Some(ms);
     }
     Ok(certs)
+}
+
+/// The chat key pair protocol signs with, from the certificates: the v2 signature (the one
+/// vanilla's authlib reads as `publicKeySignature`) and the expiry in milliseconds. `None`
+/// when the response lacked a v2 signature or an expiry.
+pub fn profile_key_pair(c: &PlayerCertificates) -> Option<haste_protocol::ProfileKeyPair> {
+    let expires_at_millis = c.expires_at_millis.or(c.expires_at.map(|s| s * 1000))?;
+    if c.public_key_signature_v2.is_empty() {
+        return None;
+    }
+    Some(haste_protocol::ProfileKeyPair {
+        private_key_der: c.private_key_der.clone(),
+        public_key_der: c.public_key_der.clone(),
+        key_signature: c.public_key_signature_v2.clone(),
+        expires_at_millis,
+        refreshed_after_millis: c
+            .refreshed_after_millis
+            .or(c.refreshed_after.map(|s| s * 1000))
+            .unwrap_or(expires_at_millis),
+    })
 }
 
 /// Minecraft access token -> player profile key pair for chat signing (POST, empty body).

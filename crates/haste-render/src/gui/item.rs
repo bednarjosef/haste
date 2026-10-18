@@ -48,7 +48,7 @@ impl GuiRenderer {
         };
         let Some(prepared) = prepared else {
             // Unknown item: the missing texture, flat.
-            let (rect, _) = self.lookup(&TexKey::Missing, assets);
+            let (rect, _) = self.lookup_ref(TexKeyRef::Key(&TexKey::Missing), assets);
             let r = rect.map(|v| v as f32);
             self.textured(
                 o,
@@ -60,7 +60,7 @@ impl GuiRenderer {
             return;
         };
         for q in &prepared.quads {
-            let (rect, _) = self.lookup(&q.tex, assets);
+            let (rect, _) = self.lookup_ref(TexKeyRef::Key(&q.tex), assets);
             let r = rect.map(|v| v as f32);
             let pos = q.pos.map(|p| [p[0] + x + o[0], p[1] + y + o[1]]);
             let uv = q.uv.map(|t| [r[0] + t[0] * r[2], r[1] + t[1] * r[3]]);

@@ -252,13 +252,6 @@ impl Particles {
             quad,
             color: tint,
             portal_start: pos,
-            light_at: BlockPos::new(
-                pos.x.floor() as i32,
-                pos.y.floor() as i32,
-                pos.z.floor() as i32,
-            ),
-            sky_light: UNSAMPLED,
-            block_light: 0,
             block_sprite: Some(sub),
         };
         self.pool.push(state);

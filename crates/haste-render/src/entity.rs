@@ -12,6 +12,7 @@ use haste_core::model::{
     BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
     ModelPart, PaintingDecoration, PoseOverrides,
 };
+use haste_core::parts::{self, PartId};
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{BlockPos, EntityId, Identifier};
 
@@ -1100,7 +1101,11 @@ impl EntityRenderer {
                 continue;
             };
             let left = i == 1;
-            let arm = if left { "left_arm" } else { "right_arm" };
+            let arm = if left {
+                parts::LEFT_ARM
+            } else {
+                parts::RIGHT_ARM
+            };
             let Some(arm_m) = part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, arm) else {
                 continue;
             };
@@ -1192,7 +1197,9 @@ impl EntityRenderer {
         // (pumpkins, heads), through the head part's animated transform.
         if let Some(idx) = e.head_item {
             if let Some(model) = self.item_model_for(idx, assets) {
-                if let Some(head_m) = part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, "head") {
+                if let Some(head_m) =
+                    part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, parts::HEAD)
+                {
                     let head_root = root * head_m * custom_head_layer_matrix();
                     let mut out = std::mem::take(&mut self.vertices);
                     self.emit_item(
@@ -2443,6 +2450,7 @@ pub(crate) fn arm_model(slim: bool, sleeve: bool) -> CubeModel {
         root: ModelPart {
             // `PartPose.offset(-5, 2, 0)` of the model's right_arm.
             name: "right_arm".into(),
+            id: parts::RIGHT_ARM,
             pivot: Vec3::new(-5.0, 2.0, 0.0),
             // `AvatarRenderer.renderHand`: `rightArm.zRot = 0.1`.
             rotation: Vec3::new(0.0, 0.0, 0.1),
@@ -2451,6 +2459,7 @@ pub(crate) fn arm_model(slim: bool, sleeve: bool) -> CubeModel {
             // `AvatarRenderer.renderHand`: the sleeve shows with the right-sleeve part.
             children: vec![ModelPart {
                 name: "right_sleeve".into(),
+                id: parts::RIGHT_SLEEVE,
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
                 visible: sleeve,
@@ -2810,11 +2819,8 @@ pub(crate) fn aabb_in_frustum(planes: &[glam::Vec4; 6], rel: glam::DVec3, r: f32
         .all(|p| p.x * c.x + p.y * c.y + p.z * c.z + p.w >= -r)
 }
 
-pub(crate) fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
-    pose.rotations
-        .iter()
-        .find(|(n, _)| n == name)
-        .map(|(_, r)| *r)
+pub(crate) fn pose_rotation(pose: &PoseOverrides, id: PartId) -> Option<Vec3> {
+    pose.rotation_of(id)
 }
 
 /// The accumulated model matrix of a named part, the same transform `emit_part` gives it
@@ -2825,20 +2831,20 @@ pub(crate) fn part_matrix(
     part: &ModelPart,
     pose: &PoseOverrides,
     parent: Mat4,
-    name: &str,
+    id: PartId,
 ) -> Option<Mat4> {
-    let rot = part.rotation + pose_rotation(pose, &part.name).unwrap_or(Vec3::ZERO);
+    let rot = part.rotation + pose_rotation(pose, part.id).unwrap_or(Vec3::ZERO);
     let m = parent
         * Mat4::from_translation(part.pivot)
         * Mat4::from_rotation_z(rot.z)
         * Mat4::from_rotation_y(rot.y)
         * Mat4::from_rotation_x(rot.x);
-    if part.name == name {
+    if part.id == id {
         return Some(m);
     }
     part.children
         .iter()
-        .find_map(|c| part_matrix(c, pose, m, name))
+        .find_map(|c| part_matrix(c, pose, m, id))
 }
 
 /// Child pivots are relative to the parent (vanilla `PartPose`); rotation is Z * Y * X around
@@ -2872,10 +2878,10 @@ pub(crate) fn emit_part_tinted(
     hurt: f32,
     tint: [f32; 3],
 ) {
-    if !part.visible || pose.hidden.iter().any(|h| h == &part.name) {
+    if !part.visible || pose.is_hidden(part.id) {
         return;
     }
-    let rot = part.rotation + pose_rotation(pose, &part.name).unwrap_or(Vec3::ZERO);
+    let rot = part.rotation + pose_rotation(pose, part.id).unwrap_or(Vec3::ZERO);
     let m = parent
         * Mat4::from_translation(part.pivot)
         * Mat4::from_rotation_z(rot.z)
@@ -3108,6 +3114,7 @@ fn build_armor_model(slot: haste_core::model::EquipmentSlot) -> Arc<CubeModel> {
     let part =
         |name: &str, pivot: [f32; 3], cubes: Vec<Cube>, children: Vec<ModelPart>| ModelPart {
             name: name.to_owned(),
+            id: parts::intern(name),
             pivot: pivot.into(),
             rotation: Vec3::ZERO,
             visible: true,
@@ -3248,6 +3255,7 @@ pub(crate) fn elytra_model() -> Arc<CubeModel> {
             };
             let wing = |name: &str, pivot: [f32; 3], rotation: [f32; 3], mirror: bool| ModelPart {
                 name: name.to_owned(),
+                id: parts::intern(name),
                 pivot: pivot.into(),
                 rotation: rotation.into(),
                 visible: true,
@@ -3268,6 +3276,7 @@ pub(crate) fn elytra_model() -> Arc<CubeModel> {
                 tex_height: 32,
                 root: ModelPart {
                     name: "root".into(),
+                    id: parts::ROOT,
                     pivot: Vec3::ZERO,
                     rotation: Vec3::ZERO,
                     visible: true,
@@ -3406,6 +3415,7 @@ mod tests {
     fn model_extents_from_a_cube() {
         let part = ModelPart {
             name: "root".into(),
+            id: parts::ROOT,
             pivot: Vec3::ZERO,
             rotation: Vec3::ZERO,
             visible: true,
@@ -3572,6 +3582,7 @@ mod tests {
             tex_height: 64,
             root: ModelPart {
                 name: "root".into(),
+                id: parts::ROOT,
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
                 visible: true,
@@ -3719,6 +3730,7 @@ mod tests {
     fn head_top_of_the_humanoid_layout() {
         let part = ModelPart {
             name: "head".into(),
+            id: parts::HEAD,
             pivot: Vec3::new(0.0, -24.0, 0.0),
             rotation: Vec3::ZERO,
             visible: true,
@@ -4126,24 +4138,25 @@ mod tests {
     fn part_matrix_places_the_hand_at_the_animated_arm() {
         let model = haste_entity_test_humanoid();
         let mut pose = PoseOverrides::default();
-        let rest = part_matrix(&model.root, &pose, Mat4::IDENTITY, "right_arm").unwrap();
+        let rest = part_matrix(&model.root, &pose, Mat4::IDENTITY, parts::RIGHT_ARM).unwrap();
         // The right arm's own pivot (no override): (-5, -22, 0).
         assert_eq!(
             rest.transform_point3(Vec3::ZERO),
             Vec3::new(-5.0, -22.0, 0.0)
         );
         // A pose override rotates the arm about its pivot.
-        pose.rotations.push((
-            "right_arm".into(),
+        pose.set_rotation(
+            parts::RIGHT_ARM,
             Vec3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2),
-        ));
-        let swung = part_matrix(&model.root, &pose, Mat4::IDENTITY, "right_arm").unwrap();
+        );
+        let swung = part_matrix(&model.root, &pose, Mat4::IDENTITY, parts::RIGHT_ARM).unwrap();
         let p = swung.transform_point3(Vec3::new(0.0, 10.0, 0.0));
         assert!(
             (p.x - -15.0).abs() < 1e-4 && (p.y - -22.0).abs() < 1e-4,
             "{p:?}"
         );
-        assert!(part_matrix(&model.root, &pose, Mat4::IDENTITY, "nope").is_none());
+        // A part no model carries resolves to nothing.
+        assert!(part_matrix(&model.root, &pose, Mat4::IDENTITY, parts::intern("nope")).is_none());
     }
 
     /// `CustomHeadLayer.translateToHead`: translate (0, -0.25, 0), rotate Y 180, scale
@@ -4216,12 +4229,14 @@ mod tests {
             tex_height: 64,
             root: ModelPart {
                 name: "root".into(),
+                id: parts::ROOT,
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
                 visible: true,
                 cubes: vec![],
                 children: vec![ModelPart {
                     name: "right_arm".into(),
+                    id: parts::RIGHT_ARM,
                     pivot: Vec3::new(-5.0, -22.0, 0.0),
                     rotation: Vec3::ZERO,
                     visible: true,
