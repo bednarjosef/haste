@@ -267,15 +267,16 @@ impl EntityRenderer {
                 }
                 continue;
             }
-            let texture = match inst.kind {
+            let rect = match inst.kind {
                 crate::blockentity::BlockEntityKind::Chest(m) => {
-                    crate::blockentity::chest_texture(m, inst.half)
+                    self.texture_rect(crate::blockentity::chest_texture(m, inst.half), assets)
                 }
                 crate::blockentity::BlockEntityKind::Shulker(c) => {
-                    crate::blockentity::shulker_texture(c)
+                    self.texture_rect(crate::blockentity::shulker_texture(c), assets)
                 }
                 crate::blockentity::BlockEntityKind::Skull { kind, .. } => {
-                    crate::blockentity::skull_texture(kind)
+                    let t = crate::blockentity::skull_texture(kind);
+                    self.texture_rect(&t, assets)
                 }
                 crate::blockentity::BlockEntityKind::Sign { .. } => unreachable!(),
                 crate::blockentity::BlockEntityKind::Banner { .. } => unreachable!(),
@@ -295,7 +296,6 @@ impl EntityRenderer {
                 | crate::blockentity::BlockEntityKind::EndGateway
                 | crate::blockentity::BlockEntityKind::MovingPiston => unreachable!(),
             };
-            let rect = self.texture_rect(&texture, assets);
             let out = &mut self.vertices;
             let emit = |out: &mut Vec<EntityVertex>,
                         model: &CubeModel,
