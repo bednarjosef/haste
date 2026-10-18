@@ -15,6 +15,8 @@
 use haste_core::entity::Pose;
 use haste_core::math::Vec3;
 use haste_core::model::{BodyOp, BodyTransform, CubeModel, ModelPart, PoseOverrides};
+
+mod crouch;
 use haste_core::parts;
 
 use crate::store::{wrap_degrees, Entity};
@@ -122,7 +124,7 @@ fn model_kind(model: &CubeModel) -> ModelKind {
 /// model's base pose). `has_head` is whether the model has a "head" part; a model with no
 /// recognised setupAnim still gets the head aim if it has one. Allocates only the overrides the
 /// caller's `EntityInstance` already owns.
-pub(crate) fn setup_anim(
+pub fn setup_anim(
     e: &Entity,
     model: &CubeModel,
     has_head: bool,
@@ -135,7 +137,7 @@ pub(crate) fn setup_anim(
     // `LivingEntityRenderer.extractRenderState`: an upside-down entity (Dinnerbone/Grumm) has its
     // look pitch and head yaw negated before any model setup runs.
     let upside = is_upside_down(e);
-    let mut pitch = e.pitch;
+    let mut pitch = e.pitch_at(partial);
     if upside {
         pitch = -pitch;
         head_rel = -head_rel;
@@ -273,11 +275,11 @@ fn fall_flying_scale(ticks: u32) -> f32 {
 /// `LivingEntityRenderer.setupRotations` plus `AvatarRenderer.setupRotations` (players only):
 /// the whole-model rotations the renderer applies between the body yaw and the model scale
 /// (death tilt, sleeping, upside-down, and the player flying/swimming pitch).
-pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> BodyTransform {
+pub fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> BodyTransform {
     let mut b = BodyTransform::default();
     let age = e.tick_count as f32 + partial;
-    // `extractRenderState` negates the look pitch for an upside-down entity.
-    let x_rot = if is_upside_down(e) { -e.pitch } else { e.pitch };
+    // `extractRenderState`: the look pitch interpolated over the tick, negated when upside down.
+    let x_rot = e.pitch_at(partial) * (if is_upside_down(e) { -1.0 } else { 1.0 });
 
     let death = death_time(e, partial);
     if death > 0.0 {
@@ -338,17 +340,17 @@ pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> Body
     b
 }
 
-/// The look pitch in radians, negated for an upside-down entity
-/// (`LivingEntityRenderer.extractRenderState`).
-fn look_pitch(e: &Entity) -> f32 {
-    let pitch = if is_upside_down(e) { -e.pitch } else { e.pitch };
-    pitch.to_radians()
+/// The look pitch in radians, interpolated over the tick (`entity.getXRot(partialTicks)`,
+/// negated for an upside-down entity).
+fn look_pitch(e: &Entity, partial: f32) -> f32 {
+    let p = e.pitch_at(partial);
+    (if is_upside_down(e) { -p } else { p }).to_radians()
 }
 
 /// The head aim: `state.xRot` (look pitch, radians) and `state.yRot` (head yaw relative to the
 /// body). `humanoid` adds the fall-flying/swimming head tip (`HumanoidModel.setupAnim`).
 fn push_head(o: &mut PoseOverrides, e: &Entity, head_rel: f32, partial: f32, humanoid: bool) {
-    let mut head = Vec3::new(look_pitch(e), head_rel.to_radians(), 0.0);
+    let mut head = Vec3::new(look_pitch(e, partial), head_rel.to_radians(), 0.0);
     if humanoid {
         head.x = head_x_rot(e, head.x, partial);
     }
@@ -380,7 +382,7 @@ fn humanoid(
     is_passenger: bool,
     zombie: bool,
 ) {
-    let pitch = look_pitch(e);
+    let pitch = look_pitch(e, partial);
     // Walk swing (`cos(animationPos * 0.6662) * 2 * speed * 0.5` for arms, `* 1.4` for legs).
     let mut ra = Vec3::new((walk_pos * 0.6662 + PI).cos() * walk_speed, 0.0, 0.0);
     let mut la = Vec3::new((walk_pos * 0.6662).cos() * walk_speed, 0.0, 0.0);
@@ -422,9 +424,7 @@ fn humanoid(
         la = Vec3::new(x, y, 0.0);
     }
     if e.metadata.shared.crouching {
-        body.x = 0.5;
-        ra.x += 0.4;
-        la.x += 0.4;
+        crouch::pose(o, &mut body, &mut ra, &mut la);
     }
     ra += bob(age, 1.0);
     la += bob(age, -1.0);

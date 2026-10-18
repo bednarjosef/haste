@@ -28,14 +28,31 @@ pub(crate) struct WindowBench {
 }
 
 impl WindowBench {
-    /// Records one measured frame and the interval since the previous one.
-    pub(crate) fn record(&mut self, sample: BenchSample) {
+    /// Records one measured frame and the interval since the previous one; returns true
+    /// on the frame that exhausts the measured seconds (the run's last). On that frame
+    /// the memory table is printed while the session and renderer still exist — the
+    /// window and both go away right after.
+    pub(crate) fn record(
+        &mut self,
+        sample: BenchSample,
+        session: &Session,
+        renderer: &Renderer,
+    ) -> bool {
         let now = Instant::now();
         if let Some(last) = self.last_frame {
             self.intervals.push((now - last).as_secs_f32() * 1000.0);
         }
         self.last_frame = Some(now);
         self.samples.push(sample);
+        if self
+            .started
+            .is_some_and(|s| s.elapsed().as_secs_f32() >= self.seconds)
+        {
+            print_memory(session, renderer);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -59,6 +76,75 @@ pub(super) fn interval_stats(intervals: &[f32]) -> [f32; 6] {
         at(0.999),
         sorted.last().copied().unwrap_or(0.0),
     ]
+}
+
+/// The memory table, the windowed twin of the offscreen bench's: printed when the measured
+/// seconds elapse (from the frame loop, while the session and renderer still exist — the
+/// window closes right after). Peak and settled RSS, the arenas' GPU buffers, the world's
+/// chunk storage and the JVM's pools, so the memory-diet work has the numbers a real
+/// window produces.
+pub(crate) fn print_memory(session: &Session, renderer: &Renderer) {
+    let (arenas, arena_bytes, arena_used, sections) = renderer.arena_memory();
+    let cpu = renderer.cpu_memory();
+    let world = session.shared.world.read().memory_stats();
+    let jvm = session
+        .shared
+        .ui
+        .lock()
+        .as_ref()
+        .map(|ui| ui.jvm_memory())
+        .unwrap_or_default();
+    let mib = memory::mib;
+    println!(
+        "bench memory: peak RSS {:.1} MiB, {arenas} arenas ({:.1} MiB vertex+index, {:.1} used), {sections} resident sections",
+        mib(memory::peak_rss_kib() * 1024),
+        mib(arena_bytes),
+        mib(arena_used),
+    );
+    let (rss, anon, file) = memory::smaps_rollup_kib();
+    println!(
+        "bench memory: settled Rss {:.1} MiB (Pss_Anon {:.1}, Pss_File {:.1}), gpu resident {:.1} MiB",
+        mib(rss * 1024),
+        mib(anon * 1024),
+        mib(file * 1024),
+        mib(memory::gpu_resident_bytes()),
+    );
+    println!(
+        "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",
+        mib(world.chunks + world.sections + world.heightmaps + world.light + world.block_entities),
+        mib(world.sections),
+        mib(world.heightmaps),
+        mib(world.light),
+        mib(world.block_entities),
+        world.non_empty_sections,
+        mib(cpu.atlas_bytes + cpu.baked_bytes),
+        cpu.mesh_pending,
+    );
+    if !jvm.is_empty() {
+        let mut heap_c = 0;
+        let mut heap_u = 0;
+        let mut meta = 0;
+        let mut code = 0;
+        for line in jvm.lines() {
+            let (k, v) = line.split_once('=').unwrap_or(("", ""));
+            let v: u64 = v.parse().unwrap_or(0);
+            match k {
+                "heap_committed" => heap_c = v,
+                "heap_used" => heap_u = v,
+                "metaspace_used" => meta = v,
+                "code_cache_used" => code = v,
+                _ => {}
+            }
+        }
+        println!(
+            "bench memory: JVM heap {:.1}/{:.1} MiB, metaspace {:.1} MiB, code cache {:.1} MiB",
+            mib(heap_u),
+            mib(heap_c),
+            mib(meta),
+            mib(code),
+        );
+    }
+    memory::print_top_anon_mappings();
 }
 
 /// `--bench-window SECONDS`: the windowed twin of `bench`. Joins like the windowed client

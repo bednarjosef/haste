@@ -257,6 +257,11 @@ fn setup() -> Option<(
     .unwrap();
     let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
     let baked = haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+    // Real occlusion shapes for the lake's fluid faces when the game data is available;
+    // the bench needs the cache anyway (jar + reports), so this is the common path.
+    let occluders = haste_data::GameData::load()
+        .map(|data| fluid::FluidOccluders::from_shapes(&states, &data.shapes, &baked))
+        .unwrap_or_else(|_| fluid::FluidOccluders::absent());
     let tables = MeshTables::new(
         std::sync::Arc::new(tint::TintTable::new(&states)),
         std::sync::Arc::new(
@@ -281,6 +286,7 @@ fn setup() -> Option<(
         )),
         // The bench world is full cubes: AO treats them all as occluders.
         std::sync::Arc::new(haste_render::mesher::AoTable::all_solid(states.len())),
+        std::sync::Arc::new(occluders),
     );
     Some((states, baked, atlas, tables))
 }
@@ -383,7 +389,10 @@ fn mesher_output_stable() {
     // permeability test moved to the one-out cells (vanilla's side + normal)
     // and the zero-light fallback was gated off: the vertices next to
     // occluders change. Quad count, vertices and sprites are unchanged.
-    let expected: u64 = 16_624_786_452_542_720_925;
+    // Then the face-coverage cull (vanilla `Block.shouldRenderFace`'s shape
+    // comparison, mesher/culling.rs) removed the interior faces between
+    // partial blocks that cover each other (snow layers, slabs): fewer quads.
+    let expected: u64 = 3_174_783_879_967_708_120;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

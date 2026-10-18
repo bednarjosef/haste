@@ -955,13 +955,67 @@ sprint() {
   check sprint "double-tapping W made the player cover ${dist} blocks/s (sprint speed)" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book read-book hanging-sign commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand containers-villager-trading)
+# ---- 18. Spectator mode: forced flight, the wheel's fly speed, no vitals, no in-block overlay ----
+# The player is teleported into solid stone (a spectator inside the ground): vanilla draws
+# the caves around it with no suffocation overlay. The fly speed is measured server-side
+# (two `Pos` samples one second apart) while the script holds W: the default 0.05 speed
+# covers more than 5 blocks/s, and after the script scrolls the wheel all the way down
+# (speed 0) the same hold barely moves. The frame lines carry the HUD evidence: a spectator
+# has no hearts and no hunger, and the block overlay never covers the screen.
+spectator() {
+  local log="$LOGDIR/spectator.log"
+  NAME="spe_$$"
+  client_start "$ROOT/scripts/checks/spectator.txt" "$log"
+  wait_online || { check spectator "player never joined" 1; return; }
+  # This branch's own area (x 280, z 0..20, y 95..115: never the shared screenshot spot).
+  local CX=280 CZ=10
+  if wait_shot "$log" spec-setup 90; then
+    rcon "gamemode spectator $NAME" >/dev/null
+    rcon "tp $NAME $CX 105 $CZ 0 0" >/dev/null
+    # The stone cube around the player (the fill itself loads the area's chunks).
+    rcon "fill $((CX - 15)) 95 $((CZ - 15)) $((CX + 15)) 115 $((CZ + 15)) stone" >/dev/null
+  fi
+  local z1= z2= fast=0 slow=0
+  if wait_shot "$log" spec-inside-ground 60; then
+    z1=$(pos_z "$(rcon "data get entity $NAME Pos" 2>/dev/null)")
+    sleep 1
+    z2=$(pos_z "$(rcon "data get entity $NAME Pos" 2>/dev/null)")
+    fast=$(awk -v a="${z1:-0}" -v b="${z2:-0}" 'BEGIN{d=b-a; if (d<0) d=-d; printf "%.2f", d}')
+  fi
+  if wait_shot "$log" spec-fly-slow 60; then
+    z1=$(pos_z "$(rcon "data get entity $NAME Pos" 2>/dev/null)")
+    sleep 1
+    z2=$(pos_z "$(rcon "data get entity $NAME Pos" 2>/dev/null)")
+    slow=$(awk -v a="${z1:-0}" -v b="${z2:-0}" 'BEGIN{d=b-a; if (d<0) d=-d; printf "%.2f", d}')
+  fi
+  wait_exit
+  rcon "fill $((CX - 15)) 95 $((CZ - 15)) $((CX + 15)) 115 $((CZ + 15)) air" >/dev/null
+  echo "--- spectator evidence ---"
+  echo "fly distance in ~1 s at the default speed: ${fast:-<none>} blocks"
+  echo "fly distance in ~1 s after scrolling to speed 0: ${slow:-<none>} blocks"
+  grep -E "script frame\[spec-(inside-ground|hotbar)\]" "$log"
+  local r=0
+  awk -v d="$fast" 'BEGIN{exit !(d>4.5)}' || { echo "spectator flight too slow (or falling)"; r=1; }
+  awk -v d="$slow" 'BEGIN{exit !(d<1.0)}' || { echo "the wheel did not slow the flight"; r=1; }
+  has "$(grep "script frame\[spec-inside-ground\]" "$log")" "block_overlay=no" \
+    || { echo "the in-block overlay covered the screen"; r=1; }
+  has "$(grep "script frame\[spec-hotbar\]" "$log")" "hearts=0, food=0" \
+    || { echo "the spectator HUD drew hearts or hunger"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  echo "screenshots: $ROOT/target/shots/script-spec-inside-ground.png (inside the ground, camera 280 105 10, caves, no overlay), script-spec-hotbar.png (spectator HUD)"
+  check spectator "forced flight, wheel fly speed, no hearts/hunger, no in-block overlay inside the ground" "$r"
+}
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book read-book hanging-sign commandblock sprint spectator containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand containers-villager-trading)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | read-book | hanging-sign | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table | containers-brewing-stand | containers-villager-trading) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | read-book | hanging-sign | commandblock | sprint | spectator | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table | containers-brewing-stand | containers-villager-trading) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

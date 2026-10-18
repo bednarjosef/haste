@@ -267,7 +267,8 @@ pub trait FluidWorld {
     fn solid(&self, p: BlockPos) -> bool;
     /// The neighbour's occlusion shape on the face it shares with a fluid whose face `dir`
     /// points at it (`BlockState.getFaceOcclusionShape(dir.getOpposite())`). The default
-    /// knows only full cubes; a world with block shapes returns slabs and stairs as boxes.
+    /// knows only full cubes; the mesher's view answers from `fluid/occlusion.rs`'s
+    /// per-state table (slabs, stairs and other partial shapes as their boxes).
     fn face_occluder(&self, p: BlockPos, dir: Direction) -> Occluder<'_> {
         let _ = dir;
         if self.opaque(p) {

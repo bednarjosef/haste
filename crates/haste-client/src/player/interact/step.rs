@@ -39,7 +39,13 @@ impl LocalPlayer {
         // `sameDestroyTarget` and `startDestroyBlock` sends the abort with the current face
         // (released: `stopDestroyBlock` aborts with DOWN; a screen open: nothing until it
         // closes).
-        if let Some(slot) = input.hotbar {
+        // Vanilla `Minecraft.handleKeybinds`' hotbar loop: in spectator the digit keys go to
+        // the spectator menu (`SpectatorGui.onHotbarSelected`), never the inventory slot. The
+        // menu itself is not wired up yet, so the pick is dropped rather than sent.
+        if let Some(slot) = input
+            .hotbar
+            .filter(|_| self.game_mode != GameMode::Spectator)
+        {
             if slot <= 8 && slot as i32 != self.held_slot {
                 self.held_slot = slot as i32;
                 self.carried_index = slot as i32;

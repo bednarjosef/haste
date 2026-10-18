@@ -117,13 +117,13 @@ impl WalkAnimationState {
 /// (`ClientPacketListener.handleSwingAnimation` -> `LivingEntity.swing`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SwingState {
-    active: bool,
-    hand: i32,
-    animation: i32,
-    duration: i32,
-    ticks: i32,
-    progress: f32,
-    old_progress: f32,
+    pub(crate) active: bool,
+    pub(crate) hand: i32,
+    pub(crate) animation: i32,
+    pub(crate) duration: i32,
+    pub(crate) ticks: i32,
+    pub(crate) progress: f32,
+    pub(crate) old_progress: f32,
 }
 
 impl SwingState {
@@ -235,7 +235,7 @@ pub struct Entity {
     /// Body yaw at the end of the previous tick (`LivingEntity.yBodyRotO`), for interpolation.
     pub prev_body_yaw: f32,
     /// Head yaw at the previous tick (`LivingEntity.yHeadRotO`), for interpolation.
-    prev_head_yaw: f32,
+    pub(crate) prev_head_yaw: f32,
     /// `LivingEntity.lerpYHeadRot` / `lerpHeadSteps`: the head yaw a `rotate_head` packet asked
     /// for and the ticks left to ease `head_yaw` onto it (`lerpHeadTo(yaw, 3)`).
     lerp_head_yaw: f32,
@@ -279,7 +279,7 @@ pub struct Entity {
 }
 
 impl Entity {
-    fn new(s: &EntitySpawn, dims: &EntityDimensions) -> Entity {
+    pub(crate) fn new(s: &EntitySpawn, dims: &EntityDimensions) -> Entity {
         let type_name = crate::registry::entity_type_name(s.kind);
         let living = if s.kind.0 == 0 {
             true
@@ -393,7 +393,7 @@ impl Entity {
 
 /// `LivingEntity.tick`'s body-rotation step: follow the horizontal movement direction, then
 /// `tickHeadTurn` (0.3 lerp, 50 degree head/body split).
-fn update_body_yaw(e: &mut Entity, d: DVec3) {
+pub(crate) fn update_body_yaw(e: &mut Entity, d: DVec3) {
     let mut target = e.body_yaw;
     let side_dist = (d.x * d.x + d.z * d.z) as f32;
     if side_dist > 0.002_500_000_2 {
@@ -440,6 +440,8 @@ fn model_has_part(part: &haste_core::model::ModelPart, id: haste_core::parts::Pa
 /// the same slot (vanilla `HumanoidArmorLayer.shouldRender`), and the head-slot item when it is
 /// not armour (vanilla `CustomHeadLayer`: pumpkins, heads). The equipment asset id comes from the
 /// item's default `equippable` component; the dye from the stack's `dyed_color` patch.
+/// A tracked entity's synced equipment, resolved through the shared per-slot rules
+/// ([`crate::local_player::equipment_by_slot`]).
 fn equipment_of(
     e: &Entity,
     components: &haste_data::ItemComponents,
@@ -448,40 +450,7 @@ fn equipment_of(
     Vec<haste_core::model::EquipmentPiece>,
     Option<RegistryIndex>,
 ) {
-    use haste_core::model::{EquipmentPiece, EquipmentSlot};
-    let mut hands = [None, None];
-    let mut equipment = Vec::new();
-    let mut head_item = None;
-    for (wire, stack) in &e.equipment {
-        if stack.is_empty() {
-            continue;
-        }
-        let Some(item) = stack.item else { continue };
-        match EquipmentSlot::from_wire(*wire) {
-            Some(EquipmentSlot::MainHand) => hands[0] = Some(item),
-            Some(EquipmentSlot::OffHand) => hands[1] = Some(item),
-            Some(slot) if slot.is_armor() => {
-                let equippable = components.equippable(item);
-                let is_armor = equippable.map(|x| x.slot) == Some(slot);
-                if slot == EquipmentSlot::Head && !is_armor {
-                    // Not a helmet: `CustomHeadLayer` draws it on the head instead.
-                    head_item = Some(item);
-                    continue;
-                }
-                if !is_armor {
-                    continue;
-                }
-                equipment.push(EquipmentPiece {
-                    slot,
-                    item: Some(item),
-                    asset: equippable.and_then(|x| x.asset.clone()),
-                    dye: components.dyed_color(&stack.components_raw),
-                });
-            }
-            _ => {}
-        }
-    }
-    (hands, equipment, head_item)
+    crate::local_player::equipment_by_slot(&e.equipment, components)
 }
 
 pub struct EntityStore {
@@ -1105,7 +1074,7 @@ impl EntityStore {
                 pos,
                 yaw,
                 pitch: slot.pitch_at(partial_tick),
-                head_yaw: slot.head_yaw,
+                head_yaw: slot.head_yaw_at(partial_tick),
                 // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
                 scale: crate::variants::scale_for(slot.kind, &slot.metadata),
                 pose,
