@@ -257,6 +257,15 @@ pub struct FirstPerson {
     pub sleeve: bool,
     pub item: Option<haste_core::RegistryIndex>,
     pub light: (u8, u8),
+    /// The main hand is using an item with the EAT or DRINK animation and ticks left
+    /// (`FirstPersonHandsAndItemsRenderState`: `isUsingItem && useItemRemainingTicks > 0 &&
+    /// useItemHand == MAIN_HAND`): the eat/drink transform replaces the swing.
+    pub use_eat: bool,
+    /// `FirstPersonHandsAndItemsRenderState.useItemRemainingTicks` (`getUseItemRemainingTicks`).
+    pub use_remaining: i32,
+    /// `FirstPersonHandsAndItemsRenderState.mainHandUseDuration` (`Item.getUseDuration`, a
+    /// consumable's `consume_ticks`).
+    pub use_duration: i32,
     /// Swing progress 0..1 while the main hand swings, 0 when it does not
     /// (`FirstPersonHandsAndItemsRenderState`'s `attackValue`).
     pub attack: TickPair,
