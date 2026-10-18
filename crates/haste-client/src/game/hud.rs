@@ -56,7 +56,11 @@ pub(super) fn take_arrival(driver: &mut NetDriver, shared: &Shared, jvm: &mut Hu
     // and class loading are behind it and the render thread never stalls on them.
     if let Some(mut warmup) = jvm.warmup.take() {
         if warmup.step(WARMUP_TICK_BUDGET) {
-            publish(shared, warmup.into_ui());
+            // Packets for the UI kept arriving while it warmed (it was not published, so
+            // the driver backlogged them): hand them over before it goes live.
+            let ui = warmup.into_ui();
+            catch_up(driver, shared, &ui);
+            publish(shared, ui);
         } else {
             jvm.warmup = Some(warmup);
         }
