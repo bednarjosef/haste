@@ -54,7 +54,7 @@ fn non_positional_sound_is_full_gain_and_centred() {
 #[test]
 fn master_volume_zero_silences_everything() {
     let mut engine = SilentEngine::new();
-    engine.set_listener(DVec3::new(0.0, 0.0, 0.0), 0.0);
+    engine.set_listener(DVec3::new(0.0, 0.0, 0.0), 0.0, 0.0);
     engine.play(
         &variant("sounds/a.ogg", 16),
         SoundSource::Block,
@@ -286,7 +286,7 @@ fn stop_by_unknown_event_stops_nothing() {
 fn positional_sound_out_of_range_after_listener_moves_is_silent() {
     let mut engine = SilentEngine::new();
     let sound = variant("sounds/dig/stone1.ogg", 16);
-    engine.set_listener(DVec3::new(0.0, 0.0, 0.0), 0.0);
+    engine.set_listener(DVec3::new(0.0, 0.0, 0.0), 0.0, 0.0);
     engine.play(
         &sound,
         SoundSource::Block,
@@ -300,7 +300,7 @@ fn positional_sound_out_of_range_after_listener_moves_is_silent() {
     assert!((l * l + r * r).sqrt() > 0.7, "in range should be loud");
 
     // Walk away: the same sound is now out of range.
-    engine.set_listener(DVec3::new(1000.0, 0.0, 0.0), 0.0);
+    engine.set_listener(DVec3::new(1000.0, 0.0, 0.0), 0.0, 0.0);
     engine.tick();
     assert_eq!(engine.playing(), 1);
     let (l, r) = engine.gains().next().unwrap();
@@ -311,7 +311,7 @@ fn positional_sound_out_of_range_after_listener_moves_is_silent() {
 fn listener_move_scales_gain_without_replay() {
     let mut engine = SilentEngine::new();
     let sound = variant("sounds/a.ogg", 16);
-    engine.set_listener(DVec3::ZERO, 0.0);
+    engine.set_listener(DVec3::ZERO, 0.0, 0.0);
     engine.play(
         &sound,
         SoundSource::Block,
@@ -322,9 +322,10 @@ fn listener_move_scales_gain_without_replay() {
     );
     engine.tick();
     let (l, r) = engine.gains().next().unwrap();
+    // Linear falloff with reference distance 1: 1 - (8 - 1)/(16 - 1) = 8/15.
     assert!(
-        (l * l + r * r).sqrt() - 0.5 < 1e-5,
-        "half range = half gain"
+        ((l * l + r * r).sqrt() - 8.0 / 15.0).abs() < 1e-5,
+        "8 of 16 blocks"
     );
 }
 
@@ -332,7 +333,7 @@ fn listener_move_scales_gain_without_replay() {
 fn volume_two_sound_is_audible_at_distance_24() {
     // volume 2.0 doubles the audible range to 32, so 24 blocks is still in range.
     let mut engine = SilentEngine::new();
-    engine.set_listener(DVec3::ZERO, 0.0);
+    engine.set_listener(DVec3::ZERO, 0.0, 0.0);
     engine.play(
         &variant("sounds/a.ogg", 16),
         SoundSource::Block,
@@ -343,9 +344,9 @@ fn volume_two_sound_is_audible_at_distance_24() {
     );
     engine.tick();
     let (l, r) = engine.gains().next().unwrap();
-    // gain = min(2, 1) * (1 - 24/32) = 0.25, split over both channels.
+    // gain = min(2, 1) * (1 - (24 - 1)/(32 - 1)) = 8/31, split over both channels.
     let norm = (l * l + r * r).sqrt();
-    assert!((norm - 0.25).abs() < 1e-5, "norm {norm}");
+    assert!((norm - 8.0 / 31.0).abs() < 1e-5, "norm {norm}");
     assert!(l <= 1.0 && r <= 1.0);
 }
 
@@ -354,7 +355,7 @@ fn variant_volume_scales_the_gain() {
     // A variant with volume 0.5 played at volume 1.0 has half the gain of a
     // volume-1.0 variant at the same spot.
     let mut loud = SilentEngine::new();
-    loud.set_listener(DVec3::ZERO, 0.0);
+    loud.set_listener(DVec3::ZERO, 0.0, 0.0);
     loud.play(
         &variant_with("sounds/a.ogg", 16, 1.0, 1.0),
         SoundSource::Block,
@@ -365,7 +366,7 @@ fn variant_volume_scales_the_gain() {
     );
     loud.tick();
     let mut quiet = SilentEngine::new();
-    quiet.set_listener(DVec3::ZERO, 0.0);
+    quiet.set_listener(DVec3::ZERO, 0.0, 0.0);
     quiet.play(
         &variant_with("sounds/a.ogg", 16, 0.5, 1.0),
         SoundSource::Block,
@@ -379,8 +380,9 @@ fn variant_volume_scales_the_gain() {
         let (l, r) = e.gains().next().unwrap();
         (l * l + r * r).sqrt()
     };
-    assert!((norm(&loud) - 0.75).abs() < 1e-5);
-    assert!((norm(&quiet) - 0.375).abs() < 1e-5);
+    // Falloff 1 - (4 - 1)/(16 - 1) = 0.8 for the loud variant, half that for the quiet one.
+    assert!((norm(&loud) - 0.8).abs() < 1e-5);
+    assert!((norm(&quiet) - 0.4).abs() < 1e-5);
 }
 
 #[test]
@@ -420,6 +422,179 @@ fn remove_drops_the_sound_at_the_index() {
     // The first and third sounds survive with their gains.
     engine.tick();
     assert!(total_gains(&engine).0 > 0.0);
+}
+
+#[test]
+fn zero_volume_sound_is_not_started() {
+    // Vanilla's SoundEngine.play: a sound whose whole volume is 0 is skipped — it is not
+    // tracked and never plays. Master 0, source volume 0 or a play volume of 0 all do it.
+    let mut engine = SilentEngine::new();
+    engine.set_volume(SoundSource::Master, 0.0);
+    assert_eq!(
+        engine.play(
+            &variant("sounds/a.ogg", 16),
+            SoundSource::Block,
+            None,
+            1.0,
+            1.0,
+            Arc::from("minecraft:a"),
+        ),
+        super::PlayResult::NotStarted
+    );
+    let mut engine = SilentEngine::new();
+    assert_eq!(
+        engine.play(
+            &variant("sounds/a.ogg", 16),
+            SoundSource::Block,
+            None,
+            0.0,
+            1.0,
+            Arc::from("minecraft:a"),
+        ),
+        super::PlayResult::NotStarted
+    );
+    // A variant volume of 0 counts too (volume * variant volume, clamped).
+    assert_eq!(
+        engine.play(
+            &variant_with("sounds/b.ogg", 16, 0.0, 1.0),
+            SoundSource::Block,
+            None,
+            1.0,
+            1.0,
+            Arc::from("minecraft:b"),
+        ),
+        super::PlayResult::NotStarted
+    );
+    assert_eq!(engine.playing(), 0);
+}
+
+#[test]
+fn zero_volume_music_starts_silently() {
+    // The music exception: a volume-0 music track starts (silently) and is tracked, so a
+    // later volume change can raise it without restarting the track.
+    let mut engine = SilentEngine::new();
+    engine.set_volume(SoundSource::Music, 0.0);
+    assert_eq!(
+        engine.play(
+            &variant("sounds/music/game/calm1.ogg", 16),
+            SoundSource::Music,
+            None,
+            1.0,
+            1.0,
+            Arc::from("minecraft:music.game"),
+        ),
+        super::PlayResult::StartedSilently
+    );
+    assert_eq!(engine.playing(), 1);
+    engine.tick();
+    assert_eq!(engine.gains().next().unwrap(), (0.0, 0.0));
+    // The volume coming back raises the same track, with no restart.
+    engine.set_volume(SoundSource::Music, 1.0);
+    engine.tick();
+    assert_eq!(engine.playing(), 1);
+    let (l, r) = engine.gains().next().unwrap();
+    assert!((l - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "l {l}");
+    assert!((r - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "r {r}");
+}
+
+#[test]
+fn a_stereo_file_plays_unpositioned() {
+    // OpenAL plays a multi-channel buffer as-is, ignoring the source position: a stereo
+    // sound (music, records) plays at full gain, centred, even when it was given a
+    // position far to the side and out of range.
+    let mut engine = SilentEngine::new();
+    engine.set_listener(DVec3::ZERO, 0.0, 0.0);
+    engine.play(
+        &variant("sounds/music/game/calm1.ogg", 16),
+        SoundSource::Record,
+        Some(DVec3::new(100.0, 0.0, 0.0)),
+        1.0,
+        1.0,
+        Arc::from("minecraft:music_disc.cat"),
+    );
+    engine.set_stereo(0);
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    // Full gain, centred: no distance falloff, no panning.
+    assert!((l - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "l {l}");
+    assert!((r - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "r {r}");
+    // The volume still applies (the play volume, the source volume).
+    engine.set_volume(SoundSource::Record, 0.5);
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!(
+        ((l * l + r * r).sqrt() - 0.5).abs() < 1e-5,
+        "norm {}",
+        (l * l + r * r).sqrt()
+    );
+}
+
+#[test]
+fn stopping_everything_resets_the_category_gains() {
+    // SoundEngine.stopAll clears gainBySource, so a faded music source comes back at
+    // full gain for the next track; a filtered stop (or a stop of one source) does not.
+    let mut engine = SilentEngine::new();
+    play_event(
+        &mut engine,
+        &variant("sounds/a.ogg", 16),
+        SoundSource::Music,
+        "minecraft:music.game",
+    );
+    engine.update_category_volume(SoundSource::Music, 0.25);
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!(
+        (l * l + r * r).sqrt() - 0.25 < 1e-5,
+        "the fade gain scales the track"
+    );
+    // A stop with a filter keeps the fade gain.
+    engine.stop(Some(SoundSource::Music), None);
+    play_event(
+        &mut engine,
+        &variant("sounds/a.ogg", 16),
+        SoundSource::Music,
+        "minecraft:music.game",
+    );
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!((l * l + r * r).sqrt() - 0.25 < 1e-5, "still faded");
+    // Stopping everything (both filters absent, vanilla's stopAll path) resets it.
+    engine.stop(None, None);
+    play_event(
+        &mut engine,
+        &variant("sounds/a.ogg", 16),
+        SoundSource::Music,
+        "minecraft:music.game",
+    );
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!(
+        (l * l + r * r).sqrt() - 1.0 < 1e-5,
+        "full gain again after stop-all"
+    );
+}
+
+#[test]
+fn category_gain_clamps_and_multiplies() {
+    // updateCategoryVolume clamps to 0..=1; the gain multiplies with the option volumes.
+    let mut engine = SilentEngine::new();
+    engine.set_volume(SoundSource::Music, 0.5);
+    engine.update_category_volume(SoundSource::Music, 2.0);
+    play_event(
+        &mut engine,
+        &variant("sounds/a.ogg", 16),
+        SoundSource::Music,
+        "minecraft:a",
+    );
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!(
+        (l * l + r * r).sqrt() - 0.5 < 1e-5,
+        "clamped to 1, times option 0.5"
+    );
+    // The master source carries no category gain of its own.
+    engine.update_category_volume(SoundSource::Master, 0.1);
+    assert_eq!(engine.gains().next().unwrap(), (l, r));
 }
 
 #[test]

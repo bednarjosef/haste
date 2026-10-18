@@ -875,7 +875,7 @@ impl LocalPlayer {
             (input.pitch + self.look_offset.1).clamp(-90.0, 90.0),
         );
         if let Some(env) = ctx.env {
-            self.interact_step(look, ctx.world, env, out);
+            self.interact_step(look, input.sneak, ctx.world, env, out);
         }
 
         // 1. player_input when the held keys change (raw keys, as pressed). While riding this
@@ -1129,16 +1129,15 @@ impl LocalPlayer {
     }
 
     /// Movement send while riding (a passenger never sends position packets: the server owns
-    /// its position): rotation when it changed, else a status-only packet when on-ground or
-    /// collision changed. Sneak dismounts arrive as `player_input`'s shift flag, answered by
-    /// the server with `set_passengers`.
+    /// its position): `LocalPlayer.sendChanges` sends `MovePlayerPacket.Rot` every tick
+    /// unconditionally — the server reads a rider's rotation every tick. Sneak dismounts arrive
+    /// as `player_input`'s shift flag, answered by the server with `set_passengers`.
     fn send_rotation(&mut self, out: &mut Vec<ServerboundPlay>) {
         let s = &self.state;
         if !(s.yaw.is_finite() && s.pitch.is_finite()) {
             tracing::error!("non-finite player state, not sent: {s:?}");
             return;
         }
-        let rot_changed = s.yaw != self.sent.yaw || s.pitch != self.sent.pitch;
         let mut flags = 0;
         if s.on_ground {
             flags |= move_flags::ON_GROUND;
@@ -1146,21 +1145,13 @@ impl LocalPlayer {
         if s.horizontal_collision {
             flags |= move_flags::HORIZONTAL_COLLISION;
         }
-        let status_changed = s.on_ground != self.sent.on_ground
-            || s.horizontal_collision != self.sent.horizontal_collision;
-        if rot_changed {
-            out.push(ServerboundPlay::MovePlayerRot(sb::MovePlayerRot {
-                yaw: s.yaw,
-                pitch: s.pitch,
-                flags,
-            }));
-            self.sent.yaw = s.yaw;
-            self.sent.pitch = s.pitch;
-        } else if status_changed {
-            out.push(ServerboundPlay::MovePlayerStatusOnly(
-                sb::MovePlayerStatusOnly { flags },
-            ));
-        }
+        out.push(ServerboundPlay::MovePlayerRot(sb::MovePlayerRot {
+            yaw: s.yaw,
+            pitch: s.pitch,
+            flags,
+        }));
+        self.sent.yaw = s.yaw;
+        self.sent.pitch = s.pitch;
         self.sent.on_ground = s.on_ground;
         self.sent.horizontal_collision = s.horizontal_collision;
     }
