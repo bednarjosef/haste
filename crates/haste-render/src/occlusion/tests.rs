@@ -1,4 +1,6 @@
 use super::*;
+use ahash::AHashMap;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 
 #[test]
@@ -32,14 +34,13 @@ fn wall_splits_west_from_east() {
 
 #[test]
 fn open_grid_reaches_every_section() {
-    // No visibility data => every section is see-through; the walk must
-    // reach every section within render distance.
-    let section_vis: HashMap<(ChunkPos, i32), VisibilitySet> = HashMap::new();
+    // Every section see-through (an all-empty world): the walk must reach every
+    // section within render distance.
     let sc = 8;
     let rd = 6;
     let eye = DVec3::new(8.0, 72.0, 8.0);
     let mask = compute_visible_mask(
-        |c, si| section_vis.get(&(c, si)).copied(),
+        |_, _| VisibilitySet::all(),
         ChunkPos::new(0, 0),
         4,
         eye,
@@ -60,12 +61,55 @@ fn open_grid_reaches_every_section() {
 }
 
 #[test]
+fn unmeshed_sections_block_the_walk() {
+    // No section has data (nothing meshed, nothing known empty): every section
+    // is opaque to the walk, like vanilla's `CompiledSectionMesh.UNCOMPILED`
+    // (`facesCanSeeEachother` is false). The walk reaches the camera section and
+    // its face neighbours (the start node is entered without a source face, so
+    // it steps out regardless of its own opacity), and nothing beyond.
+    let sc = 8;
+    let rd = 6;
+    let eye = DVec3::new(8.0, 72.0, 8.0);
+    let mask = compute_visible_mask(
+        |_, _| VisibilitySet::none(),
+        ChunkPos::new(0, 0),
+        4,
+        eye,
+        0,
+        sc,
+        rd,
+    );
+    // The camera column: section 4 plus the sections above and below.
+    assert_eq!(
+        mask.column(ChunkPos::new(0, 0)),
+        (1u32 << 3) | (1 << 4) | (1 << 5)
+    );
+    // The four face-neighbour columns: only section 4.
+    for (x, z) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        assert_eq!(
+            mask.column(ChunkPos::new(x, z)),
+            1u32 << 4,
+            "column ({x}, {z})"
+        );
+    }
+    // Nothing further out is reached.
+    assert_eq!(mask.column(ChunkPos::new(2, 0)), 0);
+    assert_eq!(mask.column(ChunkPos::new(0, 2)), 0);
+    assert_eq!(mask.column(ChunkPos::new(1, 1)), 0);
+}
+
+#[test]
 fn solid_wall_hides_sections_behind_it() {
     let mut section_vis = HashMap::new();
     section_vis.insert((ChunkPos::new(0, -1), 4), VisibilitySet::none());
     let eye = DVec3::new(8.0, 72.0, 8.0);
     let mask = compute_visible_mask(
-        |c, si| section_vis.get(&(c, si)).copied(),
+        |c, si| {
+            section_vis
+                .get(&(c, si))
+                .copied()
+                .unwrap_or(VisibilitySet::all())
+        },
         ChunkPos::new(0, 0),
         4,
         eye,
@@ -125,7 +169,7 @@ fn reference_visible_mask(
         let vis = section_vis
             .get(&(ChunkPos::new(x, z), si))
             .copied()
-            .unwrap_or(VisibilitySet::all());
+            .unwrap_or(VisibilitySet::none());
         let distant = (x - cam_col.x).abs() > ADV_CULL_SECTION_DIST
             || (si - cam_si).abs() > ADV_CULL_SECTION_DIST
             || (z - cam_col.z).abs() > ADV_CULL_SECTION_DIST;
@@ -267,7 +311,12 @@ fn optimized_walk_matches_reference() {
         );
         let min_y = -8 + (lcg(&mut rng) % 16) as i32;
         let fast = compute_visible_mask(
-            |c, si| section_vis.get(&(c, si)).copied(),
+            |c, si| {
+                section_vis
+                    .get(&(c, si))
+                    .copied()
+                    .unwrap_or(VisibilitySet::none())
+            },
             ChunkPos::new(cam_x, cam_z),
             cam_si,
             eye,
@@ -320,7 +369,9 @@ fn async_walk_matches_sync() {
         }
     }
     let vis = Arc::new(Mutex::new(map));
-    let walker = AsyncOcclusionWalker::new(vis.clone()).unwrap();
+    let walker =
+        AsyncOcclusionWalker::new(vis.clone(), Arc::new(Mutex::new(ahash::AHashMap::new())))
+            .unwrap();
     let cam = ChunkPos::new(1, -1);
     let eye = DVec3::new(20.0, 70.0, -10.0);
     walker.schedule(SectionPos::new(cam.x, 4, cam.z), vd, sc, 0, eye);
@@ -333,7 +384,12 @@ fn async_walk_matches_sync() {
         std::thread::sleep(Duration::from_millis(1));
     };
     let sync = compute_visible_mask(
-        |c, si| vis.lock().get(&(c, si)).copied(),
+        |c, si| {
+            vis.lock()
+                .get(&(c, si))
+                .copied()
+                .unwrap_or(VisibilitySet::none())
+        },
         cam,
         4,
         eye,
@@ -342,6 +398,50 @@ fn async_walk_matches_sync() {
         vd + 1,
     );
     assert_eq!(mask, sync);
+}
+
+/// The worker's walk treats known-empty sections (the empty-columns map, vanilla's
+/// chunk-cache empty sections) as see-through and everything unmeshed as opaque, so
+/// a world of empty sections is fully reached through the worker just like through
+/// the synchronous walk with `VisibilitySet::all`.
+#[test]
+fn walker_passes_through_known_empty_sections() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let sc = 8i32;
+    let rd = 6i32;
+    let mut empty = ahash::AHashMap::new();
+    for x in -rd - 1..=rd + 1 {
+        for z in -rd - 1..=rd + 1 {
+            empty.insert(ChunkPos::new(x, z), (1u32 << sc) - 1);
+        }
+    }
+    let walker = AsyncOcclusionWalker::new(
+        Arc::new(Mutex::new(ahash::AHashMap::new())),
+        Arc::new(Mutex::new(empty)),
+    )
+    .unwrap();
+    let eye = DVec3::new(8.0, 72.0, 8.0);
+    walker.schedule(SectionPos::new(0, 4, 0), rd, sc, 0, eye);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mask = loop {
+        if let Some(m) = walker.poll() {
+            break m;
+        }
+        assert!(Instant::now() < deadline, "worker never finished the walk");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let full = (1u32 << sc) - 1;
+    for x in -rd..=rd {
+        for z in -rd..=rd {
+            assert_eq!(
+                mask.column(ChunkPos::new(x, z)),
+                full,
+                "column ({x}, {z}) not fully reached"
+            );
+        }
+    }
 }
 
 /// The render thread must never run the walk: `schedule` (a channel send)
@@ -372,7 +472,8 @@ fn render_thread_never_walks() {
         }
     }
     let vis = Arc::new(Mutex::new(map));
-    let walker = AsyncOcclusionWalker::new(vis).unwrap();
+    let walker =
+        AsyncOcclusionWalker::new(vis, Arc::new(Mutex::new(ahash::AHashMap::new()))).unwrap();
     let eye = DVec3::new(8.0, 72.0, 8.0);
 
     // Queue enough full walks (each ~ms) that the worker stays busy for the

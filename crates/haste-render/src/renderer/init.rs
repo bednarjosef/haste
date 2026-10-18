@@ -384,7 +384,9 @@ impl Renderer {
             Self::gui_format_for(&gpu, surface_format),
         );
         let section_vis = Arc::new(Mutex::new(ahash::AHashMap::new()));
-        let walk = crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone())?;
+        let known_empty = Arc::new(Mutex::new(ahash::AHashMap::new()));
+        let walk =
+            crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone(), known_empty.clone())?;
 
         Ok(Renderer {
             gpu,
@@ -402,7 +404,11 @@ impl Renderer {
             sections: crate::section_slab::SectionSlab::new(),
             arenas,
             section_vis,
+            known_empty,
             visible_mask: Default::default(),
+            want_version: 0,
+            want_look: None,
+            want_frustum: None,
             camera_spectator: false,
             cull_sections: true,
             visible_for: None,
@@ -412,7 +418,6 @@ impl Renderer {
             bonus_dirty: false,
             walk,
             vis_dirty: false,
-            last_walk: std::time::Instant::now(),
             min_section: -4,
             section_count: 24,
             view_distance: 32,

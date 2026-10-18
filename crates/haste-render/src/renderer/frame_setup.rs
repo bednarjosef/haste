@@ -82,6 +82,7 @@ impl Renderer {
         self.min_section = dim.min_section();
         self.section_count = dim.section_count() as i32;
         self.section_vis.lock().clear();
+        self.known_empty.lock().clear();
         self.visible_for = None;
         self.scheduled_for = None;
         self.walk_in_flight = false;

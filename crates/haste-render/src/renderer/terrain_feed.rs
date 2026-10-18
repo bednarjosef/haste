@@ -11,6 +11,42 @@ use crate::mesher::SectionMesh;
 
 use super::Renderer;
 
+/// What the client knows about a section's blocks, reported as dirty sections are
+/// examined (vanilla: `ClientChunkCache` reports its empty sections to
+/// `SectionOcclusionGraph.updateEmptySections`, and a missing chunk drops the
+/// section's render data).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SectionLoadState {
+    /// The section's chunk is not loaded.
+    Unloaded,
+    /// Loaded and holds no blocks: see-through to the occlusion walk, never meshed.
+    Empty,
+    /// Loaded with blocks.
+    NonEmpty,
+}
+
+/// Sets or clears a column's empty-section bit, dropping the column when its last bit
+/// goes; returns whether the map changed.
+pub(super) fn set_empty_bit(
+    empty: &mut crate::occlusion::EmptyColumns,
+    column: ChunkPos,
+    si: i32,
+    is_empty: bool,
+) -> bool {
+    let bit = 1u32 << si;
+    let bits = *empty.get(&column).unwrap_or(&0);
+    let want = if is_empty { bits | bit } else { bits & !bit };
+    if want == bits {
+        return false;
+    }
+    if want == 0 {
+        empty.remove(&column);
+    } else {
+        empty.insert(column, want);
+    }
+    true
+}
+
 /// Cap on sections meshed but not yet uploaded (the mesher's pending snapshots, queued
 /// results and in-flight jobs). At render distance 32 one section's mesh averages ~50 KiB,
 /// so this bounds the pipeline's RAM to ~150 MiB instead of the whole view distance's
@@ -209,12 +245,14 @@ impl Renderer {
         }
         self.sections.clear();
         self.section_vis.lock().clear();
+        self.known_empty.lock().clear();
         self.visible_mask = Default::default();
         self.visible_for = None;
         self.scheduled_for = None;
         self.walk_in_flight = false;
         self.clear_bonus();
         self.vis_dirty = false;
+        self.want_version += 1;
     }
 
     /// A slab record's arena identity (`MeshArenas::free` input): the packed
@@ -242,6 +280,62 @@ impl Renderer {
         }
         self.bonus_list.clear();
         self.bonus_dirty = false;
+    }
+
+    /// Records what the client knows about a section (`SectionLoadState`). The empty
+    /// bits are the walk's see-through data for sections that have no mesh, so
+    /// unmeshed air never blocks it (vanilla swaps `UNCOMPILED` for `EMPTY` without
+    /// compiling); a bit appearing or disappearing marks the sightline data dirty so
+    /// the walk re-runs, like vanilla's propagation from newly loaded sections.
+    pub fn note_section_state(&mut self, pos: SectionPos, state: SectionLoadState) {
+        let si = pos.y - self.min_section;
+        if !(0..32).contains(&si) {
+            return;
+        }
+        if set_empty_bit(
+            &mut self.known_empty.lock(),
+            ChunkPos::new(pos.x, pos.z),
+            si,
+            state == SectionLoadState::Empty,
+        ) {
+            self.vis_dirty = true;
+        }
+    }
+
+    /// Whether a dirty section may be submitted for meshing this frame: vanilla's
+    /// `LevelExtractor` compiles a section only when it is in `visibleSections` —
+    /// the occlusion walk's set (plus the bonus list, and everything when smart
+    /// culling is off) intersected with the frustum. Held-back sections keep their
+    /// dirty state and mesh when they become visible; one that was meshed before
+    /// keeps its stale mesh until then, as vanilla's does.
+    pub fn wants_section(&self, pos: SectionPos) -> bool {
+        if self.cull_sections {
+            let si = pos.y - self.min_section;
+            let in_mask = (0..32).contains(&si)
+                && self.visible_mask.column(ChunkPos::new(pos.x, pos.z)) & (1u32 << si) != 0;
+            let in_bonus = self.sections.get(pos).is_some_and(|s| s.bonus);
+            if !in_mask && !in_bonus {
+                return false;
+            }
+        }
+        let Some((planes, cam)) = &self.want_frustum else {
+            // No frame has rendered yet: mesh everything until a frustum exists.
+            return true;
+        };
+        // The section cube expanded by the camera cube: vanilla widens the frustum
+        // by `offsetToFullyIncludeCameraCube(8)` when it collects `visibleSections`,
+        // so terrain just outside the view meshes too and turning pops less.
+        let lo = [
+            ((pos.x << 4) as f64 - cam.x - 8.0) as f32,
+            ((pos.y << 4) as f64 - cam.y - 8.0) as f32,
+            ((pos.z << 4) as f64 - cam.z - 8.0) as f32,
+        ];
+        let hi = [
+            ((pos.x << 4) as f64 - cam.x + 24.0) as f32,
+            ((pos.y << 4) as f64 - cam.y + 24.0) as f32,
+            ((pos.z << 4) as f64 - cam.z + 24.0) as f32,
+        ];
+        Self::aabb_visible(planes, lo, hi)
     }
 
     /// A newly uploaded section is drawn until the async walk catches up when a
