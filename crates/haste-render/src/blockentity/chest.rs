@@ -247,3 +247,6 @@ pub(super) fn submit(
         emit_object_part(out, model, part, &pose, root, rect, Vec3::ZERO, light);
     }
 }
+
+#[cfg(test)]
+mod tests;
