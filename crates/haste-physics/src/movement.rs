@@ -208,7 +208,28 @@ pub fn tick_with(
     }
 
     if state.flying {
-        flying::travel(state, input, impulse, attrs, world, shapes, blocks);
+        // vanilla `LocalPlayer.aiStep`: while flying, jump/sneak steer y directly by three
+        // times the flying speed per tick, before the travel.
+        flying::apply_vertical_impulse(state, input, attrs);
+        if state.in_water || state.in_lava {
+            // vanilla `Player.travel`: with flight on, the y velocity is saved, the normal travel
+            // runs (the fluid one in water/lava: `LivingEntity.travel` -> `travelInFluid`), then y
+            // is restored to the saved value times 0.6.
+            let saved_y = state.velocity.y;
+            if state.in_water {
+                fluids::travel_water(state, input, impulse, attrs, world, shapes, blocks, climb);
+            } else {
+                fluids::travel_lava(state, input, impulse, attrs, world, shapes, blocks);
+            }
+            state.velocity.y = saved_y * flying::VERTICAL_FLY_DRAG;
+            // Landing ends creative flight, except for spectators (vanilla `LocalPlayer.aiStep`:
+            // `onGround() && abilities.flying && !gameMode.isSpectator()`).
+            if state.on_ground && !state.spectating {
+                state.flying = false;
+            }
+        } else {
+            flying::travel(state, input, impulse, attrs, world, shapes, blocks);
+        }
     } else if state.in_water {
         // vanilla `LivingEntity.travel`: the fluid branch wins over gliding (entering water
         // switches a glider to swim physics; the server clears the flag separately).
@@ -343,10 +364,10 @@ fn update_player_pose(
 
 /// The movement key vector (f32 throughout, in vanilla's order): `KeyboardInput.tick` builds
 /// (left - right, forward - back) and normalises it (`Vec2.normalized`, so a diagonal is
-/// (0.707, 0.707)); `LocalPlayer.modifyInput` then scales it by 0.98, by the sneak factor while
-/// moving slowly (`LocalPlayer.isMovingSlowly`: `isCrouching() || isVisuallyCrawling()`, the
-/// latter being the swimming pose outside water) and finally stretches it for square movement.
-/// The item-use slowdown is not modelled yet.
+/// (0.707, 0.707)); `LocalPlayer.modifyInput` then scales it by 0.98, by the used item's
+/// `use_effects` speed multiplier while using an item, by the sneak factor while moving slowly
+/// (`LocalPlayer.isMovingSlowly`: `isCrouching() || isVisuallyCrawling()`, the latter being the
+/// swimming pose outside water) and finally stretches it for square movement.
 fn impulse(state: &PlayerState, input: &InputState, attrs: &PlayerAttributes) -> Impulse {
     let forward = (input.forward as i32 - input.back as i32) as f32;
     let strafe = (input.left as i32 - input.right as i32) as f32;
@@ -358,6 +379,16 @@ fn impulse(state: &PlayerState, input: &InputState, attrs: &PlayerAttributes) ->
         strafe: strafe / dist * INPUT_SCALE,
         forward: forward / dist * INPUT_SCALE,
     };
+    // Vanilla `LocalPlayer.modifyInput`: while using an item the input is scaled by the used
+    // stack's `use_effects` speed multiplier (`LocalPlayer.itemUseSpeedMultiplier`, 1.0 when no
+    // item is in use). Vanilla also skips it while riding (`isPassenger()`); riding never
+    // reaches here, because the player's own physics tick does not run while in a vehicle.
+    // `using_item`, not `slow_using_item`: an item whose `use_effects` can sprint still slows
+    // (a stack can carry can_sprint true with a speed multiplier below 1).
+    if state.using_item {
+        imp.strafe *= state.item_use_speed;
+        imp.forward *= state.item_use_speed;
+    }
     let slow = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
     if slow {
         let factor = attrs.sneaking_speed as f32;
@@ -775,6 +806,114 @@ mod tests {
         w // surface 1 + 8/9: depth from the feet 0.389 <= 0.4
     }
 
+    /// A stone floor with the fluid up to y = 19: a player at y = 10 is fully submerged.
+    fn deep_fluid(fluid: haste_core::BlockStateId) -> TestWorld {
+        let mut w = TestWorld::flat(0, STONE);
+        w.fill((-50, 0, -50), (50, 19, 50), fluid);
+        w
+    }
+
+    /// vanilla `Player.travel`: a flying player in water or lava runs the fluid travel
+    /// (`LivingEntity.travel` -> `travelInFluid`), not the flight acceleration, so horizontal
+    /// flight in a fluid is far slower than in air.
+    #[test]
+    fn flying_in_fluid_covers_less_distance_than_flying_in_air() {
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let mut air = PlayerState::at(DVec3::new(0.5, 100.0, 0.5));
+        air.flying = true;
+        let mut water = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        water.flying = true;
+        let mut lava = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        lava.flying = true;
+        for _ in 0..20 {
+            tick(
+                &mut air,
+                &input,
+                &attrs,
+                &TestWorld::new(),
+                &shapes,
+                &shapes,
+            );
+            tick(
+                &mut water,
+                &input,
+                &attrs,
+                &deep_fluid(WATER_SOURCE),
+                &shapes,
+                &shapes,
+            );
+            tick(
+                &mut lava,
+                &input,
+                &attrs,
+                &deep_fluid(LAVA_SOURCE),
+                &shapes,
+                &shapes,
+            );
+        }
+        let air_d = air.pos.z - 0.5;
+        assert!(
+            water.pos.z - 0.5 < air_d * 0.5,
+            "flying in water covers {} blocks against {} in air",
+            water.pos.z - 0.5,
+            air_d
+        );
+        assert!(
+            lava.pos.z - 0.5 < air_d * 0.5,
+            "flying in lava covers {} blocks against {} in air",
+            lava.pos.z - 0.5,
+            air_d
+        );
+        assert_eq!(water.pos.y, 10.0, "the y restore keeps the flyer hovering");
+        assert_eq!(water.velocity.y, 0.0);
+    }
+
+    /// Hand-computed from vanilla's formulas for a flying player in deep water moving forward
+    /// from rest (`LivingEntity.travelInWater` + `Player.travel`): each tick adds 0.98 x 0.02
+    /// (the input scale x the fluid acceleration) to z, moves by it, drags z by the water drag
+    /// 0.8, and `Player.travel` restores y to the tick-start value times 0.6 - 0 every tick here,
+    /// so the flyer hovers.
+    #[test]
+    fn flying_in_water_matches_hand_computed_fluid_travel() {
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let mut s = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        s.flying = true;
+        let a = INPUT_SCALE as f64 * fluids::FLUID_ACCELERATION as f64;
+        let v1 = a;
+        let v2 = v1 * fluids::WATER_DRAG + a;
+        let v3 = v2 * fluids::WATER_DRAG + a;
+        for _ in 0..3 {
+            tick(
+                &mut s,
+                &input,
+                &attrs,
+                &deep_fluid(WATER_SOURCE),
+                &shapes,
+                &shapes,
+            );
+        }
+        assert!(
+            (s.pos.z - (0.5 + v1 + v2 + v3)).abs() < 1e-12,
+            "pos {:?}",
+            s.pos
+        );
+        assert_eq!(s.pos.y, 10.0, "hovering: y never moves");
+        assert_eq!(
+            s.velocity.y, 0.0,
+            "y restored to the tick-start value times 0.6"
+        );
+    }
+
     #[test]
     fn a_player_at_a_pool_edge_is_not_pushed_out_of_the_water() {
         // The live rig: a stone floor (top y 0) with source water z >= 1 and air z < 1. A
@@ -964,6 +1103,64 @@ mod tests {
         tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
         assert_eq!(s.velocity.x, 0.0);
         assert_eq!(s.velocity.z, 0.0);
+    }
+
+    #[test]
+    fn using_an_item_scales_the_walking_input_by_the_use_effects_multiplier() {
+        // Vanilla `LocalPlayer.modifyInput`: while using an item the input is scaled by the
+        // used stack's `use_effects` speed multiplier after the 0.98 input scale. Walking
+        // straight on stone from rest, the per-tick recurrence is v = v_prev + a (the move),
+        // then v *= 0.6 x 0.91, with a = 0.98 x 0.2 (the multiplier) x movement speed 0.1.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        settle(&w, &mut s, &attrs, &shapes);
+        s.using_item = true;
+        s.item_use_speed = 0.2;
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let a = (INPUT_SCALE * 0.2) as f64 * 0.1f32 as f64;
+        let drag = (DEFAULT_SLIPPERINESS * HORIZONTAL_DRAG) as f64;
+        let mut v = 0.0f64;
+        let mut z = s.pos.z;
+        for _ in 0..10 {
+            tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+            v += a;
+            z += v;
+            v *= drag;
+            assert!(
+                (s.pos.z - z).abs() < 1.0e-9,
+                "walked to {} expected {z}",
+                s.pos.z
+            );
+        }
+    }
+
+    #[test]
+    fn using_an_item_at_multiplier_one_is_unchanged() {
+        // A `use_effects` speed multiplier of 1.0 leaves the walk exactly as it is without an
+        // item in use.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let run = |using: bool, speed: f32| {
+            let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+            settle(&w, &mut s, &attrs, &shapes);
+            s.using_item = using;
+            s.item_use_speed = speed;
+            for _ in 0..10 {
+                tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+            }
+            s.pos.z
+        };
+        assert_eq!(run(true, 1.0), run(false, 0.2), "multiplier 1.0 is a no-op");
     }
 
     #[test]

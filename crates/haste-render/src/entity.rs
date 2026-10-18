@@ -23,6 +23,7 @@ mod block_entities;
 mod cape;
 mod equipment;
 mod experience_orb;
+mod flame;
 mod item;
 mod item_frame;
 mod painting;
@@ -61,6 +62,19 @@ pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
+/// Vanilla `Entity.shouldRenderAtSqrDistance`: whether an entity whose model is `size`
+/// blocks and has entity `scale` should be drawn at squared distance `dist_sq`, given the
+/// `view_scale` (`Entity.viewScale`, from `options.entityDistanceScaling`).
+pub fn should_render_at_sqr_distance(
+    size: f32,
+    entity_scale: f32,
+    dist_sq: f64,
+    view_scale: f32,
+) -> bool {
+    let size = if size.is_nan() { 1.0 } else { size };
+    let limit = 64.0 * size.max(1.0) * entity_scale * view_scale;
+    dist_sq < f64::from(limit * limit)
+}
 
 /// Vanilla renders the player model at 15/16 scale.
 const PLAYER_SCALE: f32 = 0.9375;
@@ -290,7 +304,6 @@ pub struct EntityRenderer {
     shadow_buffer: wgpu::Buffer,
     shadow_capacity: usize,
     shadow_vertices: Vec<EntityVertex>,
-    lights: HashMap<EntityId, (u8, u8)>,
     pub nametags: Vec<Nametag>,
     hand_buffer: wgpu::Buffer,
     hand_capacity: usize,
@@ -320,6 +333,7 @@ pub struct EntityRenderer {
     /// This frame's beam radius scale (vanilla `BeaconRenderer.extract`: 1 within 96 blocks
     /// or while scoping, else distance / 96), set per frame by the renderer.
     beam_radius_scale: f32,
+    view_scale: f32,
     /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
     pub beams: crate::blockentity::BeamPipelines,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
@@ -331,17 +345,15 @@ pub struct EntityRenderer {
 }
 
 impl EntityRenderer {
-    /// Sky/block light at each entity's position (sampled by the caller with the world at hand).
-    /// Entities without an entry are drawn at full sky light.
-    pub fn set_lights(&mut self, lights: impl IntoIterator<Item = (EntityId, (u8, u8))>) {
-        self.lights.clear();
-        self.lights.extend(lights);
-    }
-
     /// The beams' radius scale for this frame (vanilla `BeaconRenderer.extract`: 1 within 96
     /// blocks or while scoping, else the horizontal distance / 96).
     pub fn set_beam_radius_scale(&mut self, scale: f32) {
         self.beam_radius_scale = scale;
+    }
+    /// Vanilla `Entity.viewScale` for the entity render distance (from
+    /// `options.entityDistanceScaling`, 0.5..=5.0, default 1.0).
+    pub fn set_view_scale(&mut self, scale: f32) {
+        self.view_scale = scale;
     }
     /// Poses every entity into the vertex buffer. `skip` is the entity the camera is (not drawn
     /// in first person). Positions are camera-relative (`camera` subtracted in f64) like the
@@ -355,6 +367,7 @@ impl EntityRenderer {
         orientation: glam::Quat,
         assets: &mut Assets,
     ) {
+        let view_scale = self.view_scale;
         self.vertices.clear();
         self.nametags.clear();
         self.drawn = 0;
@@ -369,15 +382,14 @@ impl EntityRenderer {
             let (size, half) = model_extents(&e.model.root);
             let rel = e.pos - camera;
             let dist2 = rel.length_squared();
-            let limit = 64.0 * size.max(1.0) * e.scale;
-            if dist2 > f64::from(limit * limit) {
+            if !should_render_at_sqr_distance(size, e.scale, dist2, view_scale) {
                 continue;
             }
             if !aabb_in_frustum(frustum, rel, half + 0.5) {
                 continue;
             }
-            let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
-            // The map is (sky, block); the vertex wants (block, sky).
+            let (sky, block) = e.light;
+            // The instance's light is (sky, block); the vertex wants (block, sky).
             let light = (block, sky);
             if let Some(item) = &e.item {
                 let start = self.vertices.len();
@@ -477,6 +489,10 @@ impl EntityRenderer {
                 }
             }
             self.emit_equipment(e, root, light, assets);
+            // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
+            if e.display_fire {
+                self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
+            }
             if self.vertices.len() > start {
                 self.drawn += 1;
             }

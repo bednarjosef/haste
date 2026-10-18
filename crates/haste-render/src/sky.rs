@@ -1,6 +1,6 @@
 // Sky and weather: the sky dome colour by time of day with the sunrise glow, sun, moon phases,
-// stars, flat clouds from `clouds.png`, rain columns, and the Nether/End backgrounds; plus the
-// fog colour and daylight factor the terrain uses.
+// stars, rain columns, and the Nether/End backgrounds; plus the fog colour and daylight factor
+// the terrain uses. The clouds themselves live in `clouds.rs` (vanilla `CloudRenderer`).
 //
 // The time-of-day curves follow minecraft.wiki "Daylight cycle": the celestial angle is
 // (2d + 0.5 - cos(pi d) / 2) / 3 with d = frac(time / 24000 - 0.25); sky brightness is
@@ -16,14 +16,12 @@ use haste_core::game::DimensionInfo;
 use haste_core::Identifier;
 
 use crate::fog::FogData;
-use crate::{Camera, SkyState};
+use crate::SkyState;
 
 pub mod dark_disc;
 pub mod end_flash;
 
 const ATLAS_SIZE: u32 = 512;
-/// Cloud height in 26.3 (blocks).
-pub const CLOUD_HEIGHT: f32 = 192.33;
 
 const MOON_PHASES: [&str; 8] = [
     "full_moon",
@@ -47,9 +45,8 @@ struct SkyUniforms {
     fog_color: [f32; 4],
     sunrise_color: [f32; 4],
     sunrise_dir: [f32; 4],
-    cam_pos: [f32; 4],
+    /// x: the sky kind (0 overworld, 1 none, 2 end); the other slots are unused.
     params: [f32; 4],
-    clouds: [f32; 4],
     /// Vanilla fog bands for the sky dome (0..sky_end on both distances) and the weather
     /// columns (the terrain bands): env start/end, rd start/end, sky end, cloud end.
     fog_bands: [f32; 4],
@@ -62,7 +59,6 @@ struct SkyUniforms {
     /// The End flash quad's pose (camera rotation frame).
     end_flash_matrix: [[f32; 4]; 4],
     end_rect: [u32; 4],
-    cloud_rect: [u32; 4],
 }
 
 #[repr(C)]
@@ -275,7 +271,6 @@ pub struct SkyRenderer {
     atlas_view: wgpu::TextureView,
     background: wgpu::RenderPipeline,
     celestial: wgpu::RenderPipeline,
-    clouds: wgpu::RenderPipeline,
     /// The sky disc fan (vanilla `SkyRenderer.renderSkyDisc`).
     disc: wgpu::RenderPipeline,
     /// The sunrise/sunset fan (vanilla `renderSunriseAndSunset`).
@@ -310,7 +305,6 @@ pub struct SkyRenderer {
 struct AtlasRects {
     sun: [u32; 4],
     moon: [[u32; 4]; 8],
-    clouds: [u32; 4],
     rain: [u32; 4],
     snow: [u32; 4],
     end_sky: [u32; 4],
@@ -324,8 +318,8 @@ impl SkyRenderer {
         target_format: wgpu::TextureFormat,
         assets: &mut Assets,
     ) -> SkyRenderer {
-        // Environment atlas: sun and moons in the top rows, rain/snow/end sky to the right,
-        // clouds below.
+        // Environment atlas: sun and moons in the top rows, rain/snow/end sky to the
+        // right, the end flash in the row below.
         let mut atlas = image::RgbaImage::new(ATLAS_SIZE, ATLAS_SIZE);
         let mut put = |id: &str, x: u32, y: u32| -> [u32; 4] {
             let img = assets
@@ -351,13 +345,11 @@ impl SkyRenderer {
         // Past the weather tiles (rain 288..352, snow 352..416): the End sky must not
         // overlap them, or the weather pass samples its purple where snow flakes should be.
         let end_sky = put("environment/end_sky", 448, 0);
-        let clouds = put("environment/clouds", 0, 256);
-        // Right of the 256-wide clouds row (vanilla `SkyRenderer.END_FLASH_SPRITE`).
+        // In the row below the weather tiles (vanilla `SkyRenderer.END_FLASH_SPRITE`).
         let end_flash = put("environment/celestial/end_flash", 256, 256);
         let rects = AtlasRects {
             sun,
             moon,
-            clouds,
             rain,
             snow,
             end_sky,
@@ -516,14 +508,6 @@ impl SkyRenderer {
             additive,
             false,
         );
-        let clouds = make(
-            "sky-clouds",
-            "vs_clouds",
-            "fs_clouds",
-            &[],
-            wgpu::BlendState::ALPHA_BLENDING,
-            true,
-        );
         let disc = make(
             "sky-disc",
             "vs_disc",
@@ -609,7 +593,6 @@ impl SkyRenderer {
             atlas_view,
             background,
             celestial,
-            clouds,
             disc,
             sunrise,
             dark_disc_pipeline,
@@ -667,7 +650,6 @@ impl SkyRenderer {
     /// frame's vanilla fog data (renderer.rs `frame_fog`), `fog_color` its sRGB colour.
     pub fn prepare(
         &mut self,
-        camera: &Camera,
         sky: &SkyState,
         view_proj: Mat4,
         rot_view_proj: Mat4,
@@ -700,7 +682,6 @@ impl SkyRenderer {
         self.colors = colors;
         self.dark_disc = kind == SkyKind::Overworld && sky.dark_disc;
         let rain = sky.rain.clamp(0.0, 1.0);
-        let cam = camera.pos.as_vec3();
 
         self.vertices.clear();
         if kind == SkyKind::Overworld {
@@ -754,15 +735,6 @@ impl SkyRenderer {
             [l[0], l[1], l[2], 1.0]
         };
         let sunrise = linear([colors.sunrise[0], colors.sunrise[1], colors.sunrise[2]]);
-        // The clouds take their own weather layers (`WeatherAttributes`: blend to the
-        // greyscale times 0.6 by a factor of 0.5 in rain, times 0.095 by 0.94 in thunder).
-        // For the scalar brightness (a grey value) that is v * (1 - factor + factor *
-        // brightness): rain keeps 0.7 of it, thunder 0.2856.
-        let thunder = (sky.thunder * rain).clamp(0.0, 1.0);
-        let rain_only = (rain - thunder).clamp(0.0, 1.0);
-        let cloud_value = colors.brightness * 0.9 + 0.1;
-        let cloud_value = cloud_value * (1.0 - rain_only * 0.3) * (1.0 - thunder * 0.7144);
-        let cloud_brightness = srgb_to_linear(cloud_value);
         let u = SkyUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             rot_view_proj: rot_view_proj.to_cols_array_2d(),
@@ -772,20 +744,16 @@ impl SkyRenderer {
             fog_color: lin(colors.fog),
             sunrise_color: [sunrise[0], sunrise[1], sunrise[2], colors.sunrise[3]],
             sunrise_dir: [colors.sunrise_side, 0.0, 0.0, colors.star_brightness],
-            cam_pos: [cam.x, cam.y, cam.z, 0.0],
             params: [
-                // Clouds drift east at 0.03 blocks per tick (approximate: world time stands in
-                // for game time).
-                (sky.time_of_day as f64 * 0.03).rem_euclid(256.0 * 12.0) as f32,
-                sky.fog_end,
-                CLOUD_HEIGHT,
+                0.0,
+                0.0,
+                0.0,
                 match kind {
                     SkyKind::Overworld => 0.0,
                     SkyKind::None => 1.0,
                     SkyKind::End => 2.0,
                 },
             ],
-            clouds: [cloud_brightness, 0.8, 0.0, 0.0],
             fog_bands: [
                 fog.environmental_start,
                 fog.environmental_end,
@@ -799,7 +767,6 @@ impl SkyRenderer {
             end_flash_matrix: end_flash::pose(self.end_flash.1, self.end_flash.2)
                 .to_cols_array_2d(),
             end_rect: self.rects.end_sky,
-            cloud_rect: self.rects.clouds,
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
@@ -865,20 +832,6 @@ impl SkyRenderer {
                 calls += 1;
             }
         }
-        calls
-    }
-
-    /// Clouds: last in the main pass, after translucent terrain (the weather columns follow
-    /// through the weather pass's own draw).
-    pub fn draw_overlays<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
-        let mut calls = 0;
-        if self.kind != SkyKind::Overworld {
-            return 0;
-        }
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_pipeline(&self.clouds);
-        pass.draw(0..6, 0..1);
-        calls += 1;
         calls
     }
 }

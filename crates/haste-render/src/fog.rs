@@ -52,7 +52,12 @@ use atmospheric::atmospheric_base;
 use blindness::blindness_darkness;
 use timeline::lerp3;
 use timeline::timeline_sample3;
-use timeline::{FOG_COLOR_NIGHT, SKY_COLOR_NIGHT};
+use timeline::{CLOUD_COLOR_NIGHT, FOG_COLOR_NIGHT, SKY_COLOR_NIGHT};
+
+/// The cloud colour's night multiplier this tick (the timeline's `cloud_color` track).
+pub fn cloud_night_multiplier(time_of_day: i64) -> [f32; 3] {
+    timeline_sample3(&CLOUD_COLOR_NIGHT, time_of_day)
+}
 
 /// `ARGB.vector3fFromRGB24` of an int colour (0xRRGGBB, alpha ignored) as sRGB floats.
 pub const fn rgb24(c: i32) -> [f32; 3] {

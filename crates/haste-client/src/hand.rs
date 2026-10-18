@@ -207,8 +207,10 @@ impl Default for Equip {
 impl Equip {
     /// `Player.tick`'s tickers and item-type check, then `FirstPersonHandsAndItems.tick`.
     /// `stack` is this tick's main-hand stack and `attack_speed` the player's
-    /// `minecraft:attack_speed` attribute.
-    pub fn tick(&mut self, stack: HeldStack, attack_speed: f64) {
+    /// `minecraft:attack_speed` attribute. `hands_busy` is vanilla `LocalPlayer.rideTick`'s
+    /// `handsBusy` (a boat we steer with a movement key held): the busy branch of
+    /// `FirstPersonHandsAndItems.tick` dips the height instead of chasing the target.
+    pub fn tick(&mut self, stack: HeldStack, attack_speed: f64, hands_busy: bool) {
         self.prev_height = self.height;
         self.attack_speed = attack_speed;
         // `Player.tick`: both tickers advance, and a different item type resets both
@@ -227,19 +229,25 @@ impl Equip {
         if self.item != item && !SWAP_ANIMATION {
             self.item = item;
         }
-        // `Player.getItemSwapScale(1.0)`: the equip progress returns over the attack-speed delay.
-        let attack_anim = clamp(
-            (self.swap_ticker as f32 + 1.0) / swap_delay(attack_speed),
-            0.0,
-            1.0,
-        );
-        let target = if self.item != item {
-            0.0
+        if hands_busy {
+            // `FirstPersonHandsAndItems.tick`'s busy branch: the hand dips 0.4 per tick
+            // (clamped to 0) instead of chasing the equip target.
+            self.height = clamp(self.height - HEIGHT_STEP, 0.0, 1.0);
         } else {
-            attack_anim * attack_anim * attack_anim
-        };
-        self.height += clamp(target - self.height, -HEIGHT_STEP, HEIGHT_STEP);
-        self.height = clamp(self.height, 0.0, 1.0);
+            // `Player.getItemSwapScale(1.0)`: the equip progress returns over the attack-speed delay.
+            let attack_anim = clamp(
+                (self.swap_ticker as f32 + 1.0) / swap_delay(attack_speed),
+                0.0,
+                1.0,
+            );
+            let target = if self.item != item {
+                0.0
+            } else {
+                attack_anim * attack_anim * attack_anim
+            };
+            self.height += clamp(target - self.height, -HEIGHT_STEP, HEIGHT_STEP);
+            self.height = clamp(self.height, 0.0, 1.0);
+        }
         if self.height < HEIGHT_SWAP {
             self.item = item;
         }
@@ -409,7 +417,9 @@ impl Hand {
 
     /// One 20 Hz tick. `moved` is the horizontal distance travelled this tick, `look` the
     /// player's rotation (yaw, pitch) in degrees at its end, `item` the main-hand stack and
-    /// `attack_speed` the player's `minecraft:attack_speed` attribute.
+    /// `attack_speed` the player's `minecraft:attack_speed` attribute. `hands_busy` is vanilla
+    /// `LocalPlayer.rideTick`'s `handsBusy`: the boat we steer, a movement key held.
+    #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
         moved: f32,
@@ -418,11 +428,12 @@ impl Hand {
         swimming: bool,
         item: HeldStack,
         attack_speed: f64,
+        hands_busy: bool,
     ) {
         // `LivingEntity.baseTick` runs before `Player.tick` and both run before
         // `FirstPersonHandsAndItems.tick`, which the walk bob precedes (`LocalPlayer.aiStep`).
         self.swing.tick();
-        self.equip.tick(item, attack_speed);
+        self.equip.tick(item, attack_speed, hands_busy);
         self.bob.tick(moved, look, on_ground, swimming);
     }
 
@@ -502,16 +513,33 @@ mod tests {
         Some(RegistryIndex(1))
     }
 
-    /// One vanilla tick: no item held (the bare arm), standing on the ground, no swing.
+    /// One vanilla tick: no item held (the bare arm), standing on the ground, no swing, no
+    /// hands busy.
     fn tick(h: &mut Hand, moved: f32) {
-        h.tick(moved, (0.0, 0.0), true, false, HeldStack::of(None), 4.0);
+        h.tick(
+            moved,
+            (0.0, 0.0),
+            true,
+            false,
+            HeldStack::of(None),
+            4.0,
+            false,
+        );
     }
 
     /// Ticks until the equip progress is back up (vanilla raises the hand in over the first
     /// ticks after joining, since `FirstPersonHandsAndItems` starts at 0).
     fn settle(h: &mut Hand, item: Option<RegistryIndex>) {
         for _ in 0..12 {
-            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(item), 4.0);
+            h.tick(
+                0.0,
+                (0.0, 0.0),
+                true,
+                false,
+                HeldStack::of(item),
+                4.0,
+                false,
+            );
         }
         assert_eq!(h.equip().1, 1.0);
     }
@@ -668,7 +696,15 @@ mod tests {
         settle(&mut h, None);
         let mut seen = Vec::new();
         for _ in 0..6 {
-            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 4.0);
+            h.tick(
+                0.0,
+                (0.0, 0.0),
+                true,
+                false,
+                HeldStack::of(stone()),
+                4.0,
+                false,
+            );
             seen.push((h.equip(), h.shown_item()));
         }
         // 1.0 -> 0.6 -> 0.2 -> 0.0 (the item switches) -> 0.4 -> 0.8.
@@ -688,7 +724,15 @@ mod tests {
         let mut slow = Hand::new();
         settle(&mut slow, None);
         for _ in 0..4 {
-            slow.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.0);
+            slow.tick(
+                0.0,
+                (0.0, 0.0),
+                true,
+                false,
+                HeldStack::of(stone()),
+                1.0,
+                false,
+            );
         }
         assert!(
             (slow.equip().1 - 0.2f32.powi(3)).abs() < 1e-6,
@@ -711,7 +755,7 @@ mod tests {
             item: stone(),
             swap_key: 7,
         };
-        h.tick(0.0, (0.0, 0.0), true, false, more, 4.0);
+        h.tick(0.0, (0.0, 0.0), true, false, more, 4.0, false);
         assert_eq!(h.equip().1, 0.6, "the hand dips 0.4 on the count change");
         assert_eq!(h.shown_item(), stone(), "the old stack is still shown");
         assert_eq!(
@@ -719,7 +763,7 @@ mod tests {
             "no type change: no ticker reset"
         );
         for _ in 0..12 {
-            h.tick(0.0, (0.0, 0.0), true, false, more, 4.0);
+            h.tick(0.0, (0.0, 0.0), true, false, more, 4.0, false);
         }
         assert_eq!(
             h.equip().1,
@@ -734,7 +778,15 @@ mod tests {
         let mut h = Hand::new();
         settle(&mut h, stone());
         for _ in 0..5 {
-            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 4.0);
+            h.tick(
+                0.0,
+                (0.0, 0.0),
+                true,
+                false,
+                HeldStack::of(stone()),
+                4.0,
+                false,
+            );
             assert_eq!(h.equip().1, 1.0, "the held item stays put");
         }
     }
@@ -769,10 +821,26 @@ mod tests {
         }
         // Leaving the ground: the first airborne tick still reads the ground tick's speed, the
         // one after it multiplies the bob by 0.6.
-        h.tick(0.0, (0.0, 0.0), false, false, HeldStack::of(None), 4.0);
+        h.tick(
+            0.0,
+            (0.0, 0.0),
+            false,
+            false,
+            HeldStack::of(None),
+            4.0,
+            false,
+        );
         let in_air = h.bob().1;
         assert!((in_air - (0.09899223 + (0.1 - 0.09899223) * 0.4)).abs() < 1e-6);
-        h.tick(0.0, (0.0, 0.0), false, false, HeldStack::of(None), 4.0);
+        h.tick(
+            0.0,
+            (0.0, 0.0),
+            false,
+            false,
+            HeldStack::of(None),
+            4.0,
+            false,
+        );
         assert!((h.bob().1 - in_air * 0.6).abs() < 1e-6, "{}", h.bob().1);
     }
 
@@ -800,7 +868,15 @@ mod tests {
         let (mut want_yaw, mut want_pitch) = (0.0, 0.0);
         for _ in 0..8 {
             yaw += 10.0;
-            h.tick(0.0, (yaw, yaw / 2.0), true, false, HeldStack::of(None), 4.0);
+            h.tick(
+                0.0,
+                (yaw, yaw / 2.0),
+                true,
+                false,
+                HeldStack::of(None),
+                4.0,
+                false,
+            );
             want_yaw += (yaw - want_yaw) * 0.5;
             want_pitch += (yaw / 2.0 - want_pitch) * 0.5;
         }
@@ -837,11 +913,27 @@ mod tests {
         tick(&mut h, 0.0);
         assert!((h.attack_strength_scale(0.0) - 0.2).abs() < 1e-6);
         // An item type change resets it (`Player.tick`).
-        h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.6);
+        h.tick(
+            0.0,
+            (0.0, 0.0),
+            true,
+            false,
+            HeldStack::of(stone()),
+            1.6,
+            false,
+        );
         assert_eq!(h.attack_strength_scale(0.0), 0.0);
         // The sword's slower attack speed: 12 ticks -> 12 / 12.5 = 0.96.
         for _ in 0..12 {
-            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.6);
+            h.tick(
+                0.0,
+                (0.0, 0.0),
+                true,
+                false,
+                HeldStack::of(stone()),
+                1.6,
+                false,
+            );
         }
         assert!((h.attack_strength_scale(0.0) - 0.96).abs() < 1e-6);
     }
@@ -859,8 +951,88 @@ mod tests {
         let mut h = Hand::new();
         settle(&mut h, stone());
         h.item_used();
-        h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 4.0);
+        h.tick(
+            0.0,
+            (0.0, 0.0),
+            true,
+            false,
+            HeldStack::of(stone()),
+            4.0,
+            false,
+        );
         assert_eq!(h.equip(), (0.0, 0.4));
         assert_eq!(h.shown_item(), stone());
+    }
+
+    #[test]
+    fn steering_a_boat_lowers_the_hand_and_the_keys_released_raise_it() {
+        // vanilla `LocalPlayer.rideTick`'s `handsBusy` (the boat we steer, a movement key held)
+        // and `FirstPersonHandsAndItems.tick`'s busy branch: while busy the height falls by the
+        // 0.4 step each tick (clamped at 0) instead of chasing the equip target, and once the
+        // keys are released it rises back the same way.
+        let mut h = Hand::new();
+        settle(&mut h, stone());
+        for _ in 0..3 {
+            h.tick(
+                0.0,
+                (0.0, 0.0),
+                true,
+                false,
+                HeldStack::of(stone()),
+                4.0,
+                true,
+            );
+        }
+        // 1.0 -> 0.6 -> ~0.2 -> 0.0: three busy ticks of rowing.
+        assert!((h.equip().1 - 0.0).abs() < 1e-6, "{}", h.equip().1);
+        // The swap threshold still applies while busy: the same item stays shown.
+        assert_eq!(h.shown_item(), stone());
+        // A fourth busy tick stays at 0 (the clamp), not below.
+        h.tick(
+            0.0,
+            (0.0, 0.0),
+            true,
+            false,
+            HeldStack::of(stone()),
+            4.0,
+            true,
+        );
+        assert_eq!(h.equip().1, 0.0);
+        // The keys released: the hand chases the equip target up again, 0.4 per tick.
+        for want in [0.4, 0.8, 1.0] {
+            h.tick(
+                0.0,
+                (0.0, 0.0),
+                true,
+                false,
+                HeldStack::of(stone()),
+                4.0,
+                false,
+            );
+            assert!(
+                (h.equip().1 - want).abs() < 1e-6,
+                "{} != {want}",
+                h.equip().1
+            );
+        }
+        // The bare arm dips and rises the same way.
+        let mut bare = Hand::new();
+        settle(&mut bare, None);
+        bare.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(None), 4.0, true);
+        assert!((bare.equip().1 - 0.6).abs() < 1e-6, "{}", bare.equip().1);
+        bare.tick(
+            0.0,
+            (0.0, 0.0),
+            true,
+            false,
+            HeldStack::of(None),
+            4.0,
+            false,
+        );
+        assert_eq!(
+            bare.equip().1,
+            1.0,
+            "released: straight back up from 0.6 to the 1.0 target"
+        );
     }
 }

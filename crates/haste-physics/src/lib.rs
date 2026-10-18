@@ -19,6 +19,7 @@ pub mod movement;
 pub mod raycast;
 pub mod replay;
 mod sprint;
+pub mod suffocation;
 pub mod testing;
 mod trig;
 
@@ -31,6 +32,7 @@ pub use collision::{collide, collide_with_step};
 pub use elytra::{effective_gravity, glide_velocity, look_angle};
 pub use movement::{tick, tick_with};
 pub use sprint::can_start_sprinting;
+pub use suffocation::move_towards_closest_space;
 
 /// The local player's physics state. Positions/velocities are f64 like vanilla; angles f32.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -97,10 +99,26 @@ pub struct PlayerState {
     /// may-fly ability). Set by the client each tick; stops a sprint and keeps it from starting.
     #[serde(default)]
     pub sprint_blocked: bool,
-    /// Slowed by the item in use (vanilla `LocalPlayer.isSlowDueToUsingItem`): a sprint cannot
-    /// start. Set by the client each tick.
+    /// An item is being used over time (vanilla `LivingEntity.isUsingItem`). Set by the client
+    /// each tick.
+    #[serde(default)]
+    pub using_item: bool,
+    /// Slowed by the item in use (vanilla `LocalPlayer.isSlowDueToUsingItem`: using and the
+    /// stack's `use_effects` `can_sprint` false): a sprint cannot start. Set by the client each
+    /// tick.
     #[serde(default)]
     pub slow_using_item: bool,
+    /// The used item's `minecraft:use_effects` speed multiplier (vanilla
+    /// `LocalPlayer.itemUseSpeedMultiplier`: the used stack's component, `UseEffects.DEFAULT`'s
+    /// 0.2 when the item has none), applied to the movement input while using an item
+    /// (`LocalPlayer.modifyInput`). Set by the client each tick; 1.0 when no item is in use.
+    #[serde(default = "item_use_speed_default")]
+    pub item_use_speed: f32,
+}
+
+/// `PlayerState::item_use_speed`'s serde default: 1.0, no item in use.
+fn item_use_speed_default() -> f32 {
+    1.0
 }
 
 impl PlayerState {

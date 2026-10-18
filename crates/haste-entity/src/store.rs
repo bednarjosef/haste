@@ -1117,9 +1117,18 @@ impl EntityStore {
                 shadow_radius,
                 shadow_strength,
                 invisible,
+                // `Entity.displayFireAnimation`: `isOnFire()` (the shared flag, never for a
+                // fire-immune type) and not a spectator (only players can be one; their game
+                // mode is not tracked for remote players yet).
+                display_fire: slot.metadata.shared.on_fire && !self.dims.fire_immune(slot.kind),
+                width: slot.dimensions.0,
+                height: slot.dimensions.1,
                 is_discrete: slot.metadata.shared.crouching,
                 name_tag_y,
                 hurt: hurt_strength(slot),
+                // Full sky until the client samples the world where it builds the frame's
+                // instances (`EntityInstance::sample_light`).
+                light: (15, 0),
                 // Overlay layers (sheep wool, horse markings, collars, the fish pattern):
                 // drawn with the same transform and pose after the base model.
                 overlays,
