@@ -4,6 +4,22 @@
 
 use super::lighting::face_axes;
 use super::sink::{layer_from_index, MeshSink};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Debug switch for the merged-quad crack tests: greedy merging off, so every
+/// face meshes as vanilla does (one quad per block face) and the two meshes
+/// can be rendered and compared pixel by pixel. Read per quad at staging time
+/// (a relaxed atomic load; the quad loop does far more work per quad).
+static GREEDY_MERGE: AtomicBool = AtomicBool::new(true);
+
+/// See [`GREEDY_MERGE`]. Set before the scene's sections are (re)meshed.
+pub fn set_greedy_merge_enabled(on: bool) {
+    GREEDY_MERGE.store(on, Ordering::Relaxed);
+}
+
+pub(super) fn greedy_merge_enabled() -> bool {
+    GREEDY_MERGE.load(Ordering::Relaxed)
+}
 
 /// The greedy-merge signature of a baked quad, if it has one: the positions
 /// must be exactly the full unit face of `quad.direction` (the 0/1 corners on

@@ -21,6 +21,7 @@ mod tests;
 
 pub use dispatch::{Mesher, SnapshotSource};
 pub use face_occlusion::FaceOccluders;
+pub use merge::set_greedy_merge_enabled;
 pub use skip::SkipTable;
 pub use snapshot::MeshSnapshot;
 pub use tables::{AoTable, MeshTables};
@@ -446,7 +447,8 @@ pub fn mesh_section_with(
                         // merged quad, so the pixels stay identical. Translucent
                         // keeps per-quad order (blending between coplanar
                         // faces depends on it).
-                        let mergeable = quad.merge.is_some()
+                        let mergeable = merge::greedy_merge_enabled()
+                            && quad.merge.is_some()
                             && info.layer != RenderLayer::Translucent
                             && lights[0] == lights[1]
                             && lights[1] == lights[2]
