@@ -16,6 +16,7 @@ use haste_core::model::{CubeModel, ModelPart};
 mod animation;
 mod connectivity;
 mod hurt;
+mod local_player;
 mod mob_animation;
 mod model_dump;
 mod models;

@@ -548,6 +548,7 @@ impl Session {
             data,
             world,
             entities,
+            (login.entity_id, login.profile.uuid),
             view_distance,
             haste_render::Particles::new(particle_types.clone()),
             game::skins::SkinManager::new(game_dir().join("skins"), login.profile.uuid),
@@ -885,8 +886,7 @@ impl WorldFeed {
             store.render_instances(partial, &mut self.instances);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
-        self.instances
-            .push(game::player_instance(local.0, view, partial, &own_skin));
+        game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
         (&self.instances, &self.be_instances)
     }
