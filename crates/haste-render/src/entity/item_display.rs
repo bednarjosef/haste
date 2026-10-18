@@ -60,10 +60,11 @@ pub(crate) fn item_frame_transform(facing: haste_core::Direction) -> Mat4 {
         * Mat4::from_rotation_y(y_rot.to_radians())
 }
 
-/// `ItemFrameRenderer.submit`'s item transform: forward to the frame's face, `rotation * 45`
-/// degrees around Z, then scale 0.5.
-pub(crate) fn item_frame_item_transform(rotation: u8) -> Mat4 {
-    Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375))
+/// `ItemFrameRenderer.submit`'s item transform: forward to the frame's face — `0.5` when the
+/// frame is invisible (no border is drawn, so the item sits flush against the wall), `0.4375`
+/// otherwise — then `rotation * 45` degrees around Z and scale 0.5.
+pub(crate) fn item_frame_item_transform(rotation: u8, invisible: bool) -> Mat4 {
+    Mat4::from_translation(Vec3::new(0.0, 0.0, if invisible { 0.5 } else { 0.4375 }))
         * Mat4::from_rotation_z((rotation as f32 * 45.0).to_radians())
         * Mat4::from_scale(Vec3::splat(0.5))
 }

@@ -29,11 +29,14 @@ impl Renderer {
             aspect,
             frame.spin,
         ));
+        let orientation =
+            crate::blockentity::camera_orientation(frame.camera.yaw, frame.camera.pitch);
         self.entity.prepare(
             frame.entities,
             frame.camera_entity,
             frame.camera.pos,
             &entity_frustum,
+            orientation,
             &mut self.assets,
             self.view_scale,
         );
