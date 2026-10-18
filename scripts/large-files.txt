@@ -8,7 +8,7 @@ crates/haste-client/src/app.rs 4164
 crates/haste-client/src/boat.rs 871
 crates/haste-client/src/net/tests.rs 1788
 crates/haste-client/src/player/interact/tests.rs 2205
-crates/haste-client/src/player.rs 1404
+crates/haste-client/src/player.rs 1363
 crates/haste-client/src/player/tests.rs 1713
 crates/haste-client/src/script.rs 1159
 crates/haste-client/src/sound/tests.rs 1163
