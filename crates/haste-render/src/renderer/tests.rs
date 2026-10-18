@@ -231,3 +231,13 @@ fn view_transform_hurt_tilt_turns_the_roll_axis_by_hurt_dir() {
     let want = r(glam::Vec3::Y, -90.0) * r(glam::Vec3::Z, 30.0) * r(glam::Vec3::Y, 90.0);
     assert!(m.abs_diff_eq(want, 1e-6));
 }
+
+#[test]
+fn a_spectator_camera_inside_a_solid_block_turns_the_cull_off() {
+    // `Camera.extractRenderState`: smartCull is only disabled for a spectator camera
+    // that is inside a solid-render block; everyone else keeps the occlusion walk.
+    assert!(super::frame_setup::cull_sections(false, false));
+    assert!(super::frame_setup::cull_sections(false, true));
+    assert!(super::frame_setup::cull_sections(true, false));
+    assert!(!super::frame_setup::cull_sections(true, true));
+}
