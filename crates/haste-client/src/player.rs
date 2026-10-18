@@ -797,6 +797,7 @@ impl LocalPlayer {
             data,
             entities: &[],
             entity_types: &[],
+            border: None,
         };
         self.tick_interact(input, world, &env, None, out);
     }

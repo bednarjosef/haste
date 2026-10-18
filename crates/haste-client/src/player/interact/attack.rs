@@ -85,7 +85,8 @@ impl LocalPlayer {
             }
             Some(Target::Block(h)) if !env.data.is_air(world.block_state(h.pos)) => {
                 // startDestroyBlock, then endAttack when the block is air afterwards.
-                let gone = self.start_destroy(h, world, env, out);
+                // (`Minecraft.startAttack` swings and punches whatever the result.)
+                let (_, gone) = self.start_destroy(h, world, env, out);
                 out.push(ServerboundPlay::Punch(sb::Punch {}));
                 return gone;
             }

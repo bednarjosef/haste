@@ -1074,6 +1074,10 @@ pub struct Session {
     pub lightmap: LightmapState,
     /// The weather state (rain/thunder levels, the rain sound and splash particles).
     pub weather: WeatherState,
+    /// The world border (`minecraft:initialize_border` and the `set_border_*` packets): the
+    /// interaction step gates its packets on it (`useItemOn` fails without a packet outside
+    /// it, `startDestroyBlock` returns false).
+    world_border: crate::world_border::WorldBorder,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
     /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
@@ -1151,6 +1155,7 @@ impl Session {
             particle_names,
             lightmap: LightmapState::default(),
             weather: WeatherState::default(),
+            world_border: crate::world_border::WorldBorder::default(),
             sea_level: 63,
             is_flat: false,
             batch_started_at: None,
@@ -1339,6 +1344,7 @@ impl Session {
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.dimension = dim;
+                self.world_border = crate::world_border::WorldBorder::default();
                 self.entity_id = EntityId(l.entity_id);
                 let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);
@@ -1419,8 +1425,10 @@ impl Session {
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.dimension = dim;
-                // A respawn is a new body: no vehicle, no riding.
+                // A respawn is a new body: no vehicle, no riding. A new level also starts
+                // with vanilla's default border until its initialize_border arrives.
                 self.entity_attributes.clear();
+                self.world_border = crate::world_border::WorldBorder::default();
                 self.player
                     .set_vehicle(None, SeatPoint::ZERO, None, None, None);
             }
@@ -1527,6 +1535,19 @@ impl Session {
             P::GameEvent(g) if g.event == 2 => self.weather.set_rain_level(1.0),
             P::GameEvent(g) if g.event == 7 => self.weather.set_rain_level(g.value),
             P::GameEvent(g) if g.event == 8 => self.weather.set_thunder_level(g.value),
+            // The world border (vanilla `ClientPacketListener`'s border handlers): the
+            // interaction step gates its packets on it. The warning distance and time are
+            // not modelled yet.
+            P::InitializeBorder(b) => {
+                self.world_border
+                    .initialize(b.x, b.z, b.old_diameter, b.new_diameter, b.speed)
+            }
+            P::SetBorderCenter(c) => self.world_border.set_center(c.x, c.z),
+            P::SetBorderLerpSize(s) => {
+                self.world_border
+                    .set_lerp_size(s.old_diameter, s.new_diameter, s.speed)
+            }
+            P::SetBorderSize(s) => self.world_border.set_size(s.diameter),
             _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
@@ -1925,6 +1946,7 @@ impl Session {
                     data,
                     entities: &self.entity_boxes,
                     entity_types: &self.entity_types,
+                    border: Some(&self.world_border),
                 };
                 self.player.tick_interact(input, view, &env, vehicle, out)
             }

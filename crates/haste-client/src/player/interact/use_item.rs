@@ -187,6 +187,15 @@ impl LocalPlayer {
                             pos,
                             kind,
                         }) => {
+                            // `Minecraft.startUseItem`'s ENTITY case returns before anything
+                            // when the entity stands outside the world border: no interact
+                            // packet, no fall-through to the other hand.
+                            if !env
+                                .border
+                                .is_none_or(|b| b.is_within_bounds(BlockPos::from_dvec3(pos)))
+                            {
+                                return;
+                            }
                             // gameMode.interact: the interact packet goes out (the mod-driven
                             // result that decides the swing comes back with the server's answer),
                             // with the hit location relative to the entity and the shift key's
@@ -211,6 +220,13 @@ impl LocalPlayer {
                             }
                         }
                         Some(Target::Block(h)) => {
+                            // `MultiPlayerGameMode.useItemOn` fails before it sends anything
+                            // when the block is outside the world border, and `Minecraft
+                            // .startUseItem` returns on a Fail: no packet, no fall-through to
+                            // `useItem` or the other hand.
+                            if !env.border.is_none_or(|b| b.is_within_bounds(h.pos)) {
+                                return;
+                            }
                             // gameMode.useItemOn: cursor position inside the block, sequence.
                             let seq = self.int.next_sequence();
                             let c = h.location - h.pos.as_dvec3();

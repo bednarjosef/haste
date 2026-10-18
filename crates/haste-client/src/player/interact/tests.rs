@@ -232,6 +232,8 @@ struct Rig {
     w: TestWorld,
     entities: Vec<(EntityId, Aabb)>,
     types: Vec<RegistryIndex>,
+    /// The world border the rig's ticks gate on (`None`: the unlimited default).
+    border: Option<crate::world_border::WorldBorder>,
 }
 
 impl Rig {
@@ -262,6 +264,7 @@ impl Rig {
             w: TestWorld::flat(0, STONE),
             entities: Vec::new(),
             types: Vec::new(),
+            border: None,
         };
         r.tick(InteractInput::default());
         r.tick(InteractInput::default());
@@ -282,6 +285,7 @@ impl Rig {
             data: data(),
             entities: &self.entities,
             entity_types: &self.types,
+            border: self.border.as_ref(),
         };
         let input = InputState {
             pitch: 90.0,
@@ -833,6 +837,7 @@ fn inventory_and_effects_from_packets() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        border: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!(
@@ -905,6 +910,7 @@ fn held_stack_components_drive_mining_speed() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        border: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
@@ -952,6 +958,7 @@ fn use_duration_and_animation_come_from_the_item() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        border: None,
     };
     let d = |i: u32| r.p.int.use_data(&item(i), env.data);
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
@@ -2075,6 +2082,7 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         data: data(),
         entities: &r.entities,
         entity_types: &r.types,
+        border: None,
     };
     let input = InputState {
         pitch: 90.0,
@@ -2192,6 +2200,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             data: data(),
             entities: &r.entities,
             entity_types: &r.types,
+            border: None,
         },
         None,
         &mut rowed,
@@ -2213,6 +2222,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             data: data(),
             entities: &r.entities,
             entity_types: &r.types,
+            border: None,
         },
         None,
         &mut Vec::new(),
@@ -2231,6 +2241,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             data: data(),
             entities: &r.entities,
             entity_types: &r.types,
+            border: None,
         },
         None,
         &mut out,
@@ -2257,6 +2268,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             data: data(),
             entities: &r.entities,
             entity_types: &r.types,
+            border: None,
         },
         None,
         &mut Vec::new(),
@@ -2273,9 +2285,46 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             data: data(),
             entities: &r.entities,
             entity_types: &r.types,
+            border: None,
         },
         None,
         &mut out,
     );
     assert!(matches!(out[0], ServerboundPlay::Punch(_)), "{out:?}");
+}
+
+/// Outside the world border, `MultiPlayerGameMode.useItemOn` fails without a packet (and
+/// `Minecraft.startUseItem` returns on a Fail: no fall-through to `useItem` or the other
+/// hand) and `startDestroyBlock` returns false: the crosshair block sends nothing at all.
+#[test]
+fn outside_the_world_border_no_use_or_break_packet() {
+    // A border of diameter 8 around the origin: the block below (0, -1, 0) is inside.
+    let mut border = crate::world_border::WorldBorder::default();
+    border.initialize(0.0, 0.0, 8.0, 8.0, 0);
+    let mut r = Rig::new(GameMode::Survival);
+    r.border = Some(border);
+    // Inside: a break starts.
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
+    // A use on a block in hand: the use_item_on goes out.
+    r.tick(InteractInput::default());
+    r.p.int.hotbar[0] = item(3); // a stick: no block item, the use falls through
+    let out = r.tick(USE);
+    assert!(matches!(&out[0], ServerboundPlay::UseItemOn(u) if u.pos == BlockPos::new(0, -1, 0)));
+
+    // The same world with the border moved away: the block below is outside now.
+    let mut border = crate::world_border::WorldBorder::default();
+    border.initialize(100.0, 100.0, 8.0, 8.0, 0);
+    let mut r = Rig::new(GameMode::Survival);
+    r.border = Some(border);
+    r.p.int.hotbar[0] = item(3);
+    // The attack click: startDestroyBlock returned false, but `Minecraft.startAttack` swings
+    // and punches whatever the result (and the held button's continueAttack does not: the
+    // restart is refused, no second punch).
+    let out = r.tick(ATTACK);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(matches!(out[0], ServerboundPlay::Punch(_)));
+    // The use: no use_item_on, and no fall-through to use_item either (the Fail returns).
+    let out = r.tick(USE);
+    assert!(out.is_empty(), "{out:?}");
 }

@@ -28,28 +28,36 @@ impl LocalPlayer {
 
     /// `MultiPlayerGameMode.startDestroyBlock`: creative breaks at once (with `destroyDelay` 5,
     /// and nothing with a tool that cannot break blocks in creative); survival starts the
-    /// break and finishes it in the same call when one tick of progress is enough. Returns
-    /// vanilla's `endAttack`: the block is air now (so `Minecraft.startAttack` skips
-    /// `continueAttack` this tick). `Minecraft.startAttack` reads the block state after the
-    /// call; the `startDestroyBlock` return value itself means only "handled".
+    /// break and finishes it in the same call when one tick of progress is enough.
+    ///
+    /// Returns vanilla's pair: `.0` is `startDestroyBlock`'s own "handled" (false only when
+    /// the block cannot be acted on at all — a restricted mode, or outside the world
+    /// border; `Minecraft.continueAttack` swings only then), `.1` the `endAttack`
+    /// `Minecraft.startAttack` reads afterwards (the block is air now, so continueAttack is
+    /// skipped this tick).
     pub(super) fn start_destroy(
         &mut self,
         h: BlockHit,
         world: &dyn BlockView,
         env: &InteractEnv<'_>,
         out: &mut Vec<ServerboundPlay>,
-    ) -> bool {
+    ) -> (bool, bool) {
         let state = world.block_state(h.pos);
         // A block we broke this tick (or whose break the server has not acknowledged yet) is
         // gone for us even if the world has not applied the edit yet.
         let predicted_gone = self.int.predictions.iter().any(|p| p.1 == h.pos);
         if env.data.is_air(state) || predicted_gone {
-            return false;
+            return (false, false);
         }
         // `Player.blockActionRestricted`: spectator (like adventure) never breaks; no packet.
         if self.game_mode == GameMode::Adventure || self.game_mode == GameMode::Spectator {
             // Breaking in adventure depends on the held item's can_break predicate (not decoded).
-            return false;
+            return (false, false);
+        }
+        // `MultiPlayerGameMode.startDestroyBlock` refuses blocks outside the world border the
+        // same way: no packet, nothing predicted.
+        if !env.border.is_none_or(|b| b.is_within_bounds(h.pos)) {
+            return (false, false);
         }
         if self.game_mode == GameMode::Creative {
             // startDestroyBlock has no destroyDelay check: a fresh click breaks at once even
@@ -61,7 +69,7 @@ impl LocalPlayer {
             let can_break = self.can_break_in_creative(env.data);
             // No hit sound or crack: the instabuild branch skips addBreakingBlockEffects.
             self.send_destroy(action::START_DESTROY, h, state, can_break, env, out);
-            return can_break;
+            return (true, can_break);
         }
         if !self.same_destroy_target(h.pos) {
             if self.int.destroying.is_some() {
@@ -78,13 +86,14 @@ impl LocalPlayer {
             }
             self.send_destroy(action::START_DESTROY, h, state, instant, env, out);
             if instant {
-                return true;
+                return (true, true);
             }
             self.int.destroying = Some((h.pos, h.face, self.main_hand().clone()));
             self.int.progress = 0.0;
             self.int.destroy_ticks = 0;
+            return (true, false);
         }
-        false
+        (true, false)
     }
 
     /// `MultiPlayerGameMode.continueDestroyBlock`: the `destroyDelay` countdown, the creative
@@ -102,7 +111,9 @@ impl LocalPlayer {
             self.int.destroy_delay -= 1;
             return true;
         }
-        if self.game_mode == GameMode::Creative {
+        if self.game_mode == GameMode::Creative
+            && env.border.is_none_or(|b| b.is_within_bounds(h.pos))
+        {
             self.int.destroy_delay = DESTROY_DELAY;
             // continueDestroyBlock does not re-check the tool: the packet goes out every 5
             // ticks, but only a breakable block actually changes (Item.canDestroyBlock).
@@ -121,10 +132,10 @@ impl LocalPlayer {
             return false;
         }
         if !self.same_destroy_target(h.pos) {
-            // startDestroyBlock restarts the break and returns "handled" (swing + punch),
-            // whatever became of the new target.
-            self.start_destroy(h, world, env, out);
-            return true;
+            // startDestroyBlock restarts the break and returns its own "handled" — swing and
+            // punch only when the block can be acted on at all.
+            let (handled, _) = self.start_destroy(h, world, env, out);
+            return handled;
         }
         let state = world.block_state(h.pos);
         if env.data.is_air(state) {

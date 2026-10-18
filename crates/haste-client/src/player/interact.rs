@@ -113,7 +113,8 @@ impl Default for InteractAttributes {
     }
 }
 
-/// What the interaction step reads besides the world: game data and nearby entity boxes.
+/// What the interaction step reads besides the world: game data, nearby entity boxes and
+/// the world border.
 pub struct InteractEnv<'a> {
     pub data: &'a haste_data::GameData,
     /// Hit boxes of the entities that can be targeted (not ourselves).
@@ -124,6 +125,9 @@ pub struct InteractEnv<'a> {
     /// (`docs/INTERFACES.md`: `entity_box` carries the entity_type name); the picker only reads
     /// it.
     pub entity_types: &'a [RegistryIndex],
+    /// The world border (`useItemOn` fails without a packet outside it, `startDestroyBlock`
+    /// returns false). `None` is the effectively unlimited default — no border packet yet.
+    pub border: Option<&'a crate::world_border::WorldBorder>,
 }
 
 /// Interaction state of the local player.
