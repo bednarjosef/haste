@@ -41,7 +41,7 @@ mod registry;
 mod tests;
 
 pub use geometry::{
-    corner_heights, flow_direction, should_render_backward_up_face, INSET, MAX_FLUID_HEIGHT,
+    corner_heights, fluid_flow, should_render_backward_up_face, INSET, MAX_FLUID_HEIGHT,
 };
 pub use quads::{fluid_quads, FluidQuad};
 pub use registry::{

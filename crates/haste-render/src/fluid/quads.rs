@@ -5,7 +5,7 @@ use haste_assets::Direction;
 use haste_core::BlockPos;
 
 use crate::fluid::geometry::{
-    corner_heights, flow_direction, should_render_backward_up_face, INSET, MAX_FLUID_HEIGHT,
+    corner_heights, fluid_flow, should_render_backward_up_face, INSET, MAX_FLUID_HEIGHT,
 };
 use crate::fluid::registry::{FluidState, FluidTable, FluidWorld};
 use crate::fluid_occlusion::is_face_occluded;
@@ -78,16 +78,17 @@ pub fn fluid_quads(
             [1.0, ne, 0.0],
         ];
         let corners = [[0.0f32, 0.0f32], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-        let [fx, fz] = flow_direction(h);
+        let [fx, fz] = fluid_flow(world, table, p, fluid);
         let (uvs, sprite) = if fx == 0.0 && fz == 0.0 {
             (corners, still)
         } else {
-            // Texture v runs along the flow, u across it; the window is the middle half of
-            // the flow sprite.
+            // Vanilla rotates the middle-half window of the flow sprite by
+            // `atan2(flow.z, flow.x) - pi/2`: v runs along the flow (u = 0.5 + rz*fx -
+            // rx*fz scaled, v = 0.5 + rx*fx + rz*fz scaled).
             let uvs = corners.map(|[x, z]| {
                 let (rx, rz) = (x - 0.5, z - 0.5);
                 [
-                    0.5 + 0.5 * (rx * -fz + rz * fx),
+                    0.5 + 0.5 * (rx * fz - rz * fx),
                     0.5 + 0.5 * (rx * fx + rz * fz),
                 ]
             });

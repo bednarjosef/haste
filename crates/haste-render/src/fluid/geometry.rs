@@ -72,13 +72,58 @@ pub fn corner_heights(
     [corner(-1, -1), corner(-1, 1), corner(1, 1), corner(1, -1)]
 }
 
-/// Flow direction on the surface (x, z), pointing downhill; zero when flat.
-pub fn flow_direction(h: [f32; 4]) -> [f32; 2] {
-    // h = [nw, sw, se, ne]; +x is east, +z is south.
-    let fx = (h[0] + h[1]) - (h[2] + h[3]);
-    let fz = (h[0] + h[3]) - (h[1] + h[2]);
+/// `FlowingFluid.getFlow`, the horizontal part `FluidRenderer.tesselate` reads: the flow
+/// direction on the surface (x, z), normalized, zero when still. The FALLING branch of the
+/// vanilla method only changes the vector's y component, which `tesselate` never looks at,
+/// so it is not computed. Vanilla's `blocks_fluid_flow` tag check (a neighbour in
+/// `#blocks_motion` or `#all_signs` stops the drop-off pull) uses the mesher's
+/// blocks-motion approximation (`FluidWorld::solid`); signs are its known gap.
+pub fn fluid_flow(
+    world: &dyn FluidWorld,
+    table: &FluidTable,
+    p: BlockPos,
+    fluid: FluidState,
+) -> [f32; 2] {
+    let mut fx = 0.0f32;
+    let mut fz = 0.0f32;
+    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let q = p.add(dx, 0, dz);
+        let neighbour = table.fluid(world.state(q));
+        // affectsFlow: no fluid there, or the same one.
+        let affects = match neighbour {
+            Some(n) => n.fluid == fluid.fluid,
+            None => true,
+        };
+        if !affects {
+            continue;
+        }
+        let neighbour_height = neighbour.map(|n| n.height).unwrap_or(0.0);
+        let mut distance = 0.0f32;
+        if neighbour_height == 0.0 {
+            if !world.solid(q) {
+                let below = table.fluid(world.state(q.add(0, -1, 0)));
+                let below_affects = match below {
+                    Some(b) => b.fluid == fluid.fluid,
+                    None => true,
+                };
+                if below_affects {
+                    let h = below.map(|b| b.height).unwrap_or(0.0);
+                    if h > 0.0 {
+                        distance = fluid.height - (h - MAX_FLUID_HEIGHT);
+                    }
+                }
+            }
+        } else if neighbour_height > 0.0 {
+            distance = fluid.height - neighbour_height;
+        }
+        if distance != 0.0 {
+            fx += dx as f32 * distance;
+            fz += dz as f32 * distance;
+        }
+    }
+    // Vec3.normalize: below 1.0E-4 the vector counts as zero.
     let len = (fx * fx + fz * fz).sqrt();
-    if len < 1e-4 {
+    if len < 1.0e-4 {
         [0.0, 0.0]
     } else {
         [fx / len, fz / len]
