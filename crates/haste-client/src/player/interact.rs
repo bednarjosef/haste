@@ -54,13 +54,12 @@ mod packets;
 mod pick;
 mod step;
 mod use_item;
+use effects::EffectIds;
 pub(crate) use effects::{LightmapEffectIds, MovementEffectIds};
 pub use pick::Target;
 pub use use_item::UsingItem;
-// Re-exported for `player/tests.rs` (`interact::swap_key`); the parent itself no longer
-// calls it since `refresh_components` moved to `held_item`.
-use effects::EffectIds;
-#[allow(unused_imports)]
+// `player/tests.rs` calls it as `interact::swap_key`.
+#[cfg(test)]
 pub(crate) use held_item::swap_key;
 use held_item::HeldItem;
 
