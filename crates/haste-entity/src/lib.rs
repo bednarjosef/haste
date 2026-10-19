@@ -10,6 +10,7 @@ pub mod item_entity;
 pub mod lerp;
 pub mod local_player;
 pub mod metadata;
+pub mod minecart;
 pub mod model_dump;
 pub mod models;
 pub mod registry;

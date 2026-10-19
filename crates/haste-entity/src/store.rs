@@ -565,6 +565,16 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 70 (`MinecartTNT.handleEntityEvent` -> `primeFuse`): the TNT cart's fuse
+    /// starts at 80 ticks and counts down client-side (`MinecartTNT.tick`).
+    pub fn prime_tnt_minecart(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                crate::minecart::prime(&mut e.metadata);
+            }
+        }
+    }
+
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
         let Some(e) = &mut self.slots[i as usize] else {
@@ -733,6 +743,9 @@ impl EntityStore {
             slot.swell = (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
             // `IronGolem.tick`: the attack animation tick counts down.
             slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
+            // `AbstractMinecart.tick`'s countdowns (hurt time, damage, the TNT cart's fuse);
+            // read only by minecarts, harmless elsewhere.
+            crate::minecart::tick(&mut slot.metadata);
             // `LivingEntity.tick`: fallFlyTicks counts while the fall-flying flag is set.
             if slot.metadata.shared.elytra_flying {
                 slot.fall_flying_ticks = slot.fall_flying_ticks.saturating_add(1);
@@ -774,16 +787,27 @@ impl EntityStore {
         for slot in self.slots.iter().flatten() {
             // Hanging entities (item frames, paintings) are drawn specially, and the client
             // moved them to the bounding-box centre vanilla's `recalculateBoundingBox` computes
-            // (the spawn packet carries the block position, not the render origin).
-            let decoration = crate::decoration::build(
-                slot.kind,
-                slot.data,
-                &slot.metadata,
-                &self.painting_variants,
-                slot.id.0,
-                slot.tick_count as f32 + partial_tick,
-            );
-            let pos = if decoration.is_some() {
+            // (the spawn packet carries the block position, not the render origin). Minecarts
+            // draw through their own renderer as well (`AbstractMinecartRenderer`), but keep
+            // the entity's own interpolated position.
+            let minecart_variant = crate::minecart::variant_for_kind(slot.kind);
+            let minecart = minecart_variant
+                .map(|v| crate::minecart::decoration(&slot.metadata, v, partial_tick));
+            let decoration = minecart
+                .map(haste_core::model::Decoration::Minecart)
+                .or_else(|| {
+                    crate::decoration::build(
+                        slot.kind,
+                        slot.data,
+                        &slot.metadata,
+                        &self.painting_variants,
+                        slot.id.0,
+                        slot.tick_count as f32 + partial_tick,
+                    )
+                });
+            let pos = if minecart_variant.is_some() {
+                slot.prev_pos.lerp(slot.pos, partial_tick as f64)
+            } else if decoration.is_some() {
                 crate::decoration::render_center(
                     slot.kind,
                     slot.data,
@@ -844,6 +868,12 @@ impl EntityStore {
                 let entry = crate::registry::model_entry(slot.kind);
                 let overlays = crate::variants::overlays_for(slot.kind, &slot.metadata, baby);
                 match (variant, entry) {
+                    // Minecarts draw through `AbstractMinecartRenderer` with the one
+                    // `MinecartModel` layer every minecart type bakes (`MinecartModel
+                    // .createBodyLayer`); cargo and track pose come from the decoration.
+                    _ if minecart_variant.is_some() => {
+                        (crate::minecart::model(), false, Default::default())
+                    }
                     // A variant model (already the baby's when `baby`); all six variant mobs
                     // have a head part, so the head aim stays on.
                     (Some(v), _) => (v, true, overlays),
