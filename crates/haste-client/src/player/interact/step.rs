@@ -99,13 +99,8 @@ impl LocalPlayer {
         // held item of that hand and its duration.
         if let Some(hand) = self.int.pending_use_hand.take() {
             let stack = self.hand(hand).clone();
-            if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
-                self.int.using = Some(super::UsingItem {
-                    item: stack.item,
-                    duration,
-                    remaining: duration,
-                    animation,
-                });
+            if let Some(using) = self.int.use_data(&stack, env.data) {
+                self.int.using = Some(using);
             }
         }
         if self.int.is_using_item {
@@ -145,21 +140,16 @@ impl LocalPlayer {
         // `LivingEntity.tick` -> `updateUsingItem`: `ItemStack.onUseTick` first (the
         // consumable's sound and item particles every vanilla interval), then the
         // remaining time ticks down, including the tick the use started on.
-        if let Some(u) = self.int.using {
-            if super::consume_effects::should_emit(u.duration, u.remaining) {
-                // `ItemStack.onUseTick` reads the stack's `minecraft:consumable` (the
-                // item's default components; a stack patch override is not decoded): no
-                // component, no per-tick effects (an item whose class overrides the use
-                // duration, like a bow, stays silent).
-                let consumable = u.item.and_then(|i| {
-                    env.data
-                        .registries
-                        .name("minecraft:item", i)
-                        .and_then(|name| self.int.item_components.as_ref()?.consumable(name))
-                });
-                if let Some(consumable) = consumable {
+        if let Some(mut u) = self.int.using.take() {
+            // `ItemStack.onUseTick` reads the in-use stack's `minecraft:consumable` (the
+            // stack's patch, else the item default, resolved where the use started): no
+            // component, no per-tick effects (an item whose class overrides the use
+            // duration, like a bow, stays silent in practice — vanilla's
+            // `shouldEmitParticlesAndSounds` never fires for the class's long durations).
+            if let Some(consumable) = &u.consumable {
+                if super::consume_effects::should_emit(consumable.consume_ticks(), u.remaining) {
                     self.int.consume.emit(
-                        &consumable,
+                        consumable,
                         u.item,
                         crate::item_particles::EntityPose {
                             pos: self.state.pos,
@@ -171,7 +161,6 @@ impl LocalPlayer {
                     );
                 }
             }
-            let mut u = u;
             u.remaining -= 1;
             self.int.using = Some(u);
         }

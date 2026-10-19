@@ -51,7 +51,7 @@ impl UseAnimation {
 }
 
 /// The item being used and how long is left (`LivingEntity.useItem`/`useItemRemaining`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UsingItem {
     /// The item type this use started with (`ItemStack.isSameItem` check each tick).
     pub item: Option<RegistryIndex>,
@@ -61,36 +61,50 @@ pub struct UsingItem {
     pub remaining: i32,
     /// `getUseAnimation`.
     pub animation: UseAnimation,
+    /// The stack's `minecraft:consumable` (`ItemStack.onUseTick` reads it off the
+    /// in-use stack for the per-tick effects; resolved once where the use starts, like
+    /// vanilla's captured `useItem` stack). `None` when the stack has none — an item
+    /// whose use an item class owns (a bow's draw) keeps the component it carries, though
+    /// vanilla's `shouldEmitParticlesAndSounds` math keeps it silent for the class's long
+    /// durations.
+    pub consumable: Option<haste_data::Consumable>,
 }
 
 impl super::Interaction {
-    /// `Item.getUseDuration` / `Item.getUseAnimation` for a held stack: the `minecraft:consumable`
-    /// component when present, else the item classes that override them. `None` when the item is
-    /// not used over time (duration 0, animation `NONE`).
+    /// `Item.getUseDuration` / `Item.getUseAnimation` for a held stack: the item classes
+    /// that override them (virtual dispatch: the class wins over any consumable
+    /// component, patched or default), else the stack's `minecraft:consumable`. `None`
+    /// when the item is not used over time (duration 0, animation `NONE`).
     pub(super) fn use_data(
         &self,
         stack: &ItemStackData,
         data: &haste_data::GameData,
-    ) -> Option<(i32, UseAnimation)> {
+    ) -> Option<UsingItem> {
         let item = stack
             .item
             .and_then(|i| data.registries.name("minecraft:item", i))?;
-        if let Some(ic) = &self.item_components {
-            if let Some(c) = ic.consumable(item) {
-                return Some((c.consume_ticks(), UseAnimation::from_id(c.animation)));
-            }
-        }
+        let consumable = self.stack_consumable(stack, data);
         // Items whose class overrides `getUseDuration`/`getUseAnimation`
         // (`BowItem`/`CrossbowItem`/`TridentItem`/`SpyglassItem`/`ShieldItem`); a shield's
         // `minecraft:blocks_attacks` makes the default `Item` return 72000 and `BLOCK`.
-        match item.path() {
-            "bow" => Some((72000, UseAnimation::Bow)),
-            "crossbow" => Some((72000, UseAnimation::Crossbow)),
-            "trident" => Some((72000, UseAnimation::Trident)),
-            "spyglass" => Some((1200, UseAnimation::Spyglass)),
-            "shield" => Some((72000, UseAnimation::Block)),
-            _ => None,
-        }
+        let (duration, animation) = match item.path() {
+            "bow" => (72000, UseAnimation::Bow),
+            "crossbow" => (72000, UseAnimation::Crossbow),
+            "trident" => (72000, UseAnimation::Trident),
+            "spyglass" => (1200, UseAnimation::Spyglass),
+            "shield" => (72000, UseAnimation::Block),
+            _ => {
+                let c = consumable.as_ref()?;
+                (c.consume_ticks(), UseAnimation::from_id(c.animation))
+            }
+        };
+        Some(UsingItem {
+            item: stack.item,
+            duration,
+            remaining: duration,
+            animation,
+            consumable,
+        })
     }
 
     /// Test/script hook for the item-in-use state (vanilla: `player.isUsingItem()`; eating blocks
@@ -137,6 +151,7 @@ impl LocalPlayer {
         let Some(item) = self
             .int
             .using
+            .as_ref()
             .and_then(|u| u.item)
             .and_then(|i| env.data.registries.name("minecraft:item", i))
         else {
@@ -159,22 +174,28 @@ impl LocalPlayer {
 
     /// `LivingEntity.getUseItemRemainingTicks`.
     pub fn use_item_remaining(&self) -> i32 {
-        self.int.using.map_or(0, |u| u.remaining)
+        self.int.using.as_ref().map_or(0, |u| u.remaining)
     }
 
     /// `LivingEntity.getUseItem`'s duration (`Item.getUseDuration`), 0 when not using.
     pub fn use_duration(&self) -> i32 {
-        self.int.using.map_or(0, |u| u.duration)
+        self.int.using.as_ref().map_or(0, |u| u.duration)
     }
 
     /// `Item.getUseAnimation` of the item being used.
     pub fn use_animation(&self) -> UseAnimation {
-        self.int.using.map_or(UseAnimation::None, |u| u.animation)
+        self.int
+            .using
+            .as_ref()
+            .map_or(UseAnimation::None, |u| u.animation)
     }
 
     /// `LivingEntity.getTicksUsingItem`: how long the current use has run.
     pub fn ticks_using_item(&self) -> i32 {
-        self.int.using.map_or(0, |u| u.duration - u.remaining)
+        self.int
+            .using
+            .as_ref()
+            .map_or(0, |u| u.duration - u.remaining)
     }
 
     /// The stack of hand `i` (0 main, 1 off), as `InteractionHand.values()` numbers them.
@@ -345,14 +366,8 @@ impl LocalPlayer {
                         // Food starts only when the player can eat (`Consumable.startConsuming`
                         // -> `canConsume` -> `Player.canEat`); the packet goes out either way.
                         if self.can_consume(&stack, env.data) {
-                            if let Some((duration, animation)) = self.int.use_data(&stack, env.data)
-                            {
-                                self.int.using = Some(UsingItem {
-                                    item: stack.item,
-                                    duration,
-                                    remaining: duration,
-                                    animation,
-                                });
+                            if let Some(using) = self.int.use_data(&stack, env.data) {
+                                self.int.using = Some(using);
                                 self.int.is_using_item = true;
                                 // The CONSUME Success's `player.itemUsed(hand)`.
                                 self.hand.item_used();

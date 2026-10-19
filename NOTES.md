@@ -219,3 +219,23 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
 - **2026-10-18 Container clicks are sent inside the input event.** Vanilla's
   `MultiPlayerGameMode.handleContainerInput` sends at once; queuing to the next tick added
   50-100 ms before the crafting result appeared.
+- **2026-10-18 Visible-only meshing: the trade the lead accepted.** Meshing only the sections in
+  `visibleSections` (vanilla `LevelExtractor`), windowed bench at the reference spot, two runs
+  each: rd 32 average frame 6.47/6.80 -> 6.20/6.26 ms, p99 9.5/13.0 -> 9.1/9.6 ms, but p99.9 and
+  worst frames 12.7-26 -> 25-30 ms; GPU 2.6-2.8 GB -> 0.82 GB, RSS -50 to -110 MB. rd 12 average
+  2.06/2.14 -> 2.19/2.24 ms, p99 6.1/7.8 -> 7.9/9.9 ms, GPU 0.82-0.95 -> 0.56 GB. The worst
+  frames are the pop-in catch-up when sections become visible; turn prediction and spreading
+  background work across frames are meant to win them back.
+- **2026-10-18 Validate oracle values on an exact state.** `validate-dumps.py`'s `find` returns
+  the first matching state, and for slabs and stairs that is the waterlogged one (light
+  dampening 1, not 0). Pin every property that matters, `waterlogged` included.
+- **2026-10-18 Item particle sprites for every item.** The sprite table for `minecraft:item`
+  particles was built from the items whose default components are consumable, so a stack made
+  consumable by its component patch, and every server item particle of a non-food item
+  (snowball and egg hits, tool breaks), drew the missing sprite. It now covers the whole item
+  registry: +35 ms once at join, same 1024x1024 atlas page.
+- **2026-10-18 Another entity eating: particles yes, sound no.** The watcher's client runs
+  `LivingEntity.updateUsingItem` for other entities from the synced living flags and spawns the
+  crumbs itself, but `ClientLevel.playSeededSound` only plays for our own player: the eating
+  sound of others arrives as the server's broadcast sound packet. The 16-particle finish burst
+  (entity event 9) is sent only to the eater's own client.
