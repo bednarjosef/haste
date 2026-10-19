@@ -17,7 +17,7 @@ use haste_core::SectionPos;
 mod quad;
 
 use crate::mesher::SectionMesh;
-use crate::quad_format::{quad_format_enabled, PackedQuad, SpanKind};
+use crate::quad_format::{quad_format_enabled, PackedGeneral, PackedQuad, SpanKind};
 use crate::vertex::PackedVertex;
 
 /// Largest arena: 2^22 vertices (20 bytes each: 80 MiB) and 3x2^22 indices (4 bytes
@@ -103,30 +103,33 @@ impl RangeAlloc {
     }
 }
 
-/// The quad-format half of an arena: the rect-record storage buffer.
+/// The quad-format halves of an arena: the rect-record and the general-record
+/// storage buffers (binding 0 and 1 of group 3).
 struct QuadHalf {
-    buf: wgpu::Buffer,
-    alloc: RangeAlloc,
+    rect: wgpu::Buffer,
+    rect_alloc: RangeAlloc,
+    general: wgpu::Buffer,
+    general_alloc: RangeAlloc,
 }
 
 pub(crate) struct Arena {
-    pub vertex: wgpu::Buffer,
+    /// Vertex-format vertex buffer (None in the quad format).
+    pub vertex: Option<wgpu::Buffer>,
     /// Vertex-format index buffer (None in the quad format).
     pub index: Option<wgpu::Buffer>,
     vertices: RangeAlloc,
     indices: RangeAlloc,
-    /// Quad-format rect records (None in the vertex format).
+    /// Quad-format record halves (None in the vertex format).
     quads: Option<QuadHalf>,
-    /// Group 3 (quad records at binding 0, pulled vertex records at 1) for
-    /// the quad pipelines; None in the vertex format or without a layout
-    /// (tests).
+    /// Group 3 (rect records at binding 0, general records at 1) for the quad
+    /// pipelines; None in the vertex format or without a layout (tests).
     pub quad_bind: Option<wgpu::BindGroup>,
 }
 
 /// One draw range of a resident section: a render layer, or one face
 /// direction's group within it (see `SectionLayerMesh`). In the quad format
-/// `first`/`count` address the span's records (quad-arena rect records for
-/// `Rect`, vertex-arena records for `Quad`/`Fan`) instead of indices.
+/// `first`/`count` address the span's records (rect or general by `kind`)
+/// instead of indices.
 #[derive(Clone, Copy, Debug)]
 pub struct LayerDraw {
     pub layer: RenderLayer,
@@ -151,6 +154,9 @@ pub struct ResidentSection {
     /// (0 in the vertex format).
     pub base_quad: u32,
     pub quad_count: u32,
+    /// Quad format: the section's general records (0 in the vertex format).
+    pub base_general: u32,
+    pub general_count: u32,
     /// Index range of all layers together (for freeing); 0 in the quad format.
     pub index_start: u32,
     pub index_total: u32,
@@ -194,20 +200,28 @@ impl MeshArenas {
         }
     }
 
-    /// Memory stats for diagnostics: arena count, the vertex+index+quad bytes
-    /// allocated (each arena is a fixed-size GPU buffer set) and the bytes
-    /// actually used.
+    /// Memory stats for diagnostics: arena count, the vertex+index+record
+    /// bytes allocated (each arena is a fixed-size GPU buffer set) and the
+    /// bytes actually used.
     pub fn memory_stats(&self) -> (usize, u64, u64) {
         let quad_bytes = |a: &Arena| -> u64 {
             a.quads
                 .as_ref()
-                .map(|q| q.alloc.total() as u64 * std::mem::size_of::<PackedQuad>() as u64)
+                .map(|q| {
+                    q.rect_alloc.total() as u64 * std::mem::size_of::<PackedQuad>() as u64
+                        + q.general_alloc.total() as u64
+                            * std::mem::size_of::<PackedGeneral>() as u64
+                })
                 .unwrap_or(0)
         };
         let quad_used = |a: &Arena| -> u64 {
             a.quads
                 .as_ref()
-                .map(|q| q.alloc.used() as u64 * std::mem::size_of::<PackedQuad>() as u64)
+                .map(|q| {
+                    q.rect_alloc.used() as u64 * std::mem::size_of::<PackedQuad>() as u64
+                        + q.general_alloc.used() as u64
+                            * std::mem::size_of::<PackedGeneral>() as u64
+                })
                 .unwrap_or(0)
         };
         let bytes = self
@@ -234,41 +248,47 @@ impl MeshArenas {
     fn new_arena(&mut self) -> u32 {
         let vcount = arena_vertices(self.tier);
         let quad_mode = quad_format_enabled();
-        // In the quad format the vertex half is a storage buffer (pulled
-        // records) and the quad half holds the rect records; the index half
-        // exists only in the vertex format.
-        let usage = if quad_mode {
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+        // In the quad format the arena is the two record halves (rect quads
+        // at the tier's record count, general records at a quarter of it —
+        // they are the minority); the vertex and index halves exist only in
+        // the vertex format.
+        let (vertex, index) = if quad_mode {
+            (None, None)
         } else {
-            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST
-        };
-        let vertex = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("section-arena-vertices"),
-            size: vcount as u64 * std::mem::size_of::<PackedVertex>() as u64,
-            usage,
-            mapped_at_creation: false,
-        });
-        let index = if quad_mode {
-            None
-        } else {
+            let vertex = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("section-arena-vertices"),
+                size: vcount as u64 * std::mem::size_of::<PackedVertex>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             let icount = arena_indices(self.tier);
-            Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+            let index = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("section-arena-indices"),
                 size: icount as u64 * 4,
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
-            }))
+            });
+            (Some(vertex), Some(index))
         };
         let quads = if quad_mode {
-            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("section-arena-quads"),
+            let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+            let rect = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("section-arena-rect-quads"),
                 size: vcount as u64 * std::mem::size_of::<PackedQuad>() as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                usage: storage,
+                mapped_at_creation: false,
+            });
+            let general = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("section-arena-general-quads"),
+                size: vcount as u64 / 4 * std::mem::size_of::<PackedGeneral>() as u64,
+                usage: storage,
                 mapped_at_creation: false,
             });
             Some(QuadHalf {
-                buf,
-                alloc: RangeAlloc::new(vcount),
+                rect,
+                rect_alloc: RangeAlloc::new(vcount),
+                general,
+                general_alloc: RangeAlloc::new(vcount / 4),
             })
         } else {
             None
@@ -281,11 +301,11 @@ impl MeshArenas {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: q.buf.as_entire_binding(),
+                            resource: q.rect.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: vertex.as_entire_binding(),
+                            resource: q.general.as_entire_binding(),
                         },
                     ],
                 })
@@ -294,7 +314,7 @@ impl MeshArenas {
         self.arenas.push(Arena {
             vertex,
             index,
-            vertices: RangeAlloc::new(vcount),
+            vertices: RangeAlloc::new(if quad_mode { 0 } else { vcount }),
             indices: RangeAlloc::new(if quad_mode {
                 0
             } else {
@@ -380,7 +400,7 @@ impl MeshArenas {
         let a = &self.arenas[arena as usize];
         let mut view = self.belt.write_buffer(
             encoder,
-            &a.vertex,
+            a.vertex.as_ref().unwrap(),
             base_vertex as u64 * std::mem::size_of::<PackedVertex>() as u64,
             std::num::NonZeroU64::new(vcount as u64 * std::mem::size_of::<PackedVertex>() as u64)
                 .unwrap(),
@@ -421,7 +441,8 @@ impl MeshArenas {
             std::num::NonZeroU64::new(icount as u64 * 4).unwrap(),
         );
         view.copy_from_slice(bytemuck::cast_slice(&self.scratch));
-        let resident = self.finish_resident(mesh, arena, base_vertex, vcount, 0, 0, 0, 0, layers);
+        let resident =
+            self.finish_resident(mesh, arena, base_vertex, vcount, 0, 0, 0, 0, 0, 0, layers);
         Some(resident)
     }
 
@@ -435,6 +456,8 @@ impl MeshArenas {
         vertex_count: u32,
         base_quad: u32,
         quad_count: u32,
+        base_general: u32,
+        general_count: u32,
         index_start: u32,
         index_total: u32,
         layers: Vec<LayerDraw>,
@@ -454,6 +477,8 @@ impl MeshArenas {
             vertex_count,
             base_quad,
             quad_count,
+            base_general,
+            general_count,
             index_start,
             index_total,
             layers,
@@ -491,9 +516,28 @@ impl MeshArenas {
             a.vertices.free(s.base_vertex, s.vertex_count);
             a.indices.free(s.index_start, s.index_total);
             if let Some(q) = a.quads.as_mut() {
-                q.alloc.free(s.base_quad, s.quad_count);
+                q.rect_alloc.free(s.base_quad, s.quad_count);
+                q.general_alloc.free(s.base_general, s.general_count);
             }
         }
+    }
+}
+
+impl SectionMesh {
+    /// GPU bytes the vertices will occupy in an arena.
+    pub fn vertex_bytes(&self) -> u64 {
+        (self.vertices.len() as u64) * std::mem::size_of::<PackedVertex>() as u64
+    }
+
+    /// GPU bytes the indices will occupy in an arena.
+    pub fn index_bytes(&self) -> u64 {
+        self.layers.iter().map(|l| l.indices.len() as u64 * 4).sum()
+    }
+
+    /// GPU bytes the quad records (rect + general) occupy in an arena.
+    pub fn quad_bytes(&self) -> u64 {
+        self.quads.len() as u64 * std::mem::size_of::<PackedQuad>() as u64
+            + self.generals.len() as u64 * std::mem::size_of::<PackedGeneral>() as u64
     }
 }
 

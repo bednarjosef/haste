@@ -360,10 +360,9 @@ pub struct Renderer {
     quad_instances: Vec<crate::quad_format::QuadInstance>,
     quad_instance_buffer: wgpu::Buffer,
     quad_instance_capacity: usize,
-    /// The quad format's static index buffers: the per-quad corner pattern
-    /// and the sequential soup pattern (see `quad_format.rs`).
+    /// The quad format's static index buffer: the per-quad corner pattern
+    /// (see `quad_format.rs`), bound once per frame.
     quad_pattern_index: wgpu::Buffer,
-    quad_seq_index: wgpu::Buffer,
     /// Indirect draw arguments (multi-draw path), reused across frames.
     /// Five u32 per draw: index count, instance count, first index, base vertex, first instance
     /// (`wgpu::util::DrawIndexedIndirectArgs` layout).

@@ -459,7 +459,6 @@ impl Renderer {
             quad_instance_buffer,
             quad_instance_capacity: 4096,
             quad_pattern_index: quad.pattern_index,
-            quad_seq_index: quad.seq_index,
             indirect: Vec::new(),
             indirect_buffer,
             indirect_capacity: 4096,

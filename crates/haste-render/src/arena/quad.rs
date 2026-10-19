@@ -1,28 +1,27 @@
-// The quad format's arena upload half (`--terrain-format quad`): pulled
-// vertex records into the vertex storage buffer, 32-byte rect records into
-// the quad half, and the mesh's spans as draw ranges. Split out of arena.rs
-// (file-size rule); see the parent module for the arena design.
+// The quad format's arena upload half (`--terrain-format quad`): rect and
+// general records into their storage buffers, and the mesh's spans as draw
+// ranges. Split out of arena.rs (file-size rule); see the parent module for
+// the arena design.
 
 use crate::mesher::SectionMesh;
-use crate::quad_format::{PackedQuad, SpanKind};
-use crate::vertex::PackedVertex;
+use crate::quad_format::{PackedGeneral, PackedQuad, SpanKind};
 
 use super::{arena_vertices, Arena, LayerDraw, MeshArenas, ResidentSection};
 
 impl MeshArenas {
-    /// The quad format's upload: pulled vertex records into the vertex half,
-    /// rect records into the quad half, spans as draw ranges.
+    /// The quad format's upload: rect records into the rect half, general
+    /// records into the general half, spans as draw ranges.
     pub(super) fn upload_quad(
         &mut self,
         mesh: &SectionMesh,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Option<ResidentSection> {
-        let vcount = mesh.vertices.len() as u32;
         let qcount = mesh.quads.len() as u32;
-        if vcount == 0 && qcount == 0 {
+        let gcount = mesh.generals.len() as u32;
+        if qcount == 0 && gcount == 0 {
             return None;
         }
-        if vcount > arena_vertices(0) || qcount > arena_vertices(0) {
+        if qcount > arena_vertices(0) || gcount > arena_vertices(0) / 4 {
             tracing::warn!("section {:?} mesh too large for an arena", mesh.pos);
             return None;
         }
@@ -31,64 +30,69 @@ impl MeshArenas {
             let Some(q) = a.quads.as_mut() else {
                 continue;
             };
-            if let Some(v) = a.vertices.alloc(vcount) {
-                match q.alloc.alloc(qcount) {
-                    Some(qx) => {
-                        found = Some((i as u32, v, qx));
+            if let Some(qx) = q.rect_alloc.alloc(qcount) {
+                match q.general_alloc.alloc(gcount) {
+                    Some(gx) => {
+                        found = Some((i as u32, qx, gx));
                         break;
                     }
-                    None => a.vertices.free(v, vcount),
+                    None => q.rect_alloc.free(qx, qcount),
                 }
             }
         }
-        let (arena, base_vertex, base_quad) = match found {
+        let (arena, base_quad, base_general) = match found {
             Some(f) => f,
             None => {
                 // Same growth rule as the vertex format: open a new arena at
                 // the current tier, doubling the tier when the last arena of
-                // the tier was more than half full.
-                let same_tier = self
-                    .arenas
-                    .last()
-                    .is_some_and(|a| a.vertices.total() == arena_vertices(self.tier));
+                // the tier was more than half full (either half).
+                let same_tier = self.arenas.last().is_some_and(|a| {
+                    a.quads
+                        .as_ref()
+                        .is_some_and(|q| q.rect_alloc.total() == arena_vertices(self.tier))
+                });
                 if same_tier {
                     let last = self.arenas.last().unwrap();
-                    let v_used = last.vertices.used();
-                    let q_used = last.quads.as_ref().map(|q| q.alloc.used()).unwrap_or(0);
-                    if v_used * 2 > last.vertices.total() || q_used * 2 > last.vertices.total() {
+                    let (rv, rg) = last
+                        .quads
+                        .as_ref()
+                        .map_or((0, 0), |q| (q.rect_alloc.used(), q.general_alloc.used()));
+                    if rv * 2 > arena_vertices(self.tier) || rg * 2 > arena_vertices(self.tier) / 4
+                    {
                         self.tier += 1;
                     }
                 }
                 let i = self.new_arena();
                 let a = &mut self.arenas[i as usize];
-                let v = a.vertices.alloc(vcount).unwrap();
-                let q = a.quads.as_mut().unwrap().alloc.alloc(qcount).unwrap();
-                (i, v, q)
+                let q = a.quads.as_mut().unwrap();
+                let qx = q.rect_alloc.alloc(qcount).unwrap();
+                let gx = q.general_alloc.alloc(gcount).unwrap();
+                (i, qx, gx)
             }
         };
         let a: &Arena = &self.arenas[arena as usize];
-        if vcount > 0 {
-            let mut view = self.belt.write_buffer(
-                encoder,
-                &a.vertex,
-                base_vertex as u64 * std::mem::size_of::<PackedVertex>() as u64,
-                std::num::NonZeroU64::new(
-                    vcount as u64 * std::mem::size_of::<PackedVertex>() as u64,
-                )
-                .unwrap(),
-            );
-            view.copy_from_slice(bytemuck::cast_slice(&mesh.vertices));
-        }
+        let q = a.quads.as_ref().unwrap();
         if qcount > 0 {
-            let q = a.quads.as_ref().unwrap();
             let mut view = self.belt.write_buffer(
                 encoder,
-                &q.buf,
+                &q.rect,
                 base_quad as u64 * std::mem::size_of::<PackedQuad>() as u64,
                 std::num::NonZeroU64::new(qcount as u64 * std::mem::size_of::<PackedQuad>() as u64)
                     .unwrap(),
             );
             view.copy_from_slice(bytemuck::cast_slice(&mesh.quads));
+        }
+        if gcount > 0 {
+            let mut view = self.belt.write_buffer(
+                encoder,
+                &q.general,
+                base_general as u64 * std::mem::size_of::<PackedGeneral>() as u64,
+                std::num::NonZeroU64::new(
+                    gcount as u64 * std::mem::size_of::<PackedGeneral>() as u64,
+                )
+                .unwrap(),
+            );
+            view.copy_from_slice(bytemuck::cast_slice(&mesh.generals));
         }
         let mut layers = Vec::new();
         for l in &mesh.layers {
@@ -97,7 +101,8 @@ impl MeshArenas {
                     layer: l.layer,
                     first: match s.kind {
                         SpanKind::Rect => base_quad + s.first,
-                        _ => base_vertex + s.first,
+                        SpanKind::General => base_general + s.first,
+                        SpanKind::Indexed => s.first,
                     },
                     count: s.count,
                     dir: if l.whole { 6 } else { s.dir },
@@ -108,10 +113,12 @@ impl MeshArenas {
         Some(self.finish_resident(
             mesh,
             arena,
-            base_vertex,
-            vcount,
+            0,
+            0,
             base_quad,
             qcount,
+            base_general,
+            gcount,
             0,
             0,
             layers,

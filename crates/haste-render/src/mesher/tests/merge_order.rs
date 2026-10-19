@@ -81,7 +81,7 @@ fn flushed_triangles(staged: &mut [StagedQuad]) -> Vec<(u8, Vec<Vec<u8>>)> {
     let mut sink = MeshSink::new();
     let mut junction = JunctionScratch::new();
     flush_staged(staged, &mut sink, &mut junction);
-    let (vertices, _quads, layers) = sink.take_layers();
+    let (vertices, _quads, _generals, layers) = sink.take_layers();
     let mut tris = Vec::new();
     for layer in &layers {
         for tri in layer.indices.as_chunks::<3>().0 {
