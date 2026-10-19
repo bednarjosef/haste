@@ -460,7 +460,11 @@ pub fn compute_visible_mask(
 /// `maxX`/`maxY`/`maxZ`): along the face's axis the high side when the camera
 /// section's centre is past the origin, along the other axes when it is before it.
 fn start_corner(cam: f64, origin: f64, face_axis: bool) -> f64 {
-    let high = if face_axis { cam > origin } else { cam < origin };
+    let high = if face_axis {
+        cam > origin
+    } else {
+        cam < origin
+    };
     origin + if high { 16.0 } else { 0.0 }
 }
 

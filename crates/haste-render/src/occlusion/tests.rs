@@ -276,7 +276,11 @@ fn reference_ray_occluded(
     // camera is past the origin, along the other axes when it is before it.
     let (fx, fy, fz) = face.offset();
     let corner = |c: f64, o: f64, on_axis: bool| {
-        o + if (on_axis && c > o) || (!on_axis && c < o) { 16.0 } else { 0.0 }
+        o + if (on_axis && c > o) || (!on_axis && c < o) {
+            16.0
+        } else {
+            0.0
+        }
     };
     let mut check = DVec3::new(
         corner(cam_center.x, ox, fx != 0),
