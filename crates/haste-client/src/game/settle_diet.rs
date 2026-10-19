@@ -63,14 +63,23 @@ fn diet_thread(shared: Arc<Shared>) {
         // this thread, never the game or render one; the duration is logged so a slow
         // walk shows up (it takes the arenas' locks, so a concurrently allocating
         // thread can briefly wait on one — never during play, the world is quiet).
-        let t = Instant::now();
-        let trimmed = unsafe { libc::malloc_trim(0) };
-        tracing::info!(
-            "settle diet: malloc_trim returned {trimmed} in {:?}",
-            t.elapsed()
-        );
+        trim();
     }
 }
+
+/// glibc's `malloc_trim`; other allocators return freed memory on their own.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim() {
+    let t = Instant::now();
+    let trimmed = unsafe { libc::malloc_trim(0) };
+    tracing::info!(
+        "settle diet: malloc_trim returned {trimmed} in {:?}",
+        t.elapsed()
+    );
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim() {}
 
 #[cfg(test)]
 mod tests {
