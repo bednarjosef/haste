@@ -232,7 +232,7 @@ impl Shared {
     pub fn new(
         data: Arc<GameData>,
         world: World,
-        entities: EntityStore,
+        mut entities: EntityStore,
         local: (haste_core::EntityId, uuid::Uuid),
         view_distance: i32,
         particles: haste_render::Particles,
@@ -241,6 +241,14 @@ impl Shared {
         biome_climates: Vec<haste_render::BiomeClimate>,
         options: haste_setup::options::Options,
     ) -> Self {
+        // The TNT block's default state, what a primed TNT without a synced
+        // `DATA_BLOCK_STATE_ID` renders as (`PrimedTnt.DEFAULT_BLOCK_STATE`); without the
+        // block tables it stays air (the TNT then draws nothing).
+        entities.set_default_tnt_state(
+            data.blocks
+                .default_state(&Identifier::minecraft("tnt"))
+                .unwrap_or(haste_core::BlockStateId::AIR),
+        );
         let has_sky = world.dimension().has_skylight;
         let component_tables = Arc::new(
             haste_protocol::packets::ProtocolTables::with_data_components(

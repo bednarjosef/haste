@@ -9,8 +9,9 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
-    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
-    ModelPart, PaintingDecoration, PoseOverrides, ThrownItemDecoration,
+    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance,
+    FallingBlockDecoration, ItemFrameDecoration, ModelPart, PaintingDecoration, PoseOverrides,
+    PrimedTntDecoration, ThrownItemDecoration,
 };
 use haste_core::parts::{self, PartId};
 use haste_core::view::BlockView;
@@ -20,16 +21,19 @@ use crate::gui::Shelf;
 
 mod atlas;
 mod block_entities;
+mod block_model;
 mod boat;
 mod cape;
 mod dragon_fireball;
 mod equipment;
 mod experience_orb;
+mod falling_block;
 mod first_person;
 mod flame;
 #[cfg(test)]
 mod flame_tests;
 mod item;
+mod item_entity;
 mod item_frame;
 pub mod map;
 mod map_color;
@@ -51,6 +55,7 @@ mod tests;
 mod thrown_item;
 #[cfg(test)]
 mod thrown_item_tests;
+mod tnt;
 
 mod armor_stand;
 mod hand;
@@ -98,29 +103,12 @@ pub fn should_render_at_sqr_distance(
     dist_sq < f64::from(limit * limit)
 }
 
+pub(crate) use item_entity::{
+    item_entity_bob, item_entity_copies, item_entity_lift, item_entity_spin,
+};
+
 /// Vanilla renders the player model at 15/16 scale.
 const PLAYER_SCALE: f32 = 0.9375;
-
-/// Dropped items spin about the vertical axis: `ItemEntity.getSpin`, the age in ticks
-/// (plus the partial tick) over 20, plus the entity's random phase, in radians.
-pub(crate) fn item_entity_spin(age: f32, bob_offs: f32) -> f32 {
-    age / 20.0 + bob_offs
-}
-
-/// ... and bob up and down: `ItemEntityRenderer.submit`'s
-/// `sin(age / 10 + phase) * 0.1 + 0.1` blocks, on top of the lift that puts the
-/// model's bounding box above the ground (see `item_entity_lift`).
-pub(crate) fn item_entity_bob(age: f32, bob_offs: f32) -> f32 {
-    ((age / 10.0 + bob_offs).sin()) * 0.1 + 0.1
-}
-
-/// The lift `ItemEntityRenderer.submit` applies so the model's bounding box sits above
-/// the ground: `-bbox.minY + 1/16`. The bounding box is the model drawn through its
-/// `display.ground` transform (which carries vanilla's 0.5/0.25 ground scales), so no
-/// extra scale is applied here.
-pub(crate) fn item_entity_lift(bbox_min_y: f32) -> f32 {
-    -bbox_min_y + 1.0 / 16.0
-}
 
 /// Which of vanilla's `ItemDisplayContext`s an item is drawn through: the `display`
 /// section of the model it names (firstperson_righthand for the held item, fixed for
@@ -139,19 +127,6 @@ pub enum ItemDisplay {
     Ground,
     /// `on_shelf` (`ShelfRenderer`: items on a shelf block, small and sunk into the board).
     OnShelf,
-}
-
-/// How many copies of the item a stack draws: `ItemClusterRenderState
-/// .getRenderedAmount` — 1 for a single item, then one more per full 16 of the count,
-/// up to 5.
-pub(crate) fn item_entity_copies(count: i32) -> u32 {
-    match count {
-        ..=1 => 1,
-        2..=16 => 2,
-        17..=32 => 3,
-        33..=48 => 4,
-        _ => 5,
-    }
 }
 
 /// The per-entity phase `ItemEntity.bobOffs` stands in for: vanilla draws it from the
@@ -319,6 +294,11 @@ pub struct EntityRenderer {
     /// The moving pistons' moved-block quads, by the state string (resolved once per state a
     /// piston ever moves).
     piston_quads: ahash::AHashMap<String, Option<Arc<Vec<crate::blockentity::PistonQuad>>>>,
+    /// The terrain's baked block models and its atlas: the moving-block path
+    /// (`FallingBlockRenderer`, `TntRenderer` — see `entity/block_model.rs`) draws block
+    /// states through them, textures resolved into the entity atlas like the piston's.
+    baked: Arc<haste_assets::BakedBlockModels>,
+    terrain_atlas: Arc<haste_assets::AtlasBuilder>,
     /// The minecarts' display-block geometry, by state id (resolved once per state a cart
     /// ever shows; vanilla's `BlockModelResolver` caches the same way).
     minecart_quads: ahash::AHashMap<u32, Option<Arc<minecart::DisplayGeometry>>>,
@@ -449,6 +429,12 @@ impl EntityRenderer {
                         orientation,
                         assets,
                     ),
+                    // Vanilla `FallingBlockRenderer` / `TntRenderer`: the entity's block
+                    // state drawn as the block model (see the renderer modules).
+                    Decoration::FallingBlock(f) => {
+                        self.emit_falling_block(e, f, camera, light, assets)
+                    }
+                    Decoration::PrimedTnt(t) => self.emit_primed_tnt(e, t, camera, light, assets),
                 }
                 // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer —
                 // a burning small fireball carries its `displayFireAnimation` flames on top
