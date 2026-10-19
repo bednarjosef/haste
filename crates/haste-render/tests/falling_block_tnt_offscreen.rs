@@ -128,6 +128,34 @@ fn diff(a: &image::RgbaImage, b: &image::RgbaImage) -> u64 {
         .count() as u64
 }
 
+/// The vanilla shadow texture (`misc/shadow.png`): the disc's alpha profile, which the
+/// shadow pass multiplies into the piece alpha (vanilla `ShadowFeatureRenderer`).
+#[test]
+#[ignore = "needs the client jar (source scripts/env.sh)"]
+fn shadow_texture_profile() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let img = assets
+        .texture_any(&Identifier::minecraft("misc/shadow"))
+        .unwrap();
+    let (w, h) = (img.width(), img.height());
+    eprintln!("shadow.png {w}x{h}");
+    for (x, y) in [
+        (w / 2, h / 2),
+        (w / 2, h / 4),
+        (w / 4, h / 2),
+        (w / 4, h / 4),
+        (3 * w / 4, 3 * h / 4),
+        (w - 1, h - 1),
+    ] {
+        let p = img.get_pixel(x, y);
+        eprintln!("  ({x},{y}): rgba {:?}", p.0);
+    }
+    let opaque = img.pixels().filter(|p| p.0[3] > 250).count();
+    eprintln!("  fully opaque texels: {opaque} of {}", w * h);
+}
+
 #[test]
 #[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
 fn falling_blocks_and_tnt_offscreen() {
@@ -241,6 +269,30 @@ fn falling_blocks_and_tnt_offscreen() {
         shadow_pixels > 200,
         "the shadows changed {shadow_pixels} pixels of the floor"
     );
+    // The strength: over the pixels the shadow darkened, the mean on/off ratio is the
+    // piece alpha at work — vanilla's hovering-sand disc centre is ~0.32
+    // (`pow - height*0.5` at 0.63, times 0.5 brightness), the ref screenshot shows ~0.4.
+    {
+        let mut sum = [0u64; 2];
+        let mut n = 0u64;
+        for (a, b) in img.pixels().zip(no_shadow.pixels()) {
+            if a.0 != b.0 {
+                sum[0] += u64::from(a.0[0]) + u64::from(a.0[1]) + u64::from(a.0[2]);
+                sum[1] += u64::from(b.0[0]) + u64::from(b.0[1]) + u64::from(b.0[2]);
+                n += 1;
+            }
+        }
+        let (mean_on, mean_off) = (
+            sum[0] as f64 / (3.0 * n as f64),
+            sum[1] as f64 / (3.0 * n as f64),
+        );
+        let darkening = 1.0 - mean_on / mean_off;
+        eprintln!("shadow darkening over {n} pixels: {darkening:.3}");
+        assert!(
+            (0.27..0.36).contains(&darkening),
+            "the disc darkens {darkening}, expected the vanilla ~0.32"
+        );
+    }
     // The landed sand draws nothing: dropping it from the scene changes not one pixel.
     entities.remove(1);
     let without_landed = render_scene(&mut renderer, &world, &data.shapes, &mut entities, camera);
