@@ -697,19 +697,20 @@ fn the_arm_model_is_the_player_models_right_arm() {
 }
 
 /// `ItemInHandLayer.submitArmWithItem`: rotate X -90, rotate Y 180, translate
-/// (±1, 2, -10)/16 (adult). The left hand is the right hand offset to -1 in x.
+/// (±1, 2, -10) model units (vanilla's `/16` on its block-space pose stack; adult). The left
+/// hand is the right hand offset to -1 in x.
 #[test]
 fn the_held_item_layer_transform_is_vanillas() {
     let deg = |d: f32| d.to_radians();
     let right = held_item_layer_matrix(false);
     let mut want = Mat4::from_rotation_x(deg(-90.0));
     want *= Mat4::from_rotation_y(deg(180.0));
-    want *= Mat4::from_translation(Vec3::new(1.0 / 16.0, 2.0 / 16.0, -10.0 / 16.0));
+    want *= Mat4::from_translation(Vec3::new(1.0, 2.0, -10.0));
     assert!(close(right, want, 1e-6));
     let left = held_item_layer_matrix(true);
     let mut want_left = Mat4::from_rotation_x(deg(-90.0));
     want_left *= Mat4::from_rotation_y(deg(180.0));
-    want_left *= Mat4::from_translation(Vec3::new(-1.0 / 16.0, 2.0 / 16.0, -10.0 / 16.0));
+    want_left *= Mat4::from_translation(Vec3::new(-1.0, 2.0, -10.0));
     assert!(close(left, want_left, 1e-6));
 }
 

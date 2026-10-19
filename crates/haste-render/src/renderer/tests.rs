@@ -207,7 +207,7 @@ fn offscreen_renders_armor_stand_with_armour() {
     store.spawn(&spawn);
     spawn.id = haste_core::EntityId(2);
     spawn.pos = glam::DVec3::new(6.5, 1.0, 8.0);
-    store.spawn(&spawn); // a second, bare stand next to it
+    store.spawn(&spawn); // a second stand next to it: small, in a golden helmet
                          // Client flags (index 15): ShowArms (0x04).
     store.set_metadata(
         haste_core::EntityId(1),
@@ -239,6 +239,15 @@ fn offscreen_renders_armor_stand_with_armour() {
     ] {
         store.set_equipment(haste_core::EntityId(1), wire, item(name));
     }
+    // The second stand: Small (0x01) in the client flags byte, in a golden helmet.
+    store.set_metadata(
+        haste_core::EntityId(2),
+        &[haste_core::entity::MetadataEntry {
+            index: 15,
+            value: haste_core::entity::MetadataValue::Byte(0x01),
+        }],
+    );
+    store.set_equipment(haste_core::EntityId(2), 5, item("golden_helmet"));
     let mut instances = Vec::new();
     store.render_instances(0.5, &mut instances);
     assert_eq!(instances.len(), 2);
@@ -300,6 +309,8 @@ fn offscreen_renders_armor_stand_with_armour() {
         .render(&base_frame(camera, &gui, &instances))
         .unwrap();
     let with = renderer.read_back().unwrap();
+    std::fs::create_dir_all("target/shots").unwrap();
+    with.save("target/shots/offscreen-stands.png").unwrap();
     let mut changed = 0;
     for (a, b) in without.pixels().zip(with.pixels()) {
         if a != b {
@@ -311,6 +322,23 @@ fn offscreen_renders_armor_stand_with_armour() {
     assert!(
         changed > 1000,
         "the stands changed only {changed} of 76800 pixels; nothing drew"
+    );
+    // The held sword draws: the same scene with empty hands must differ (from this angle
+    // the body hides most of it, so a tip's worth of pixels is a pass).
+    let mut bare = instances.clone();
+    for i in bare.iter_mut() {
+        i.hands = [None, None];
+    }
+    let _ = renderer.render(&base_frame(camera, &gui, &bare)).unwrap();
+    let bare_img = renderer.read_back().unwrap();
+    let sword = with
+        .pixels()
+        .zip(bare_img.pixels())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        sword > 100,
+        "clearing the hands changed only {sword} pixels; the sword did not draw"
     );
 
     // The frame-path cost of a stand-heavy scene: the armoured instance cloned into a

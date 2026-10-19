@@ -30,7 +30,14 @@ impl EntityRenderer {
             let Some(arm_m) = part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, arm) else {
                 continue;
             };
-            let item_root = root * arm_m * held_item_layer_matrix(left);
+            // The item's geometry is block space; `arm_m` and the layer matrix are model
+            // units (vanilla renders items on its model pose stack: quads 0..1 blocks on a
+            // stack scaled -16, -16, 16 — the model space's x/y flip with the 16 units per
+            // block). `held_item_layer_matrix`'s doc names the vanilla order.
+            let item_root = root
+                * arm_m
+                * held_item_layer_matrix(left)
+                * Mat4::from_scale(Vec3::new(-16.0, -16.0, 16.0));
             let display = if left {
                 ItemDisplay::ThirdPersonLeft
             } else {
