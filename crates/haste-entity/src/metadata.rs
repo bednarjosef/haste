@@ -99,6 +99,22 @@ pub struct Metadata {
     /// `AbstractVillager.DATA_UNHAPPY_COUNTER` (index 18, an int: `AgeableMob`'s two accessors
     /// sit at 16/17, then `AbstractVillager`'s). `> 0` means the villager shakes its head.
     pub villager_unhappy: bool,
+    /// Minecart state, interpreted in `crate::minecart` (only minecart entities read it).
+    /// `VehicleEntity.DATA_ID_HURT` (index 8, an int: `Entity`'s eight slots come first),
+    /// ticked down client-side by `AbstractMinecart.tick`.
+    pub minecart_hurt_time: i32,
+    /// `VehicleEntity.DATA_ID_HURTDIR` (index 9, an int; 1 or -1).
+    pub minecart_hurt_dir: i32,
+    /// `VehicleEntity.DATA_ID_DAMAGE` (index 10, a float), ticked down client-side.
+    pub minecart_damage: f32,
+    /// `AbstractMinecart.DATA_ID_CUSTOM_DISPLAY_BLOCK` (index 11, an optional block state):
+    /// the block a minecart shows instead of its type's default, `None` when unset.
+    pub minecart_custom_display: Option<haste_core::BlockStateId>,
+    /// `MinecartFurnace.DATA_ID_FUEL` (index 13, a bool): a lit furnace cart.
+    pub minecart_fuel: bool,
+    /// The TNT cart's fuse (`MinecartTNT.fuse`, started by entity event 70 at 80 ticks and
+    /// ticked down client-side; `None` when not primed, vanilla's -1).
+    pub minecart_fuse: Option<i32>,
     /// All entries (including the shared ones), kept so later consumers can read the rest.
     entries: std::vec::Vec<MetadataEntry>,
 }
@@ -135,6 +151,13 @@ impl Metadata {
                 // counter (int).
                 (18, MetadataValue::Boolean(b)) => self.creeper_ignited = *b,
                 (18, MetadataValue::VarInt(v)) => self.villager_unhappy = *v > 0,
+                // `VehicleEntity`'s three slots (8/9/10) and `AbstractMinecart`'s (11) and
+                // `MinecartFurnace`'s (13): interpreted in `crate::minecart`.
+                (8, MetadataValue::VarInt(v)) => self.minecart_hurt_time = *v,
+                (9, MetadataValue::VarInt(v)) => self.minecart_hurt_dir = *v,
+                (10, MetadataValue::Float(v)) => self.minecart_damage = *v,
+                (11, MetadataValue::OptionalBlockState(s)) => self.minecart_custom_display = *s,
+                (13, MetadataValue::Boolean(b)) => self.minecart_fuel = *b,
                 _ => {}
             }
         }

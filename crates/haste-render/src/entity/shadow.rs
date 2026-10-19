@@ -37,7 +37,11 @@ impl EntityRenderer {
         let shadow_id = SHADOW_TEXTURE.get_or_init(|| Identifier::minecraft("misc/shadow"));
         let rect = self.texture_rect(shadow_id, assets);
         for e in entities {
-            if Some(e.id) == skip || e.invisible || e.decoration.is_some() {
+            // Minecarts draw a shadow like any entity (`AbstractMinecartRenderer`'s 0.7
+            // radius); the other decorations (item frames, paintings, orbs) do not.
+            let shadowless =
+                matches!(&e.decoration, Some(d) if !matches!(d, Decoration::Minecart(_)));
+            if Some(e.id) == skip || e.invisible || shadowless {
                 continue;
             }
             let radius = e.shadow_radius.min(32.0);

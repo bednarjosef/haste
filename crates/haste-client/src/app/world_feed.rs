@@ -24,6 +24,22 @@ const SUBMIT_PER_FRAME: usize = 512;
 /// note): classifying a whole render distance 32 queue (~28k sections) in one frame
 /// would be a visible hitch, so the rest is classified over the next frames.
 const SCAN_PER_FRAME: usize = 4096;
+/// Held-back entries tested against the pre-mesh cone per frame (only while a turn is
+/// predicted): the scan rotates through `waiting`, so the whole list is covered over a
+/// few frames without a hitch.
+const PREMESH_SCAN_PER_FRAME: usize = 2048;
+/// The eight horizontal neighbour chunks of a section (the ring vanilla
+/// `SectionUpdateTracker.hasAllNeighbors` requires loaded for a first build).
+const NEIGHBOUR_CHUNKS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
 
 /// What the client knows about a section right now: gone (its chunk is not loaded),
 /// loaded and empty, or loaded with blocks.
@@ -36,6 +52,12 @@ fn section_state(world: &World, pos: SectionPos) -> SectionLoadState {
             Some(_) => SectionLoadState::NonEmpty,
         },
     }
+}
+
+/// The section the camera is in (the feed and the settle test ask for it every frame).
+pub(crate) fn camera_section(c: &haste_render::Camera) -> SectionPos {
+    let p = c.pos.floor().as_ivec3();
+    SectionPos::new(p.x >> 4, p.y >> 4, p.z >> 4)
 }
 
 /// Vanilla `SectionUpdateTracker.hasAllNeighbors`: the eight horizontal neighbour
@@ -93,6 +115,17 @@ pub struct WorldFeed {
     wanted_waiting_version: Option<u64>,
     /// Chunks whose columns the renderer's empty-section map has been told about.
     noted_columns: HashSet<ChunkPos>,
+    /// Columns a first-build hold is waiting on (vanilla re-checks its dirty set every
+    /// frame; Haste only re-checks `waiting` on visible-set changes, so a section whose
+    /// neighbours all arrived under a still camera would stay unmeshed until the next
+    /// turn). When one of these columns loads, the next feed re-runs the promotion
+    /// whatever the visible-set version.
+    first_build_waits: HashSet<ChunkPos>,
+    /// A column with waiting holds just loaded: promote `waiting` this frame.
+    rescan_waiting: bool,
+    /// The rotating cursor of the pre-mesh scan through `waiting` (see
+    /// [`PREMESH_SCAN_PER_FRAME`]).
+    premesh_cursor: usize,
     sort_needed: bool,
     pub(crate) last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
@@ -106,6 +139,11 @@ pub struct WorldFeed {
     source: Option<Arc<dyn SnapshotSource>>,
     /// Sections submitted this frame (reused).
     batch: Vec<SectionPos>,
+    /// The work-budget mode this feed's renderer runs (`--work-budget`; the feed's
+    /// uploads are the budgeted work, so the feed carries the flag).
+    work_budget: haste_render::WorkBudgetMode,
+    /// The last feed call's wall time in ms (the work budget's CPU cost input).
+    last_feed_ms: f32,
     /// The first-person state last sent to the renderer (None also before the first), and
     /// the skin it was drawn with.
     first_person: Option<game::FirstPersonView>,
@@ -130,6 +168,19 @@ impl SnapshotSource for SharedWorldSource {
 }
 
 impl WorldFeed {
+    /// A feed running the given work-budget mode (`--work-budget`; `Default` is
+    /// `fixed`, the historical behaviour).
+    pub(crate) fn with_work_budget(mode: haste_render::WorkBudgetMode) -> Self {
+        Self {
+            work_budget: mode,
+            ..Default::default()
+        }
+    }
+
+    /// The last feed call's wall time in ms (the work budget's CPU cost input).
+    pub(crate) fn last_feed_ms(&self) -> f32 {
+        self.last_feed_ms
+    }
     /// Pulls new dirty sections from the game thread.
     fn collect(&mut self, shared: &Shared) {
         let mut dirty = shared.dirty.lock();
@@ -183,6 +234,8 @@ impl WorldFeed {
         camera: SectionPos,
         view_distance: i32,
     ) {
+        let started = Instant::now();
+        renderer.set_work_budget(self.work_budget);
         self.collect(shared);
         self.promote_wanted(renderer);
         if self.sort_needed {
@@ -219,6 +272,12 @@ impl WorldFeed {
                 if !self.noted_columns.contains(&pos.chunk()) {
                     if let Some(chunk) = world.chunk(pos.chunk()) {
                         self.noted_columns.insert(pos.chunk());
+                        // A chunk just loaded: if any first-build hold waited on this
+                        // column, re-run the promotion this frame whatever the
+                        // visible-set version.
+                        if self.first_build_waits.remove(&pos.chunk()) {
+                            self.rescan_waiting = true;
+                        }
                         for (i, section) in chunk.sections.iter().enumerate() {
                             let p = SectionPos::new(pos.x, chunk.min_section + i as i32, pos.z);
                             renderer.note_section_state(
@@ -267,6 +326,15 @@ impl WorldFeed {
                         if first_build || !renderer.wants_section(pos) {
                             self.queue.pop();
                             self.waiting.push(pos);
+                            if first_build {
+                                // The hold waits on the section's neighbour chunks: note
+                                // their columns, so the promotion re-runs when one loads
+                                // (see [`Self::first_build_waits`]).
+                                for (nx, nz) in NEIGHBOUR_CHUNKS {
+                                    self.first_build_waits
+                                        .insert(ChunkPos::new(pos.x + nx, pos.z + nz));
+                                }
+                            }
                             continue;
                         }
                         self.queue.pop();
@@ -280,18 +348,74 @@ impl WorldFeed {
                     }
                 }
             }
+            // Pre-mesh (turn prediction): with submit budget left over after the
+            // visible sections, pick held-back sections the renderer's widened cone
+            // wants. Visible sections always go first — this only fills the remainder —
+            // and the same backlog cap and upload budget apply (the sections join the
+            // same batch). A wrong guess only meshes a section early.
+            if renderer.premesh_enabled()
+                && renderer.premesh_active()
+                && batch.len() < SUBMIT_PER_FRAME
+                && !self.waiting.is_empty()
+            {
+                let mut scanned = 0;
+                while batch.len() < SUBMIT_PER_FRAME && scanned < PREMESH_SCAN_PER_FRAME {
+                    if self.premesh_cursor >= self.waiting.len() {
+                        self.premesh_cursor = 0;
+                    }
+                    let pos = self.waiting[self.premesh_cursor];
+                    scanned += 1;
+                    // The cone test runs before any world probe (it reads only the
+                    // mask and the widened frustum): the scan covers thousands of
+                    // held-back entries per frame at high render distance and the cone
+                    // holds a small fraction of them, so the world lock and the
+                    // neighbour probes only run for sections actually inside it.
+                    if !renderer.wants_premesh(pos) {
+                        self.premesh_cursor += 1;
+                        continue;
+                    }
+                    let state = section_state(&world, pos);
+                    renderer.note_section_state(pos, state);
+                    let was_meshed = self.meshed.contains(&pos);
+                    // The same rules as a visible submission (a first build waits for
+                    // every neighbour chunk; an empty section never meshed has nothing
+                    // to draw).
+                    let first_build = !was_meshed
+                        && state == SectionLoadState::NonEmpty
+                        && !has_all_neighbours(&world, pos, camera, view_distance);
+                    let submittable = !first_build
+                        && state != SectionLoadState::Unloaded
+                        && !(state == SectionLoadState::Empty && !was_meshed);
+                    if submittable {
+                        self.waiting.swap_remove(self.premesh_cursor);
+                        self.queued.remove(&pos);
+                        if state == SectionLoadState::NonEmpty {
+                            self.meshed.insert(pos);
+                        } else {
+                            self.meshed.remove(&pos);
+                        }
+                        renderer.note_premeshed(pos);
+                        batch.push(pos);
+                    } else {
+                        self.premesh_cursor += 1;
+                    }
+                }
+            }
         }
         // Also uploads meshes that finished since the last frame.
         renderer.update_world_from(&source, &batch, camera_chunk, view_distance);
         self.batch = batch;
+        self.last_feed_ms = started.elapsed().as_secs_f32() * 1000.0;
     }
 
     /// Moves held-back sections that became wanted back into the queue (a new visible
-    /// set or a turned look both change what the renderer wants).
+    /// set or a turned look both change what the renderer wants), or when a chunk a
+    /// first-build hold waited on has loaded ([`Self::rescan_waiting`]).
     fn promote_wanted(&mut self, renderer: &Renderer) {
-        if renderer.want_version() == self.last_want_version {
+        if renderer.want_version() == self.last_want_version && !self.rescan_waiting {
             return;
         }
+        self.rescan_waiting = false;
         self.last_want_version = renderer.want_version();
         if self.waiting.is_empty() {
             return;
@@ -353,6 +477,9 @@ impl WorldFeed {
             for inst in &mut self.instances {
                 inst.sample_light(&*world);
             }
+            // The minecarts' rail snapping reads the level (`OldMinecartBehavior.getPos`),
+            // so it happens here too, per frame.
+            haste_entity::minecart::snap_rails(&mut self.instances, &*world, &shared.data.blocks);
         }
         (&self.instances, &self.be_instances)
     }

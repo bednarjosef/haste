@@ -27,6 +27,9 @@ mod experience_orb;
 mod flame;
 mod item;
 mod item_frame;
+mod minecart;
+#[cfg(test)]
+mod minecart_tests;
 mod painting;
 mod pipelines;
 mod piston;
@@ -348,6 +351,9 @@ pub struct EntityRenderer {
     /// The moving pistons' moved-block quads, by the state string (resolved once per state a
     /// piston ever moves).
     piston_quads: ahash::AHashMap<String, Option<Arc<Vec<crate::blockentity::PistonQuad>>>>,
+    /// The minecarts' display-block geometry, by state id (resolved once per state a cart
+    /// ever shows; vanilla's `BlockModelResolver` caches the same way).
+    minecart_quads: ahash::AHashMap<u32, Option<Arc<minecart::DisplayGeometry>>>,
     /// The beacon/gateway beam vertices (own pipelines: the beam ignores the lightmap), split
     /// into the opaque inner beam and the translucent glow (two draws, one buffer each), and
     /// the end portal/gateway starfield cube (position-only pipeline).
@@ -446,6 +452,7 @@ impl EntityRenderer {
                     // The lightning bolt draws through the weather pass's own additive
                     // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
                     Decoration::Lightning(_) => {}
+                    Decoration::Minecart(c) => self.emit_minecart(e, c, camera, light, assets),
                     Decoration::ExperienceOrb(o) => self.emit_experience_orb(
                         e,
                         o.value,

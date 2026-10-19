@@ -1,7 +1,10 @@
-//! `LivingEntity`'s client-side tick state: the walk animation and the hand swing, moved out
-//! of `store` (vanilla's own classes of the same names).
+//! The walk and hand-swing animation states (`LivingEntity.walkAnimation` and
+//! `LivingEntity.swingState`), moved out of the store so the store keeps only storage.
 
-use crate::store::lerp;
+/// `Mth.lerp`.
+pub(crate) fn lerp(delta: f32, start: f32, end: f32) -> f32 {
+    start + delta * (end - start)
+}
 
 /// Vanilla `WalkAnimationState`: the smoothed horizontal speed and the position that accumulates
 /// it, which drive the limb swing. `LivingEntity.calculateEntityAnimation` feeds it the per-tick

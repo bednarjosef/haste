@@ -53,6 +53,8 @@ public final class Scenario {
     private boolean waitingForCapture = false;
     private boolean captureDone = false;
     private String captureError = null;
+    // turn step: the yaw the turn started from.
+    private float turnStartYaw = 0;
 
     private Scenario(Path file, List<Step> steps) {
         this.file = file;
@@ -73,7 +75,8 @@ public final class Scenario {
             String[] args = rest.isEmpty() ? new String[0] : rest.split("\\s+");
             switch (op) {
                 case "wait", "fps", "frametimes", "wait_world", "cmd", "look", "hud", "screen", "chat", "screenshot",
-                     "record", "slot", "quit", "log", "dump_models", "dump_block_sounds" -> {}
+                     "record", "slot", "quit", "log", "dump_models", "dump_block_sounds",
+                     "turn", "fly", "frametimes_start", "frametimes_end" -> {}
                 default -> throw new IOException(file + ":" + n + ": unknown step '" + op + "'");
             }
             steps.add(new Step(n, op, args, rest));
@@ -208,6 +211,46 @@ public final class Scenario {
                 player.setXRot(pitch);
                 player.yRotO = yaw;
                 player.xRotO = pitch;
+                return true;
+            }
+            case "turn" -> {
+                // Turn <degrees> over <ticks> client ticks, smoothly: each tick advances
+                // the yaw linearly and the previous tick's target is left as the old
+                // rotation, so rendering interpolates a constant-speed turn — the same
+                // camera motion `haste --bench-window --bench-path turns` replays.
+                int ticks = Integer.parseInt(a[1]);
+                if (ticks < 1) throw new IllegalArgumentException("turn needs at least 1 tick");
+                if (!stepStarted) {
+                    stepStarted = true;
+                    turnStartYaw = player.getYRot();
+                }
+                float degrees = Float.parseFloat(a[0]);
+                player.setYRot(turnStartYaw + degrees * (stepTicks + 1) / ticks);
+                player.yRotO = turnStartYaw + degrees * stepTicks / ticks;
+                return stepTicks + 1 >= ticks;
+            }
+            case "fly" -> {
+                // Fly <x> <z> blocks per tick for <ticks> client ticks (spectator: the
+                // client is authoritative there). The vertical part of a flight leg is a
+                // `cmd tp` before this step, like Haste's path lifting the camera.
+                player.setPos(player.getX() + Double.parseDouble(a[0]), player.getY(),
+                    player.getZ() + Double.parseDouble(a[1]));
+                return stepTicks + 1 >= Integer.parseInt(a[2]);
+            }
+            case "frametimes_start" -> {
+                // Frame recording around a motion sequence (the blocking `frametimes`
+                // step would hold the camera still instead).
+                FrameTimes.start();
+                return true;
+            }
+            case "frametimes_end" -> {
+                try {
+                    RecorderIO.LOGGER.info("haste-recorder: {}", FrameTimes.finish(a[0],
+                        mc.options.getEffectiveRenderDistance(),
+                        mc.getWindow().getWidth(), mc.getWindow().getHeight()));
+                } catch (IOException e) {
+                    throw new IllegalStateException("writing frametimes", e);
+                }
                 return true;
             }
             case "slot" -> {

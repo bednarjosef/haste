@@ -19,8 +19,10 @@ fn sample(frame_ms: f32) -> BenchSample {
         sections_new: 0,
         uploads: 0,
         upload_bytes: 0,
+        upload_budget_ms: 2.0,
         indices_drawn: 0,
         index: 0,
+        visible_unmeshed: 0,
     }
 }
 
@@ -42,7 +44,7 @@ fn bench_summary_averages_and_percentile() {
     let samples: Vec<BenchSample> = (0..200)
         .map(|i| sample(if i == 0 { 100.0 } else { 10.0 }))
         .collect();
-    let s = bench_summary(&samples);
+    let s = bench_summary(&samples, (0, 0, 0));
     assert_eq!(s.frames, 200);
     // f32: (199*10 + 100)/200 accumulates to 10.45.
     assert!((s.avg_ms - 10.45).abs() < 1e-2, "{}", s.avg_ms);
@@ -112,6 +114,80 @@ fn bench_camera_path_turns_then_flies() {
     let c = bench_camera(0.75, &base, 60.0);
     assert!((c.pos.x - 250.0).abs() < 1e-4, "{}", c.pos.x);
     assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+}
+
+#[test]
+fn turns_path_holds_turns_180_alternately_then_flies() {
+    let base = Camera {
+        pos: DVec3::new(9.5, 71.0, 6.5),
+        yaw: 0.0,
+        pitch: 10.0,
+        fov_deg: 70.0,
+        hand_fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    };
+    // 30 s run: 2 s hold, turning until 60% (18 s: four full 4 s cycles + 2 s into the
+    // fifth), then flight for the last 40% (12 s).
+    // Hold: at the base, unturned, unmoved.
+    let c = bench_camera_turns(0.0, &base, 30.0);
+    assert_eq!((c.pos, c.yaw), (base.pos, 0.0));
+    let c = bench_camera_turns(1.99, &base, 30.0);
+    assert_eq!((c.pos, c.yaw), (base.pos, 0.0));
+    // First turn: 180 deg/s for 1 s, so half a second in is 90 degrees around.
+    let c = bench_camera_turns(2.5, &base, 30.0);
+    assert!((c.yaw - 90.0).abs() < 1e-4, "{}", c.yaw);
+    assert_eq!(c.pos, base.pos, "no movement during a turn");
+    // Held at +180 after the first turn.
+    let c = bench_camera_turns(3.5, &base, 30.0);
+    assert!((c.yaw - 180.0).abs() < 1e-4, "{}", c.yaw);
+    // Second turn: back the other way, 90 degrees in is +90 again.
+    let c = bench_camera_turns(6.5, &base, 30.0);
+    assert!((c.yaw - 90.0).abs() < 1e-4, "{}", c.yaw);
+    let c = bench_camera_turns(7.5, &base, 30.0);
+    assert!((c.yaw - 0.0).abs() < 1e-4, "{}", c.yaw);
+    // The turning phase ends at 18 s (t = 16 into it: four full cycles, the last one
+    // ending back at the base look) — the look holds wherever the last cycle left it.
+    let c = bench_camera_turns(17.9, &base, 30.0);
+    assert!((c.yaw - 0.0).abs() < 1e-4, "{}", c.yaw);
+    let c = bench_camera_turns(18.0, &base, 30.0);
+    assert!((c.yaw - 0.0).abs() < 1e-4, "{}", c.yaw);
+    // Flight leg: 10 blocks/s along +X, 20 blocks up. 3 s in is 30 blocks.
+    let c = bench_camera_turns(21.0, &base, 30.0);
+    assert!((c.pos.x - 39.5).abs() < 1e-4, "{}", c.pos.x);
+    assert!((c.pos.y - 91.0).abs() < 1e-4, "{}", c.pos.y);
+    assert!((c.yaw - 0.0).abs() < 1e-4, "{}", c.yaw);
+    // End of the run: 12 s flown = 120 blocks.
+    let c = bench_camera_turns(30.0, &base, 30.0);
+    assert!((c.pos.x - 129.5).abs() < 1e-4, "{}", c.pos.x);
+}
+
+#[test]
+fn popin_summary_counts_episodes_and_section_frames() {
+    // A turn: 3 unmeshed frames, one meshed, 2 more unmeshed, then quiet.
+    let unmeshed = [0u32, 4, 2, 1, 0, 7, 3, 0, 0];
+    let samples: Vec<BenchSample> = unmeshed
+        .iter()
+        .enumerate()
+        .map(|(i, u)| {
+            let mut s = sample(5.0);
+            s.index = i as u32;
+            s.visible_unmeshed = *u;
+            s
+        })
+        .collect();
+    let p = popin_summary(&samples);
+    let (episodes, avg, worst) = p.stats();
+    assert_eq!(episodes, 2, "two turns with pop-in");
+    assert!((avg - 2.5).abs() < 1e-6, "{avg}");
+    assert_eq!(worst, 3);
+    assert_eq!(p.frames_with_unmeshed, 5);
+    assert_eq!(p.unmeshed_section_frames, 17);
+    // A run that never pops: no episode, no frames.
+    let clean: Vec<BenchSample> = (0..10).map(|_| sample(5.0)).collect();
+    let p = popin_summary(&clean);
+    assert_eq!(p.stats(), (0, 0.0, 0));
+    assert_eq!(p.unmeshed_section_frames, 0);
 }
 
 #[test]

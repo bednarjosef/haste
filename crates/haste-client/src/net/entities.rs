@@ -193,6 +193,10 @@ impl Session {
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
+            // Entity status 70 primes a TNT minecart's fuse (MinecartTNT.handleEntityEvent).
+            P::EntityEvent(e) if e.status == 70 => {
+                entities.prime_tnt_minecart(EntityId(e.entity_id))
+            }
             P::SetEntityData(d) => {
                 // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
                 // supply and the screen effects' on-fire and freeze ticks), and `_ if

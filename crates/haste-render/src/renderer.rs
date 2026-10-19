@@ -26,13 +26,17 @@ mod frame_setup;
 mod gui_pass;
 mod init;
 mod mesh_gate;
+mod premesh;
 mod query;
 mod readback;
 mod render_world;
 mod surface;
 mod terrain_feed;
+mod work_budget;
 
+pub use premesh::PremeshMode;
 pub use terrain_feed::SectionLoadState;
+pub use work_budget::WorkBudgetMode;
 #[cfg(test)]
 mod tests;
 mod textures;
@@ -154,6 +158,9 @@ pub struct FrameStats {
     pub chunk_sections_drawn: u32,
     pub chunk_sections_total: u32,
     pub meshes_pending: u32,
+    /// Sections this frame's gate wants that have no mesh yet (pop-in; 0 unless the
+    /// bench turned tracking on with `set_popin_tracking`).
+    pub visible_unmeshed: u32,
     pub draw_calls: u32,
     /// Block entities drawn this frame (chests, shulker boxes; one batched draw with entities).
     pub block_entities_drawn: u32,
@@ -161,6 +168,8 @@ pub struct FrameStats {
     pub uploads: u32,
     /// Vertex+index bytes written by this frame's uploads.
     pub upload_bytes: u64,
+    /// The upload budget this frame's feed worked to, in ms (`--work-budget`).
+    pub upload_budget_ms: f32,
     /// Terrain indices drawn this frame (six per quad): the vertex-fetch load.
     pub indices_drawn: u32,
 }
@@ -290,6 +299,16 @@ pub struct Renderer {
     /// The last frame's frustum planes and camera position, for the mesh gate
     /// (`wants_section`): written in `render`, read by the feed before the next one.
     want_frustum: Option<([glam::Vec4; 6], glam::DVec3)>,
+    /// Turn prediction for the mesh gate (`--premesh`): the mode, the smoothed camera
+    /// motion, the widened frustum of the current frame and the pop-in/pre-mesh metrics
+    /// (see `renderer/premesh.rs`).
+    premesh: premesh::Premesh,
+    /// The background-work budget (`--work-budget`): the mode, the frame-cost
+    /// predictions and the frame-time target (see `renderer/work_budget.rs`).
+    work_budget: work_budget::WorkBudget,
+    /// Finished meshes held back by the adaptive budget's visible-first ordering (a
+    /// section the gate no longer wants: pre-meshed or turned away from). Reused.
+    premesh_hold: std::collections::VecDeque<SectionMesh>,
     /// The camera entity is a spectator (`Camera.extractRenderState` reads it off the player),
     /// for the solid-block rule below.
     camera_spectator: bool,

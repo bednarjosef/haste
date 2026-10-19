@@ -96,6 +96,23 @@ pub struct Args {
     /// e.g. the screenshot comparison spot).
     #[arg(long)]
     pub bench_fixed: bool,
+    /// Pre-mesh mode (turn prediction for the mesh gate), overriding the saved option:
+    /// `off` is exactly vanilla's visible-only meshing, `cone` widens the mesh gate's
+    /// frustum toward the turn, `predict` drives that widening with an online yaw
+    /// predictor. The default comes from the config's `[options] premesh`.
+    #[arg(long)]
+    pub premesh: Option<String>,
+    /// Windowed bench camera path: `still` (default) holds the settle camera, `turns`
+    /// holds, then does 180-degree turns at a fixed speed every few seconds plus a
+    /// straight flight leg — the same motion every run, for the pre-mesh comparison.
+    #[arg(long, default_value = "still")]
+    pub bench_path: String,
+    /// The background-work budget: `fixed` (default) is the historical 2 ms / 8 ms mesh
+    /// upload budgets; `adaptive` predicts the next frame's cost from the recent frames
+    /// and gives the uploads the time left to the frame-time target, visible sections
+    /// first, so a burst of work no longer lands on whichever frame it arrived in.
+    #[arg(long)]
+    pub work_budget: Option<String>,
     /// Render distance in chunks, overriding the saved option (like `--vsync`).
     #[arg(long)]
     pub render_distance: Option<u8>,

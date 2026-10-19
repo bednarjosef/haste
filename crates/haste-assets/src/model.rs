@@ -175,6 +175,10 @@ pub struct ResolvedModel {
     pub(crate) firstperson_display: Option<DisplayTransform>,
     /// `display.thirdperson_righthand`, likewise (held items on mobs and players).
     pub(crate) thirdperson_display: Option<DisplayTransform>,
+    /// `display.thirdperson_lefthand`, likewise, with the per-file fallback to the same
+    /// file's right entry (`ItemTransforms.getTransform(THIRD_PERSON_LEFT_HAND)`); the
+    /// left-hand fix applies on top at draw time.
+    pub(crate) thirdperson_left_display: Option<DisplayTransform>,
     /// `display.head`, likewise (heads and hats worn on the head).
     pub(crate) head_display: Option<DisplayTransform>,
     /// `display.ground`, likewise (dropped item entities).

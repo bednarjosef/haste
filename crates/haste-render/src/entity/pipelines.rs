@@ -433,6 +433,7 @@ impl EntityRenderer {
             arm_models: [None, None, None, None],
             frame_models: HashMap::new(),
             piston_quads: ahash::AHashMap::new(),
+            minecart_quads: ahash::AHashMap::new(),
             beam_vertices: Vec::new(),
             beam_buffer,
             beam_capacity: 1024,

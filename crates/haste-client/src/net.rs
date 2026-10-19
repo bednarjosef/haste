@@ -54,6 +54,8 @@ pub struct Session {
     pub music_volume: f32,
     /// Counters.
     pub counters: NetCounters,
+    /// Game ticks since the join (the packet handlers' log lines carry it).
+    pub tick: u64,
     /// Profiles added by `player_info_update` since the game thread last took them, with their
     /// `textures` property, for the skin manager (`game::skins`).
     pub profiles: Vec<crate::game::skins::ProfileRequest>,
@@ -234,6 +236,7 @@ impl Session {
                 got_login: true,
                 ..Default::default()
             },
+            tick: 0,
             entity_id,
             dimension,
             biome_audio: Vec::new(),
@@ -480,11 +483,14 @@ impl Session {
             damage::hurt_to(self, old, h.health);
         }
         if player_packet {
-            // The drain holds the player's borrow, so the edits apply from a collected copy.
-            let edits: Vec<_> = self.player.take_world_edits().collect();
-            for (pos, state) in edits {
+            // The edits are taken out first: the loop below borrows the session.
+            for (pos, state) in self.player.take_world_edits() {
                 self.set_block_with_block_entities(world, pos, state);
             }
+            // The predictions the ack in this batch released (`ClientLevel
+            // .syncBlockState`: the server's state restored, the player snapped back
+            // only when it collides with it).
+            self.sync_block_state(world);
             // The boat we steer is this side's authoritative instance of it (vanilla
             // `Entity.isLocalInstanceAuthoritative`): the entity the world draws sits where our
             // simulation put it, not where the server's move packets for it still have it.
@@ -548,6 +554,7 @@ mod registries;
 mod remote_use;
 mod session_tick;
 mod sinks;
+mod sync_block_state;
 mod vehicle;
 mod weather;
 mod world;
