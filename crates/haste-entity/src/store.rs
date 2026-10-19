@@ -7,7 +7,7 @@ use ahash::AHashMap;
 use haste_core::entity::{
     EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo, Pose,
 };
-use haste_core::ids::{EntityId, RegistryIndex};
+use haste_core::ids::{BlockStateId, EntityId, RegistryIndex};
 use haste_core::math::Vec3;
 use haste_core::model::EntityInstance;
 use haste_core::DVec3;
@@ -143,6 +143,9 @@ pub struct Entity {
     /// Whether the type is a `LivingEntity` (its metadata index 8 is the living-flags
     /// byte; only such entities track a use).
     pub(crate) is_living: bool,
+    /// True for a `minecraft:tnt` entity: the client ticks its own fuse down
+    /// (`PrimedTnt.tick` runs on the client as well, between the server's syncs).
+    pub(crate) is_tnt: bool,
     /// An item use the server started (`useItem`/`useItemRemaining`; see `using_item`).
     pub using_item: crate::using_item::UsingItem,
 }
@@ -165,6 +168,7 @@ impl Entity {
         };
         // `ItemEntity`: simulated client-side; `set_metadata` confirms it at index 8.
         let is_item = type_name == Some("minecraft:item");
+        let is_tnt = type_name == Some("minecraft:tnt");
         Entity {
             id: s.id,
             uuid: s.uuid,
@@ -214,6 +218,7 @@ impl Entity {
             age: 0,
             cloak: crate::avatar::Cloak::default(),
             is_living: living,
+            is_tnt,
             using_item: crate::using_item::UsingItem::default(),
         }
     }
@@ -322,6 +327,10 @@ pub struct EntityStore {
     /// Item default components (the `equippable` component armour reads), from the datagen
     /// report; empty when absent (armour then draws nothing).
     item_components: haste_data::ItemComponents,
+    /// The TNT block's default state: what a primed TNT without a synced
+    /// `DATA_BLOCK_STATE_ID` renders as. `AIR` until set (draws nothing), matching
+    /// `PrimedTnt.DEFAULT_BLOCK_STATE`.
+    default_tnt_state: BlockStateId,
     /// Each player's resolved skin (`PlayerInfo.getSkin`), by profile id; a player without one
     /// wears its default skin (`DefaultPlayerSkin.get`).
     skins: AHashMap<Uuid, Arc<crate::skin::PlayerSkin>>,
@@ -362,6 +371,7 @@ impl EntityStore {
             mob_variants: crate::variants::MobVariants::empty(),
             world_age: 0,
             item_components: haste_data::ItemComponents::default(),
+            default_tnt_state: BlockStateId::AIR,
             use_ticks: Vec::new(),
         }
     }
@@ -370,6 +380,12 @@ impl EntityStore {
     /// from the datagen report at startup.
     pub fn set_item_components(&mut self, components: haste_data::ItemComponents) {
         self.item_components = components;
+    }
+
+    /// Sets the TNT block's default state (what a primed TNT renders as without a synced
+    /// `DATA_BLOCK_STATE_ID`), resolved from the block tables at startup.
+    pub fn set_default_tnt_state(&mut self, state: BlockStateId) {
+        self.default_tnt_state = state;
     }
 
     /// Sets the synced `minecraft:painting_variant` table (id -> size/asset), from the server's
@@ -689,6 +705,11 @@ impl EntityStore {
             if slot.is_item {
                 crate::item_entity::tick(slot, world);
             }
+            // `PrimedTnt.tick` runs on the client too: the fuse counts down locally
+            // between the server's entity-data syncs (which overwrite it in lockstep).
+            if slot.is_tnt {
+                slot.metadata.tnt_fuse = slot.metadata.tnt_fuse.saturating_sub(1);
+            }
             // `LivingEntity.tick`'s use step (`updatingUsingItem`), after `super.tick()`
             // like vanilla: the tick is recorded for the client's effects.
             crate::using_item::step(slot, &self.dims, &mut self.use_ticks);
@@ -783,17 +804,27 @@ impl EntityStore {
                 &self.painting_variants,
                 slot.id.0,
                 slot.tick_count as f32 + partial_tick,
+                partial_tick,
+                self.default_tnt_state,
             );
-            let pos = if decoration.is_some() {
-                crate::decoration::render_center(
-                    slot.kind,
-                    slot.data,
-                    slot.pos,
-                    &slot.metadata,
-                    &self.painting_variants,
-                )
-            } else {
-                slot.prev_pos.lerp(slot.pos, partial_tick as f64)
+            let pos = match &decoration {
+                // Hanging entities (item frames, paintings) moved to the wall centre vanilla's
+                // `recalculateBoundingBox` computes; the bolt and the orb keep the entity's own
+                // position; falling blocks and TNT interpolate like every other entity
+                // (vanilla renders them from `Entity.getPosition` at the partial tick).
+                Some(haste_core::model::Decoration::ItemFrame(_))
+                | Some(haste_core::model::Decoration::Painting(_))
+                | Some(haste_core::model::Decoration::Lightning(_))
+                | Some(haste_core::model::Decoration::ExperienceOrb(_)) => {
+                    crate::decoration::render_center(
+                        slot.kind,
+                        slot.data,
+                        slot.pos,
+                        &slot.metadata,
+                        &self.painting_variants,
+                    )
+                }
+                _ => slot.prev_pos.lerp(slot.pos, partial_tick as f64),
             };
             let (model, has_head, overlays) = if slot.is_player_type {
                 (crate::models::humanoid(false), true, Default::default())

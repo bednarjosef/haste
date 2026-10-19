@@ -371,6 +371,30 @@ pub enum Decoration {
     Painting(PaintingDecoration),
     Lightning(LightningDecoration),
     ExperienceOrb(ExperienceOrbDecoration),
+    FallingBlock(FallingBlockDecoration),
+    PrimedTnt(PrimedTntDecoration),
+}
+
+/// The state `FallingBlockRenderer.extractRenderState` collects for a falling block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FallingBlockDecoration {
+    /// The entity's block state (`FallingBlockEntity.getBlockState`, sent as the spawn
+    /// packet's data field: `Block.getId` of the state).
+    pub block_state: crate::BlockStateId,
+    /// The world's block at the entity's position is the falling state: the block has
+    /// landed, and `FallingBlockRenderer.shouldRender` draws nothing (set by the client,
+    /// which owns the world view).
+    pub landed: bool,
+}
+
+/// The state `TntRenderer.extractRenderState` collects for a primed TNT.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PrimedTntDecoration {
+    /// The entity's block state (`PrimedTnt.DATA_BLOCK_STATE_ID`; the TNT block's default
+    /// state when the server sent none).
+    pub block_state: crate::BlockStateId,
+    /// `TntRenderState.fuseRemainingInTicks`: `getFuse() - partialTicks + 1`.
+    pub fuse: f32,
 }
 
 /// The state `ExperienceOrbRenderer.submit` collects for an experience orb.

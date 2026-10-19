@@ -9,8 +9,9 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
-    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
-    ModelPart, PaintingDecoration, PoseOverrides,
+    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance,
+    FallingBlockDecoration, ItemFrameDecoration, ModelPart, PaintingDecoration, PoseOverrides,
+    PrimedTntDecoration,
 };
 use haste_core::parts::{self, PartId};
 use haste_core::view::BlockView;
@@ -20,9 +21,11 @@ use crate::gui::Shelf;
 
 mod atlas;
 mod block_entities;
+mod block_model;
 mod cape;
 mod equipment;
 mod experience_orb;
+mod falling_block;
 mod flame;
 mod item;
 mod item_frame;
@@ -33,6 +36,7 @@ mod shadow;
 mod sign;
 #[cfg(test)]
 mod tests;
+mod tnt;
 
 mod hand;
 mod humanoid;
@@ -347,6 +351,11 @@ pub struct EntityRenderer {
     /// The moving pistons' moved-block quads, by the state string (resolved once per state a
     /// piston ever moves).
     piston_quads: ahash::AHashMap<String, Option<Arc<Vec<crate::blockentity::PistonQuad>>>>,
+    /// The terrain's baked block models and its atlas: the moving-block path
+    /// (`FallingBlockRenderer`, `TntRenderer` — see `entity/block_model.rs`) draws block
+    /// states through them, textures resolved into the entity atlas like the piston's.
+    baked: Arc<haste_assets::BakedBlockModels>,
+    terrain_atlas: Arc<haste_assets::AtlasBuilder>,
     /// The beacon/gateway beam vertices (own pipelines: the beam ignores the lightmap), split
     /// into the opaque inner beam and the translucent glow (two draws, one buffer each), and
     /// the end portal/gateway starfield cube (position-only pipeline).
@@ -447,6 +456,12 @@ impl EntityRenderer {
                         orientation,
                         assets,
                     ),
+                    // Vanilla `FallingBlockRenderer` / `TntRenderer`: the entity's block
+                    // state drawn as the block model (see the renderer modules).
+                    Decoration::FallingBlock(f) => {
+                        self.emit_falling_block(e, f, camera, light, assets)
+                    }
+                    Decoration::PrimedTnt(t) => self.emit_primed_tnt(e, t, camera, light, assets),
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;

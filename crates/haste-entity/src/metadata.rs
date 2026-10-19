@@ -77,7 +77,6 @@ impl LivingFlags {
 }
 
 /// Per-entity metadata: interpreted shared fields plus every raw entry, indexed.
-#[derive(Default)]
 pub struct Metadata {
     pub shared: SharedFlags,
     pub pose: Option<Pose>,
@@ -99,6 +98,14 @@ pub struct Metadata {
     /// `AbstractVillager.DATA_UNHAPPY_COUNTER` (index 18, an int: `AgeableMob`'s two accessors
     /// sit at 16/17, then `AbstractVillager`'s). `> 0` means the villager shakes its head.
     pub villager_unhappy: bool,
+    /// `PrimedTnt.DATA_FUSE_ID` (index 8, an int: `PrimedTnt` extends `Entity`, not
+    /// `LivingEntity`, so its first slot follows the eight shared ones). The default is
+    /// vanilla's `DEFAULT_FUSE_TIME`; the client ticks it down itself (`PrimedTnt.tick`
+    /// runs client-side too) between the server's syncs.
+    pub tnt_fuse: i32,
+    /// `PrimedTnt.DATA_BLOCK_STATE_ID` (index 9): the block the TNT renders as; `None` when
+    /// the server sent none (the TNT block's default state).
+    pub tnt_block_state: Option<haste_core::BlockStateId>,
     /// All entries (including the shared ones), kept so later consumers can read the rest.
     entries: std::vec::Vec<MetadataEntry>,
 }
@@ -125,8 +132,12 @@ impl Metadata {
                 }
                 (6, MetadataValue::Pose(p)) => self.pose = Some(*p),
                 // Index 8 is `LivingEntity`'s flags byte; `ItemEntity`'s stack sits on the
-                // same index as an ItemStack, so the wire type tells them apart.
+                // same index as an ItemStack, so the wire type tells them apart. `PrimedTnt`
+                // (not a living entity) puts its fuse int on the same slot.
                 (8, MetadataValue::Byte(b)) => self.living = LivingFlags::from_byte(*b),
+                (8, MetadataValue::VarInt(v)) => self.tnt_fuse = *v,
+                // Index 9: `PrimedTnt.DATA_BLOCK_STATE_ID`.
+                (9, MetadataValue::BlockState(s)) => self.tnt_block_state = Some(*s),
                 (15, MetadataValue::Byte(b)) => self.mob = MobFlags::from_byte(*b),
                 // Index 16 is `Creeper.DATA_SWELL_DIR` (int); `AgeableMob`'s baby flag at 16 is a
                 // bool, so the wire type keeps the two apart.
@@ -169,3 +180,28 @@ impl Metadata {
         self.entries.iter()
     }
 }
+
+impl Default for Metadata {
+    /// Everything starts cleared except the TNT fuse, whose synched default is vanilla's
+    /// `PrimedTnt.DEFAULT_FUSE_TIME` (80): a TNT that spawns without entity data counts
+    /// down from there.
+    fn default() -> Metadata {
+        Metadata {
+            shared: SharedFlags::default(),
+            pose: None,
+            mob: MobFlags::default(),
+            living: LivingFlags::default(),
+            custom_name: None,
+            custom_name_plain: None,
+            creeper_swell_dir: 0,
+            creeper_ignited: false,
+            villager_unhappy: false,
+            tnt_fuse: DEFAULT_TNT_FUSE,
+            tnt_block_state: None,
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// `PrimedTnt.DEFAULT_FUSE_TIME`.
+pub const DEFAULT_TNT_FUSE: i32 = 80;

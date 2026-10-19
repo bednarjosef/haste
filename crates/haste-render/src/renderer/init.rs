@@ -330,6 +330,8 @@ impl Renderer {
             &lightmap_bind_group_layout,
             font.clone(),
             assets,
+            baked.clone(),
+            atlas.clone(),
         );
         let sky = crate::sky::SkyRenderer::new(
             gpu.device.clone(),

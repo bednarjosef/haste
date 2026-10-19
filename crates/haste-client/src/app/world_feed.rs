@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use haste_protocol::haste_core::model::EntityInstance;
+use haste_protocol::haste_core::view::BlockView as _;
 use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
 use haste_render::{
     BlockEntityInstance, FrameStats, MeshSnapshot, Renderer, SectionLoadState, SnapshotSource,
@@ -408,6 +409,25 @@ impl WorldFeed {
         {
             let world = shared.world.read();
             for inst in &mut self.instances {
+                // Falling blocks carry their own light and landing rules: vanilla
+                // `FallingBlockRenderer.extractRenderState` samples the light at the block
+                // containing `(x, boundingBox.maxY, z)` (not the generic half-block-up
+                // probe), and `shouldRender` hides the entity once the world's block at
+                // its position is the falling state (the block has landed).
+                if let Some(haste_core::model::Decoration::FallingBlock(f)) = &mut inst.decoration {
+                    let p = haste_core::BlockPos::new(
+                        inst.pos.x.floor() as i32,
+                        (inst.pos.y + f64::from(inst.height)).floor() as i32,
+                        inst.pos.z.floor() as i32,
+                    );
+                    inst.light = (world.sky_light(p), world.block_light(p));
+                    f.landed = world.block_state(haste_core::BlockPos::new(
+                        inst.pos.x.floor() as i32,
+                        inst.pos.y.floor() as i32,
+                        inst.pos.z.floor() as i32,
+                    )) == f.block_state;
+                    continue;
+                }
                 inst.sample_light(&*world);
             }
         }

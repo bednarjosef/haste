@@ -4,6 +4,7 @@
 use super::*;
 
 impl EntityRenderer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
@@ -12,6 +13,8 @@ impl EntityRenderer {
         lightmap_layout: &wgpu::BindGroupLayout,
         font: Arc<haste_assets::BitmapFont>,
         assets: &mut Assets,
+        baked: Arc<haste_assets::BakedBlockModels>,
+        terrain_atlas: Arc<haste_assets::AtlasBuilder>,
     ) -> EntityRenderer {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("entity-atlas"),
@@ -383,6 +386,8 @@ impl EntityRenderer {
             arm_models: [None, None, None, None],
             frame_models: HashMap::new(),
             piston_quads: ahash::AHashMap::new(),
+            baked,
+            terrain_atlas,
             beam_vertices: Vec::new(),
             beam_buffer,
             beam_capacity: 1024,
