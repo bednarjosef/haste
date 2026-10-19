@@ -144,6 +144,19 @@ it is the top priority.
 - Faithfulness, performance and mod-readiness rules are in the sections above; they apply to every task.
 - Absolute paths in reports. Cite `file:line` for anything you want the lead to look at.
 
+## Finding your way: `hx` (agents, read this)
+
+`scripts/hx` answers the questions agents otherwise spend most of their tokens on, in a few
+capped lines instead of raw `grep`/`cat` output (`hx help` lists everything):
+`hx vanilla LocalPlayer.tick` prints a vanilla method (following superclasses), `hx vanilla
+LocalPlayer --grep tick` outlines a class, `hx vgrep PATTERN [dir]` searches vanilla with each
+hit labelled `Class.method:line`, `hx ported Class.method` finds the Haste code that ports it,
+`hx map [dir]` and `hx outline FILE` show the tree and a file's items with line ranges, and
+`hx check` runs fmt, file sizes, clippy and the tests of the crates you changed, errors only.
+Headless workers are launched with `tools/worker/run.py` (lean prompt, `hx` on PATH, hooks that
+refuse wasteful commands and hold the session until `hx done` passes); `tools/worker/RULES.md`
+is their condensed copy of this file and must follow it when this file changes.
+
 ## Branches and merging
 
 - `main` is the integration branch and is never committed to directly. All development happens on
@@ -182,6 +195,8 @@ crates/haste-setup      Mojang downloads, datagen, config, singleplayer server, 
 crates/haste-testkit    oracle formats, replay, screenshot diff, bench harness (oracles)
 crates/haste-client     the `haste` binary; one module per workstream (lead + all)
 tools/recorder-mod      Fabric mod for the real game that records golden data (oracles)
+tools/hx                agent codebase tools (`scripts/hx`): vanilla lookup, outlines, checks (lead)
+tools/worker            headless worker launcher, its rules, hooks and cost accounting (lead)
 phase2/                 spike code for Phase 2: Mixin bridge, surface scanner, oracle mod
 cache/                  gitignored: jars, assets, reports, oracle dumps, JDK
 ```
