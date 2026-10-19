@@ -9,6 +9,7 @@ pub mod decoration;
 pub mod dims;
 pub mod item_entity;
 pub mod lerp;
+pub mod living_state;
 pub mod local_player;
 pub mod metadata;
 pub mod model_dump;

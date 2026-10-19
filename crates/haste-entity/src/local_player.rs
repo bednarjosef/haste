@@ -9,7 +9,8 @@ use haste_core::DVec3;
 use uuid::Uuid;
 
 use crate::dims::EntityDimensions;
-use crate::store::{Entity, SwingState, DEATH_TICKS};
+use crate::living_state::SwingState;
+use crate::store::{Entity, DEATH_TICKS};
 
 impl Entity {
     /// The local player's model state, created at join with the login's entity id and profile
