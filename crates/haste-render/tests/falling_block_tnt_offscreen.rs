@@ -60,7 +60,8 @@ fn instance(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstance
         skin: None,
         nametag: None,
         below_name: None,
-        shadow_radius: 0.0,
+        // `FallingBlockRenderer`/`TntRenderer`: shadow radius 0.5.
+        shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
         display_fire: false,
@@ -82,6 +83,7 @@ fn instance(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstance
 fn render_scene(
     renderer: &mut Renderer,
     world: &dyn haste_core::view::BlockView,
+    shapes: &haste_data::BlockShapes,
     entities: &mut [EntityInstance],
     camera: Camera,
 ) -> image::RgbaImage {
@@ -112,6 +114,9 @@ fn render_scene(
         spin: None,
         weather: None,
     };
+    // `sample_world` extracts the entity shadows (the falling blocks' radius 0.5 discs on
+    // the floor below), like the app's frame path.
+    renderer.sample_world(world, shapes, &frame);
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()
 }
@@ -163,13 +168,14 @@ fn falling_blocks_and_tnt_offscreen() {
         .blocks
         .default_state(&Identifier::minecraft("tnt"))
         .expect("tnt state");
-    // The row: falling sand above the floor, a landed sand (draws nothing), then a fresh
-    // TNT (lit band), one in a dark band, and one swollen in its last ticks.
+    // The row: falling sand hovering half a block above the floor, a landed sand (draws
+    // nothing), then a fresh TNT (lit band), one in a dark band, and one swollen in its
+    // last ticks.
     let moving = |id, x, d| instance(id, glam::DVec3::new(x, 1.0, 0.0), d);
     let mut entities = vec![
-        moving(
+        instance(
             1,
-            -2.0,
+            glam::DVec3::new(-2.0, 1.5, 0.0),
             Decoration::FallingBlock(FallingBlockDecoration {
                 block_state: sand,
                 landed: false,
@@ -208,8 +214,8 @@ fn falling_blocks_and_tnt_offscreen() {
             }),
         ),
     ];
-    let base = render_scene(&mut renderer, &world, &mut [], camera);
-    let img = render_scene(&mut renderer, &world, &mut entities, camera);
+    let base = render_scene(&mut renderer, &world, &data.shapes, &mut [], camera);
+    let img = render_scene(&mut renderer, &world, &data.shapes, &mut entities, camera);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
     img.save(out.join("falling-block-tnt.png")).unwrap();
@@ -218,9 +224,26 @@ fn falling_blocks_and_tnt_offscreen() {
         diff(&base, &img) > 2000,
         "the falling sand and TNT changed too few pixels"
     );
+    // Their vanilla shadows draw too (`FallingBlockRenderer`/`TntRenderer` radius 0.5):
+    // discs under each entity, the hovering sand's faded by its half block of height
+    // (`extractShadowPiece`'s `pow - height * 0.5`), the landed one's hidden with it.
+    assert!(
+        renderer.shadow_quad_count() >= 4,
+        "the moving blocks cast {} shadow quads",
+        renderer.shadow_quad_count()
+    );
+    renderer.set_entity_shadows(false);
+    let no_shadow = render_scene(&mut renderer, &world, &data.shapes, &mut entities, camera);
+    renderer.set_entity_shadows(true);
+    assert_eq!(renderer.shadow_quad_count(), 0, "shadows off draws none");
+    let shadow_pixels = diff(&img, &no_shadow);
+    assert!(
+        shadow_pixels > 200,
+        "the shadows changed {shadow_pixels} pixels of the floor"
+    );
     // The landed sand draws nothing: dropping it from the scene changes not one pixel.
     entities.remove(1);
-    let without_landed = render_scene(&mut renderer, &world, &mut entities, camera);
+    let without_landed = render_scene(&mut renderer, &world, &data.shapes, &mut entities, camera);
     assert_eq!(
         diff(&img, &without_landed),
         0,
@@ -232,7 +255,7 @@ fn falling_blocks_and_tnt_offscreen() {
         block_state: tnt,
         fuse: 81.0,
     }));
-    let lit = render_scene(&mut renderer, &world, &mut entities, camera);
+    let lit = render_scene(&mut renderer, &world, &data.shapes, &mut entities, camera);
     assert!(
         diff(&img, &lit) > 200,
         "the white flash changed too few pixels"
@@ -242,7 +265,7 @@ fn falling_blocks_and_tnt_offscreen() {
         block_state: tnt,
         fuse: 81.0,
     }));
-    let unswollen = render_scene(&mut renderer, &world, &mut entities, camera);
+    let unswollen = render_scene(&mut renderer, &world, &data.shapes, &mut entities, camera);
     assert!(
         diff(&img, &unswollen) > 200,
         "the swell changed too few pixels"
