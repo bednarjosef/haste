@@ -128,13 +128,6 @@ impl Ui {
         self.host.jvm_memory().unwrap_or_default()
     }
 
-    /// One full GC on the HUD's JVM (the settle diet's join-spike return: with the JVM's
-    /// tight `-XX:MaxHeapFreeRatio` the serial GC uncommits the heap it grew while
-    /// booting).
-    pub fn request_gc(&self) -> anyhow::Result<()> {
-        self.host.request_gc().map_err(anyhow::Error::from)
-    }
-
     /// The renderer's text metrics (`Renderer::text_metrics`): vanilla's `Font` measures with
     /// them, and the spectator menu's action line centring does too.
     pub fn set_text_metrics(&self, m: Arc<dyn TextMetrics>) {

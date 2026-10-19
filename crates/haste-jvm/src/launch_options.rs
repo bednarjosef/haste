@@ -6,22 +6,34 @@
 pub(super) const BASE: &[&str] = &[
     "-Xshare:auto",
     "-Xss4m",
-    // Small-footprint JVM for the HUD: the serial GC (no collector threads or write
-    // barriers of the collectors meant for big heaps) and C1-only compilation (the GUI
-    // is not hot enough for C2 to pay back its code cache and compile memory). The
-    // heap starts at 32 MiB and settles at ~110 MiB used; the 1GiB cap is only a
-    // ceiling, there because vanilla's `Options` offers render distances above 16
-    // only when `Runtime.maxMemory() >= 1e9` (the serial GC reports 1_037_959_168
-    // for -Xmx1g: the cap minus one survivor space).
+    // Small-footprint JVM for the HUD: C1-only compilation (the GUI is not hot enough
+    // for C2 to pay back its code cache and compile memory). The heap starts at 32 MiB
+    // and settles at ~110 MiB used; the 1GiB cap is only a ceiling, there because
+    // vanilla's `Options` offers render distances above 16 only when
+    // `Runtime.maxMemory() >= 1e9`.
     "-Xms32m",
     "-Xmx1g",
-    "-XX:+UseSerialGC",
+    // G1 with the periodic GC: while the player is idle the JVM runs a concurrent
+    // cycle every 5 s, whose cleanup uncommits the heap the join spike grew (with the
+    // free ratios below) — no stop-the-world full GC ever runs during play. Measured
+    // pauses during play at rd 32: young 1.3-2.5 ms, remark 0.4-0.5 ms, cleanup
+    // 0.03 ms (the forced serial full GC this replaces paused 150-290 ms).
+    // Class unloading at the concurrent mark was the one pause above the 5 ms bar
+    // (remarks of 8-18 ms); the HUD's class set is fixed after the join, so nothing
+    // needs unloading there. Dead classes still unload at a full GC (which never
+    // runs during play); Phase 2 mods that churn classes may want this revisited.
+    // Alternatives measured and rejected: Shenandoah pauses max 3 ms but never
+    // uncommits (314 MiB committed for 98 used, +174 MiB RSS); ZGC's multi-mapped
+    // heap double-counts in RSS (settled 1.1 GiB) and commits 662 MiB for 186 used.
+    "-XX:+UseG1GC",
+    "-XX:G1PeriodicGCInterval=5000",
+    "-XX:MaxGCPauseMillis=5",
+    "-XX:-ClassUnloadingWithConcurrentMark",
     "-XX:TieredStopAtLevel=1",
     "-XX:ReservedCodeCacheSize=32m",
-    // Shrink hard at every full GC: the join spike grows the heap to ~220 MiB
-    // committed for ~100 used and the defaults (40-70% free) would keep it there;
-    // 10-30% keeps committed within ~1.3x of live after a GC (the settle diet
-    // runs one once the world is quiet).
+    // Shrink hard at every GC: the join spike grows the heap to ~220 MiB committed for
+    // ~100 used and the defaults (40-70% free) would keep it there; 10-30% keeps
+    // committed within ~1.3x of live after a cycle.
     "-XX:MinHeapFreeRatio=10",
     "-XX:MaxHeapFreeRatio=30",
     // Link game classes lazily: with verification on, the verifier loads every type a method

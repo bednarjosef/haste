@@ -1,15 +1,12 @@
 //! The settle diet: returning freed memory to the OS once the world goes quiet.
 //!
 //! Joining floods the client with short-lived data — at render distance 32 the server
-//! streams ~120 MiB of chunk packets, decoded, meshed and dropped — and the allocators
-//! keep those freed pages instead of handing them back: glibc's arenas only shrink their
-//! tops, and the JVM's serial-GC heap stays grown after its join spike. So while the
-//! player is idle, a background thread runs a diet: `malloc_trim(0)` walks glibc's
-//! arenas and frees what they can spare, and once per session one full GC on the HUD's
-//! JVM uncommits the heap's join spike (the JVM starts with a tight
-//! `-XX:MaxHeapFreeRatio` so that GC shrinks it). The diet runs at most once a minute,
-//! never on the render thread, and only after the world has been quiet — the one
-//! full-GC pause lands while standing still, not while streaming chunks.
+//! streams ~120 MiB of chunk packets, decoded, meshed and dropped — and glibc's arenas
+//! keep those freed pages instead of handing them back: they only shrink their tops. So
+//! while the player is idle, a background thread runs a diet: `malloc_trim(0)` walks the
+//! arenas and frees what they can spare. The diet runs at most once a minute, never on
+//! the render thread, and only after the world has been quiet. (The JVM's heap is
+//! returned by its own G1 periodic GC, see `haste-jvm`'s launch options.)
 //!
 //! Started with the game thread (see `run.rs`). "Quiet" is watched through
 //! [`Shared::chunks_loaded`], the chunk-arrival counter the game thread publishes once a
@@ -48,7 +45,6 @@ fn diet_thread(shared: Arc<Shared>) {
     let mut last_chunks = shared.chunks_loaded.load(Ordering::Relaxed);
     let mut last_arrival = Instant::now();
     let mut last_diet: Option<Instant> = None;
-    let mut gc_done = false;
     loop {
         std::thread::sleep(POLL);
         if shared.is_closed() {
@@ -63,23 +59,16 @@ fn diet_thread(shared: Arc<Shared>) {
             continue;
         }
         last_diet = Some(Instant::now());
-        // glibc: free the arenas' tops (the chunk-packet flood's remains).
+        // glibc: free the arenas' tops (the chunk-packet flood's remains). It runs on
+        // this thread, never the game or render one; the duration is logged so a slow
+        // walk shows up (it takes the arenas' locks, so a concurrently allocating
+        // thread can briefly wait on one — never during play, the world is quiet).
         let t = Instant::now();
         let trimmed = unsafe { libc::malloc_trim(0) };
-        tracing::debug!(
+        tracing::info!(
             "settle diet: malloc_trim returned {trimmed} in {:?}",
             t.elapsed()
         );
-        // The HUD's JVM, once per session: a full GC, which with the JVM's
-        // `-XX:MaxHeapFreeRatio` uncommits the join spike.
-        if !gc_done {
-            gc_done = true;
-            if let Some(ui) = shared.ui.lock().clone() {
-                if let Err(e) = ui.request_gc() {
-                    tracing::debug!("settle diet: HUD gc skipped: {e:#}");
-                }
-            }
-        }
     }
 }
 

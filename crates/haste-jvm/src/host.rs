@@ -373,21 +373,6 @@ impl JvmHost {
         self.with_env(|env| call_static_string(env, &self.inner.boot, "memoryStats"))
     }
 
-    /// One full GC (`Boot.collectGarbage`): the settle diet's join-spike return. With the
-    /// `-XX:MaxHeapFreeRatio` the JVM starts with, the serial GC uncommits the heap down to
-    /// a little above the live set at this GC.
-    pub fn request_gc(&self) -> Result<()> {
-        self.with_env(|env| {
-            env.call_static_method(
-                &self.inner.boot,
-                jni_str!("collectGarbage"),
-                jni_sig!("()V"),
-                &[],
-            )?;
-            Ok(())
-        })
-    }
-
     /// Methods of generated proxies that were called without an implementation (sorted, distinct).
     pub fn unimplemented(&self) -> Result<Vec<String>> {
         self.with_env(|env| {
