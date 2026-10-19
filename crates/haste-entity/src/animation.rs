@@ -16,8 +16,13 @@ use haste_core::entity::Pose;
 use haste_core::math::Vec3;
 use haste_core::model::{BodyOp, BodyTransform, CubeModel, ModelPart, PoseOverrides};
 
+mod arm_pose;
 mod crouch;
+mod swim;
+
+pub use arm_pose::{poses, set_item_uses, ArmPose, ItemUse, ItemUses, UseAnimation};
 use haste_core::parts;
+use swim::setup_swim;
 
 use crate::store::{wrap_degrees, Entity};
 
@@ -147,6 +152,9 @@ pub fn setup_anim(
     let walk_speed = e.walk.speed(partial);
     let swing = e.swing.animation(partial);
     let age = e.tick_count as f32 + partial;
+    // The head's yaw relative to the body in radians: the arm poses read it
+    // (`HumanoidModel.setupAnim`'s `this.head.yRot`).
+    let head_rel_rad = head_rel.to_radians();
 
     match model_kind(model) {
         ModelKind::Humanoid => {
@@ -160,6 +168,8 @@ pub fn setup_anim(
                 age,
                 is_passenger,
                 false,
+                arm_pose::poses(e, arm_pose::item_uses()),
+                head_rel_rad,
             );
             push_head(&mut o, e, head_rel, partial, true);
         }
@@ -174,6 +184,10 @@ pub fn setup_anim(
                 age,
                 is_passenger,
                 true,
+                // `ZombieModel.setupAttackAnimation`'s `animateZombieArms` overrides
+                // whatever the pose set, so the zombie branch never poses the arms.
+                (ArmPose::Empty, ArmPose::Empty),
+                head_rel_rad,
             );
             push_head(&mut o, e, head_rel, partial, true);
         }
@@ -188,6 +202,10 @@ pub fn setup_anim(
                 age,
                 is_passenger,
                 false,
+                // `AbstractSkeletonRenderer.getArmPose` (the bow hold) is not ported yet;
+                // an empty hand hangs (vanilla's mob rule), a bow hand is not raised.
+                (ArmPose::Empty, ArmPose::Empty),
+                head_rel_rad,
             );
             push_head(&mut o, e, head_rel, partial, true);
             // `SkeletonModel.setupAnim` (26.3 client): an aggressive skeleton not holding a bow
@@ -370,6 +388,8 @@ fn head_x_rot(e: &Entity, mut x: f32, partial: f32) -> f32 {
 }
 
 /// `HumanoidModel.setupAnim` (with `ZombieModel`'s `animateZombieArms` when `zombie`).
+/// `arm` is the (right, left) arm pose the held items and use state chose
+/// (`AvatarRenderer.getArmPose`); `head_rel` the head's yaw relative to the body in radians.
 #[allow(clippy::too_many_arguments)]
 fn humanoid(
     o: &mut PoseOverrides,
@@ -381,6 +401,8 @@ fn humanoid(
     age: f32,
     is_passenger: bool,
     zombie: bool,
+    arm: (ArmPose, ArmPose),
+    head_rel: f32,
 ) {
     let pitch = look_pitch(e, partial);
     // Walk swing (`cos(animationPos * 0.6662) * 2 * speed * 0.5` for arms, `* 1.4` for legs).
@@ -398,6 +420,11 @@ fn humanoid(
         la.x += -PI / 5.0;
         rl = Vec3::new(-1.4137167, PI / 10.0, 0.07853982);
         ll = Vec3::new(-1.4137167, -PI / 10.0, -0.07853982);
+    }
+    // `HumanoidModel.poseRightArm`/`poseLeftArm` (the zombie's `animateZombieArms` below
+    // overrides the arms, like vanilla's `ZombieModel.setupAttackAnimation`).
+    if !zombie {
+        arm_pose::apply(e, arm, &mut ra, &mut la, (head_rel, pitch));
     }
     // `HumanoidModel.setupAttackAnimation` (main arm right, WHACK animation).
     if swing > 0.0 {
@@ -442,66 +469,6 @@ fn humanoid(
     }
 }
 
-/// `HumanoidModel.setupSwimAnimation`: the crawl stroke. `swim` is the smoothed swim amount; the
-/// arm of the swinging hand keeps its pose (`state.currentSwing`).
-fn setup_swim(
-    ra: &mut Vec3,
-    la: &mut Vec3,
-    rl: &mut Vec3,
-    ll: &mut Vec3,
-    walk_pos: f32,
-    swim: f32,
-    e: &Entity,
-) {
-    let quadratic = |x: f32| -65.0 * x + x * x;
-    let swim_pos = walk_pos % 26.0;
-    // Main hand is right: hand 0 = right, 1 = left. No swing means both arms swim.
-    let (right_amount, left_amount) = if e.swing.is_swinging() {
-        if e.swing.hand() == 0 {
-            (0.0, swim)
-        } else {
-            (swim, 0.0)
-        }
-    } else {
-        (swim, swim)
-    };
-    if swim_pos < 14.0 {
-        la.x = rot_lerp_rad(left_amount, la.x, 0.0);
-        ra.x = lerp(right_amount, ra.x, 0.0);
-        la.y = rot_lerp_rad(left_amount, la.y, PI);
-        ra.y = lerp(right_amount, ra.y, PI);
-        la.z = rot_lerp_rad(
-            left_amount,
-            la.z,
-            PI + 1.8707964 * quadratic(swim_pos) / quadratic(14.0),
-        );
-        ra.z = lerp(
-            right_amount,
-            ra.z,
-            PI - 1.8707964 * quadratic(swim_pos) / quadratic(14.0),
-        );
-    } else if swim_pos < 22.0 {
-        let p = (swim_pos - 14.0) / 8.0;
-        la.x = rot_lerp_rad(left_amount, la.x, FRAC_PI_2 * p);
-        ra.x = lerp(right_amount, ra.x, FRAC_PI_2 * p);
-        la.y = rot_lerp_rad(left_amount, la.y, PI);
-        ra.y = lerp(right_amount, ra.y, PI);
-        la.z = rot_lerp_rad(left_amount, la.z, 5.012389 - 1.8707964 * p);
-        ra.z = lerp(right_amount, ra.z, 1.2707963 + 1.8707964 * p);
-    } else if swim_pos < 26.0 {
-        let p = (swim_pos - 22.0) / 4.0;
-        la.x = rot_lerp_rad(left_amount, la.x, FRAC_PI_2 - FRAC_PI_2 * p);
-        ra.x = lerp(right_amount, ra.x, FRAC_PI_2 - FRAC_PI_2 * p);
-        la.y = rot_lerp_rad(left_amount, la.y, PI);
-        ra.y = lerp(right_amount, ra.y, PI);
-        la.z = rot_lerp_rad(left_amount, la.z, PI);
-        ra.z = lerp(right_amount, ra.z, PI);
-    }
-    ll.x = lerp(swim, ll.x, 0.3 * (walk_pos * 0.33333334 + PI).cos());
-    rl.x = lerp(swim, rl.x, 0.3 * (walk_pos * 0.33333334).cos());
-}
-
-/// `SkeletonModel.setupAnim`'s aggressive arms (26.3 client): both arms raised to `-PI/2` and
 /// pushed by the swing, replacing the humanoid walk swing. `swing` is `state.swingAnimation`.
 fn skeleton_aggressive_arms(o: &mut PoseOverrides, swing: f32, age: f32) {
     let swing2 = (swing * PI).sin();

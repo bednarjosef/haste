@@ -1,4 +1,5 @@
 use super::*;
+mod held_item;
 
 /// The frustum cull keeps entities inside the view and drops those behind the camera:
 /// vanilla `EntityRenderer.shouldRender` (`Frustum.isVisible` on the inflated AABB).
@@ -772,17 +773,6 @@ fn part_matrix_places_the_hand_at_the_animated_arm() {
     );
     // A part no model carries resolves to nothing.
     assert!(part_matrix(&model.root, &pose, Mat4::IDENTITY, parts::intern("nope")).is_none());
-}
-
-/// `CustomHeadLayer.translateToHead`: translate (0, -0.25, 0), rotate Y 180, scale
-/// (0.625, -0.625, -0.625).
-#[test]
-fn the_custom_head_transform_is_vanillas() {
-    let deg = |d: f32| d.to_radians();
-    let want = Mat4::from_translation(Vec3::new(0.0, -0.25, 0.0))
-        * Mat4::from_rotation_y(deg(180.0))
-        * Mat4::from_scale(Vec3::new(0.625, -0.625, -0.625));
-    assert!(close(custom_head_layer_matrix(), want, 1e-6));
 }
 
 /// `ElytraModel.createLayer`: a left and a right wing at the shoulders, 64x32 texture.
