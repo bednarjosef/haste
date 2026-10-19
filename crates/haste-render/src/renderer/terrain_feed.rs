@@ -337,6 +337,16 @@ impl Renderer {
         self.bonus_dirty = false;
     }
 
+    /// A chunk column the walk has not seen just loaded (the feed's first encounter):
+    /// the walk treated the column as see-through-unloaded, so its sightline data
+    /// changed and the next walk must re-run — otherwise sections of the new chunk
+    /// stay out of the visible mask (and unmeshed) until the camera crosses a section
+    /// boundary and a walk happens anyway. Vanilla's `SectionOcclusionGraph` learns
+    /// of loaded sections the same way (its empty-section update runs per load).
+    pub fn note_chunk_loaded(&mut self) {
+        self.vis_dirty = true;
+    }
+
     /// Records what the client knows about a section (`SectionLoadState`). The empty
     /// bits are the walk's see-through data for sections that have no mesh, so
     /// unmeshed air never blocks it (vanilla swaps `UNCOMPILED` for `EMPTY` without

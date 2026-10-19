@@ -15,6 +15,7 @@ use haste_core::model::{CubeModel, ModelPart};
 
 mod animation;
 mod arm_pose;
+mod boat;
 mod connectivity;
 mod hurt;
 mod item_entity;
@@ -27,6 +28,7 @@ mod registry;
 mod riding;
 mod setup_rotations;
 mod store;
+mod thrown_item;
 mod using_item;
 fn store() -> EntityStore {
     EntityStore::new(EntityDimensions::default())
