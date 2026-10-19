@@ -8,7 +8,9 @@ mod hitch;
 mod render_options;
 use hitch::FramePhases;
 pub(crate) use hitch::HitchTrace;
-pub(crate) use render_options::{cloud_status, forced_premesh, parse_premesh, premesh_mode};
+pub(crate) use render_options::{
+    cloud_status, forced_premesh, parse_premesh, premesh_mode, work_budget_observation, work_feed,
+};
 
 /// Applies the config's cloud options to the renderer (vanilla `Options.cloudStatus`
 /// and `Options.cloudRange`).
@@ -163,10 +165,15 @@ impl App {
                 }
             }
         }
+        // The work budget's per-frame observation (`--work-budget`): the interval since
+        // the previous frame plus the previous frame's render and feed times.
+        let (budget_interval_ms, budget_render_ms, budget_feed_ms) = work_budget_observation(
+            &mut self.frame_at,
+            self.frame_stats.frame_ms,
+            self.feed.last_feed_ms(),
+            t0,
+        );
         let renderer = self.renderer.as_mut().expect("checked above");
-        // The maps to draw: the game thread's snapshot, one `Arc` clone (vanilla's
-        // `MapTextureManager` re-uploads only the maps whose data changed).
-        renderer.set_maps(session.shared.maps.lock().clone());
         // The bench tracks pop-in (visible-but-unmeshed sections and pre-mesh verdicts);
         // enabling it before the settle phase seeds the meshed set with everything the
         // settle meshed, so the measured phase starts from zero.
@@ -352,6 +359,7 @@ impl App {
             self.premesh_forced
                 .unwrap_or_else(|| premesh_mode(self.options.premesh)),
         );
+        renderer.note_frame(budget_interval_ms, budget_render_ms, budget_feed_ms);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();
@@ -376,6 +384,7 @@ impl App {
                     sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
                     uploads: stats.uploads,
                     upload_bytes: stats.upload_bytes,
+                    upload_budget_ms: stats.upload_budget_ms,
                     indices_drawn: stats.indices_drawn,
                     index: bench.samples.len() as u32,
                     visible_unmeshed: stats.visible_unmeshed,

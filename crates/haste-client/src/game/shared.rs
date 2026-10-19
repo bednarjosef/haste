@@ -247,6 +247,9 @@ impl Shared {
                 data.registries.data_component_names(),
             ),
         );
+        // The per-item arm-pose inputs (`AvatarRenderer.getArmPose`'s item questions),
+        // resolved from the game data once; the render path reads the installed table.
+        haste_entity::animation::set_item_uses(crate::game::item_uses::build(&data));
         Self {
             data,
             world: RwLock::new(world),

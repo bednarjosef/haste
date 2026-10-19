@@ -33,8 +33,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     } else {
         renderer.set_premesh(crate::app::frame::premesh_mode(session.options.premesh));
     }
+    // `--work-budget` rides on the feed (its uploads are the budgeted work), and the
+    // budget's per-frame observation comes from the rolling loop's own clock.
+    let mut feed = crate::app::frame::work_feed(args)?;
+    let mut last_loop = std::time::Instant::now();
+    let mut last_render_ms = 0.0;
     let gui = GuiFrame::default();
-    let mut feed = WorldFeed::default();
     // The render thread's weather extraction buffer and per-tick column cache (both
     // reused, no allocation after warmup).
     let mut weather_frame = haste_render::WeatherFrame::default();
@@ -46,6 +50,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
     loop {
         let view = shared.view.lock().clone();
+        renderer.note_frame(
+            last_loop.elapsed().as_secs_f32() * 1e3,
+            last_render_ms,
+            feed.last_feed_ms(),
+        );
+        last_loop = std::time::Instant::now();
         let (mut camera, sky, lightmap, partial, v, animation_tick, weather) = frame_view(
             &shared,
             &view,
@@ -101,6 +111,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             renderer.prepare_particles(&snapshot, camera, partial, None);
         }
         stats = renderer.render(&frame)?;
+        last_render_ms = stats.frame_ms;
         if shared.is_closed() {
             anyhow::bail!(
                 "disconnected: {}",
@@ -224,6 +235,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         if elapsed >= total {
             break;
         }
+        renderer.note_frame(
+            last_loop.elapsed().as_secs_f32() * 1e3,
+            last_render_ms,
+            feed.last_feed_ms(),
+        );
+        last_loop = std::time::Instant::now();
         // The bench camera follows its fixed path; the sky and entities come from the live view
         // (time of day moves, the player stays where the server put it).
         let view = shared.view.lock().clone();
@@ -250,8 +267,6 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
-        // The maps' snapshot, one `Arc` clone (the renderer re-uploads only changed maps).
-        renderer.set_maps(shared.maps.lock().clone());
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial_tick, &view);
         let block_target = view.block_target;
@@ -295,6 +310,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
             uploads: stats.uploads,
             upload_bytes: stats.upload_bytes,
+            upload_budget_ms: stats.upload_budget_ms,
             indices_drawn: stats.indices_drawn,
             index: samples.len() as u32,
             visible_unmeshed: 0,
@@ -317,6 +333,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "fps": summary.fps(),
             "p99_ms": summary.p99_ms,
             "worst_ms": summary.worst_ms,
+            "upload_budget_ms": samples
+                .iter()
+                .map(|s| s.upload_budget_ms)
+                .sum::<f32>()
+                / samples.len().max(1) as f32,
             "sections_drawn": summary.sections_drawn,
             "sections_total": summary.sections_total,
             "draw_calls": summary.draw_calls,

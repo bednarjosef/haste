@@ -19,6 +19,7 @@ fn sample(frame_ms: f32) -> BenchSample {
         sections_new: 0,
         uploads: 0,
         upload_bytes: 0,
+        upload_budget_ms: 2.0,
         indices_drawn: 0,
         index: 0,
         visible_unmeshed: 0,

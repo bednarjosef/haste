@@ -131,7 +131,11 @@ impl EntityRenderer {
             let (display, left) = match display {
                 ItemDisplay::FirstPerson => (&part.firstperson, false),
                 ItemDisplay::ThirdPersonRight => (&part.thirdperson, false),
-                ItemDisplay::ThirdPersonLeft => (&part.thirdperson, true),
+                // `ItemTransforms.getTransform(THIRD_PERSON_LEFT_HAND)` is the model's own
+                // left entry (its right entry when it names no left one), and the left-hand
+                // fix applies on top: `item/handheld`'s left entry mirrors the right exactly
+                // so the fix cancels.
+                ItemDisplay::ThirdPersonLeft => (&part.thirdperson_left, true),
                 ItemDisplay::Head => (&part.head, false),
                 ItemDisplay::Fixed => (&part.fixed, false),
                 ItemDisplay::Ground => (&part.ground, false),

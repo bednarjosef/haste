@@ -25,6 +25,7 @@ impl Renderer {
             meshes_pending: self.meshes_pending() as u32,
             uploads: self.last_uploads.0,
             upload_bytes: self.last_uploads.1,
+            upload_budget_ms: self.work_budget.last_budget_ms(),
             indices_drawn,
             draw_calls,
             block_entities_drawn: self.block_entities_drawn,

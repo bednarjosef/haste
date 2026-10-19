@@ -2057,7 +2057,6 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        renderer.set_maps(shared.maps.lock().clone());
         if hud_on {
             feed.set_first_person(
                 &shared,
@@ -2795,7 +2794,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &mut weather_cache,
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
-        renderer.set_maps(shared.maps.lock().clone());
         // The first-person hand, like the window and the screenshot path (`set_first_person`
         // diffs the view's per-tick part and only touches the renderer on a change): without
         // this the script's shots never show the held item.
@@ -3032,7 +3030,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         perspective: game::Perspective::default(),
         window: None,
         renderer: None,
-        feed: WorldFeed::default(),
+        // `--work-budget` rides on the feed (its uploads are the budgeted work).
+        feed: frame::work_feed(args)?,
         ui: None,
         gui: GuiFrame::default(),
         input: InputRouter::default(),

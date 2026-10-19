@@ -23,6 +23,11 @@ pub struct SkyLightStats {
     pub block_arrays: u64,
     /// Bytes the block arrays cost.
     pub block_array_bytes: u64,
+    /// Distinct array contents among all stored arrays (sky + block): what a
+    /// content-sharing table could save is `arrays - distinct` arrays.
+    pub distinct_arrays: u64,
+    /// Bytes of arrays whose contents another stored section already holds.
+    pub duplicate_array_bytes: u64,
 }
 
 impl World {
@@ -30,6 +35,17 @@ impl World {
     /// alongside (same storage, no walk-up).
     pub fn sky_light_stats(&self) -> SkyLightStats {
         let mut stats = SkyLightStats::default();
+        // Contents already seen (a diagnostic: how much content-sharing would save).
+        let mut seen: std::collections::HashSet<Vec<u8>> = Default::default();
+        let stored = |stats: &mut SkyLightStats,
+                      seen: &mut std::collections::HashSet<Vec<u8>>,
+                      bytes: Vec<u8>| {
+            if seen.insert(bytes) {
+                stats.distinct_arrays += 1;
+            } else {
+                stats.duplicate_array_bytes += 2048 + 16;
+            }
+        };
         for pos in self.loaded_chunks() {
             let Some(chunk) = self.chunk(pos) else {
                 continue;
@@ -40,9 +56,10 @@ impl World {
                     SkyLight::Absent => stats.absent += 1,
                     SkyLight::Uniform(0) => stats.uniform_zero += 1,
                     SkyLight::Uniform(_) => stats.uniform += 1,
-                    SkyLight::Array(_) => {
+                    SkyLight::Array(a) => {
                         stats.arrays += 1;
                         stats.array_bytes += 2048 + 16;
+                        stored(&mut stats, &mut seen, a.to_vec());
                     }
                 }
             }
@@ -50,6 +67,7 @@ impl World {
                 if !(slot.all_zero() || slot.all_full()) {
                     stats.block_arrays += 1;
                     stats.block_array_bytes += 2048 + 16;
+                    stored(&mut stats, &mut seen, slot.to_vec());
                 }
             }
         }

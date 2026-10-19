@@ -209,7 +209,7 @@ async fn run_async(
         );
         let sky = world.sky_light_stats();
         println!(
-            "sky light: {} sections, {} absent, {} uniform, {} zero, {} arrays ({:.1} MiB); block light: {} arrays ({:.1} MiB)",
+            "sky light: {} sections, {} absent, {} uniform, {} zero, {} arrays ({:.1} MiB); block light: {} arrays ({:.1} MiB); distinct {} arrays, duplicates {:.1} MiB",
             sky.sections,
             sky.absent,
             sky.uniform,
@@ -218,6 +218,8 @@ async fn run_async(
             mib(sky.array_bytes),
             sky.block_arrays,
             mib(sky.block_array_bytes),
+            sky.distinct_arrays,
+            mib(sky.duplicate_array_bytes),
         );
         let rss = std::fs::read_to_string("/proc/self/status")
             .ok()

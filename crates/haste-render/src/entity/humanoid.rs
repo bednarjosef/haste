@@ -263,6 +263,7 @@ pub(super) fn missing_item_model() -> std::sync::Arc<haste_assets::ItemModel> {
                     gui: haste_assets::DisplayTransform::IDENTITY,
                     firstperson: haste_assets::DisplayTransform::IDENTITY,
                     thirdperson: haste_assets::DisplayTransform::IDENTITY,
+                    thirdperson_left: haste_assets::DisplayTransform::IDENTITY,
                     head: haste_assets::DisplayTransform::IDENTITY,
                     ground: haste_assets::DisplayTransform::IDENTITY,
                     fixed: haste_assets::DisplayTransform::IDENTITY,

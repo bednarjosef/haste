@@ -372,6 +372,8 @@ pub enum Decoration {
     Lightning(LightningDecoration),
     ExperienceOrb(ExperienceOrbDecoration),
     Minecart(MinecartDecoration),
+    ThrownItem(ThrownItemDecoration),
+    DragonFireball,
 }
 
 /// A minecart's display block (`AbstractMinecart.getDisplayBlockState`), resolved to the block
@@ -417,6 +419,21 @@ pub struct ExperienceOrbDecoration {
     pub value: i32,
     /// The orb's age in ticks (plus the partial tick), driving the colour cycle.
     pub age: f32,
+}
+
+/// The state `ThrownItemRenderer` draws: which item (from `ItemSupplier.getItem`, the
+/// synched stack or the type's default), at which scale, and whether the renderer lights it
+/// full-bright (`ThrownItemRenderer`'s constructor arguments and
+/// `ThrownItemRenderState`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThrownItemDecoration {
+    pub item: RegistryIndex,
+    /// The renderer's `scale` constructor argument (1.0 for most, 3.0 for the large fireball,
+    /// 0.75 for the small one).
+    pub scale: f32,
+    /// `ThrownItemRenderer.getBlockLightLevel` returns 15 for the eye of ender and the
+    /// fireballs.
+    pub full_bright: bool,
 }
 
 /// The state `ItemFrameRenderer.extractRenderState` collects for an item frame.
