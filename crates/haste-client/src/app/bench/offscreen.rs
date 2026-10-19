@@ -250,6 +250,8 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
+        // The maps' snapshot, one `Arc` clone (the renderer re-uploads only changed maps).
+        renderer.set_maps(shared.maps.lock().clone());
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial_tick, &view);
         let block_target = view.block_target;
