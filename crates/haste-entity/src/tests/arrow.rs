@@ -185,6 +185,29 @@ fn stuck_check_grounds_and_shakes() {
     assert_eq!(e.shake_time, 0);
 }
 
+/// A no-gravity arrow never falls (`Entity.getGravity` is 0 for it, so `applyGravity` does
+/// nothing).
+#[test]
+fn no_gravity_arrow_stays_level() {
+    let mut e = arrow_entity(1, DVec3::new(0.0, 64.0, 0.0), DVec3::new(1.0, 0.0, 0.0));
+    e.metadata.apply(&entries(&[(
+        arrow::NO_GRAVITY_INDEX,
+        MetadataValue::Boolean(true),
+    )]));
+    let mut particles = Vec::new();
+    arrow::tick(
+        &mut e,
+        &TestWorld {
+            contains: false,
+            hit: None,
+            water: false,
+        },
+        &mut particles,
+    );
+    assert_eq!(e.pos, DVec3::new(1.0, 64.0, 0.0));
+    assert!(e.velocity.y.abs() < 1.0e-12, "no-gravity arrow fell");
+}
+
 /// A fresh stick on a later tick shakes (`AbstractArrow.tick` at tick start) — and the same
 /// tick's `shakeTime--` (which runs after the stuck check) already eats one of the seven,
 /// exactly as in vanilla.

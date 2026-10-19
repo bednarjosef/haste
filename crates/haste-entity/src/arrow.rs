@@ -28,6 +28,8 @@ pub const NO_PHYSICS_FLAG: u8 = 0x02;
 pub const IN_GROUND_INDEX: u8 = 10;
 /// `Arrow.ID_EFFECT_COLOR` (an int; -1 means no potion).
 pub const EFFECT_COLOR_INDEX: u8 = 11;
+/// `Entity.DATA_NO_GRAVITY` (a bool, one of the base `Entity` slots).
+pub const NO_GRAVITY_INDEX: u8 = 5;
 
 /// `AbstractArrow.onSyncedDataUpdated`: the shake a freshly stuck arrow runs for.
 pub const SHAKE_TICKS: u8 = 7;
@@ -72,6 +74,14 @@ fn no_physics(metadata: &crate::metadata::Metadata) -> bool {
         Some(MetadataValue::Byte(b)) => (*b as u8 & NO_PHYSICS_FLAG) != 0,
         _ => false,
     }
+}
+
+/// `Entity.isNoGravity` (`Entity.DATA_NO_GRAVITY`, the boolean at index 5).
+fn no_gravity(metadata: &crate::metadata::Metadata) -> bool {
+    matches!(
+        metadata.get(NO_GRAVITY_INDEX).map(|e| &e.value),
+        Some(MetadataValue::Boolean(true))
+    )
 }
 
 /// `ArrowRenderer.extractRenderState`: the render state of an arrow entity (its interpolated
@@ -265,8 +275,8 @@ pub(crate) fn tick(e: &mut Entity, world: &dyn ArrowWorld, particles: &mut Vec<A
     if !in_water {
         e.velocity *= AIR_DRAG;
     }
-    if physics && !e.arrow_in_ground {
-        // `applyGravity`.
+    // `applyGravity` (a no-gravity arrow's `getGravity()` is 0, so nothing applies).
+    if physics && !e.arrow_in_ground && !no_gravity(&e.metadata) {
         e.velocity.y -= GRAVITY;
     }
 }
