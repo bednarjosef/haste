@@ -293,6 +293,30 @@ impl ParticleBehaviour {
                 color_fade: [1.0, 0.96, 0.9],
                 ..ParticleBehaviour::DEFAULT
             },
+            // SpellParticle.MobEffectProvider (entity_effect) and SpellParticle.Provider
+            // (effect, always white — the provider ignores the option's colour): friction
+            // 0.96, gravity -0.1, life (int)(8/(r*0.8+0.2)) = 8..=40, quad 0.75x, the option's
+            // colour on entity_effect (a tipped arrow's trail), no collision, the spell drift
+            // for velocity.
+            "entity_effect" | "effect" => &ParticleBehaviour {
+                source: "SpellParticle",
+                gravity: -0.1,
+                friction: 0.96,
+                lifetime: Lifetime::Rolled {
+                    base: 8.0,
+                    low: 0.2,
+                    scale: 1.0,
+                    add: 0.0,
+                    min: 1.0,
+                },
+                quad: Quad::Default {
+                    scale: 0.75,
+                    lo: 1.0,
+                    hi: 1.0,
+                },
+                motion: Motion::Spell,
+                ..ParticleBehaviour::DEFAULT
+            },
             // enchanted_hit is CritParticle.MagicProvider (rCol 0.3x, gCol 0.8x).
             "enchanted_hit" => &ParticleBehaviour {
                 source: "CritParticle.MagicProvider",

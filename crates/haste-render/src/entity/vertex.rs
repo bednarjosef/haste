@@ -1,7 +1,32 @@
-//! Shared entity vertex plumbing: the vertex buffer helper, textured quads, shading, hurt
-//! colours, name-tag and shadow-light curves.
+//! Shared entity vertex plumbing: the vertex type, the vertex buffer helper, textured quads,
+//! shading, hurt colours, name-tag and shadow-light curves.
 
 use super::*;
+
+/// One posed entity vertex: position (camera-relative, like the terrain), the atlas uv and
+/// clamping rect, the tint colour (alpha included), and the light levels for the vanilla
+/// light texture: block, sky, unused, unused.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct EntityVertex {
+    pub pos: [f32; 3],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+    pub rect: [u16; 4],
+    /// Light levels for the vanilla light texture: block, sky, unused, unused.
+    pub light: [u16; 4],
+}
+
+impl EntityVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4, 4 => Uint16x4
+    ];
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<EntityVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &Self::ATTRIBUTES,
+    };
+}
 
 pub(super) fn make_vertex_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {

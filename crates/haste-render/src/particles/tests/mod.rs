@@ -47,6 +47,7 @@ fn spawn_request(kind: &str, count: i32) -> ParticleSpawn {
         randomization: 0,
         override_limiter: false,
         dust: None,
+        color: None,
         block_state: None,
     }
 }
@@ -218,6 +219,28 @@ fn spawns_beyond_the_vanilla_limiter_are_dropped() {
     request.pos = DVec3::new(31.0, 0.0, 0.0);
     particles.spawn(&request, DVec3::ZERO, None);
     assert_eq!(particles.alive(), 2);
+}
+
+/// An `entity_effect` `ColorParticleOption`: vanilla's sRGB bytes decode to the linear
+/// RGB the sRGB target encodes back at output (vanilla writes them raw into a
+/// non-converting target), and the option's alpha byte becomes the particle's alpha
+/// (`SpellParticle.MobEffectProvider`'s `setColor`/`setAlpha`). The poison colour
+/// 0xFF87A363 (`PotionContents.getColor` is opaque ARGB) is the tipped arrow's trail.
+#[test]
+fn colour_option_decodes_to_linear_rgb_with_its_alpha() {
+    let mut particles = Particles::new(types_for_tests(&[("entity_effect", &[[0, 0, 4, 4]])]));
+    let mut request = spawn_request("entity_effect", 0);
+    request.offset = [0.0; 3];
+    request.max_speed = [0.0; 3];
+    request.color = Some(0xFF87_A363u32 as i32);
+    particles.spawn(&request, request.pos, None);
+    assert_eq!(particles.alive(), 1);
+    let p = &particles.pool[0];
+    assert!((p.alpha - 1.0).abs() < 1.0e-6, "alpha {}", p.alpha);
+    let want = crate::sky::linear([135.0 / 255.0, 163.0 / 255.0, 99.0 / 255.0]);
+    for (got, w) in p.color.iter().zip(want.iter()) {
+        assert!((got - w).abs() < 1.0e-6, "colour {:?}", p.color);
+    }
 }
 
 #[test]

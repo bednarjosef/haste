@@ -9,7 +9,7 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
-    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance,
+    ArrowDecoration, BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance,
     FallingBlockDecoration, ItemFrameDecoration, ModelPart, PaintingDecoration, PoseOverrides,
     PrimedTntDecoration, ThrownItemDecoration,
 };
@@ -19,6 +19,7 @@ use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;
 
+mod arrow;
 mod atlas;
 mod block_entities;
 mod block_model;
@@ -85,7 +86,7 @@ pub(crate) use vertex::{
     entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_flat_quad,
     push_world_quad,
 };
-pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
+pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha, EntityVertex};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
@@ -166,28 +167,6 @@ pub(crate) fn append_upload_range(
     } else {
         start..len
     }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct EntityVertex {
-    pub pos: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
-    pub rect: [u16; 4],
-    /// Light levels for the vanilla light texture: block, sky, unused, unused.
-    pub light: [u16; 4],
-}
-
-impl EntityVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4, 4 => Uint16x4
-    ];
-    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<EntityVertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &Self::ATTRIBUTES,
-    };
 }
 
 /// The texture an instance is drawn with and its model scale: players (haste-entity's
@@ -382,7 +361,14 @@ impl EntityRenderer {
             let (size, half) = model_extents(&e.model.root);
             let rel = e.pos - camera;
             let dist2 = rel.length_squared();
-            if !should_render_at_sqr_distance(size, e.scale, dist2, view_scale) {
+            // `AbstractArrow.shouldRenderAtSqrDistance` overrides the generic limit with the
+            // bounding box diagonal times ten, so arrows stay visible much farther out.
+            let visible = if matches!(&e.decoration, Some(Decoration::Arrow(_))) {
+                arrow::arrow_should_render(dist2, e.width, e.height, view_scale)
+            } else {
+                should_render_at_sqr_distance(size, e.scale, dist2, view_scale)
+            };
+            if !visible {
                 continue;
             }
             if !aabb_in_frustum(frustum, rel, half + 0.5) {
@@ -429,6 +415,7 @@ impl EntityRenderer {
                         orientation,
                         assets,
                     ),
+                    Decoration::Arrow(a) => self.emit_arrow(e, a, camera, light, assets),
                     // Vanilla `FallingBlockRenderer` / `TntRenderer`: the entity's block
                     // state drawn as the block model (see the renderer modules).
                     Decoration::FallingBlock(f) => {

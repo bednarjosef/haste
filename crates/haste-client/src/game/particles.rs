@@ -18,6 +18,9 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
     let requests = std::mem::take(&mut driver.session.block_particle_requests);
     // Item particles: a consumable in use (the eat/drink crumbs in front of the mouth).
     let item_requests = std::mem::take(&mut driver.session.item_particle_requests);
+    // The arrows' own particles (`AbstractArrow.tick` / `Arrow.makeParticle`): the tipped
+    // colour and the crit trail, spawned like the server's would be.
+    let arrow_particles = std::mem::take(&mut driver.session.arrow_particles);
     // The ambient block particles (`ClientLevel.animateTick`, vanilla runs it
     // right before the particle tick): torch flames, fire smoke, campfires, lava,
     // portals. Rain-gated parts (leaf drip) stay dormant until weather is decoded.
@@ -31,6 +34,34 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
         }
         for r in &item_requests {
             particles.spawn_item(r.item, r.pos, r.vel);
+        }
+        for r in &arrow_particles {
+            // The tipped colour is an `entity_effect` `ColorParticleOption` (its colour rides
+            // the spawn request); the spectral swirl is a white `effect`; a crit trail
+            // particle is a plain `crit` with the packet's speed
+            // (`addParticle(type, x, y, z, vx, vy, vz)`).
+            use haste_entity::arrow::ArrowParticleKind;
+            let (kind, color, speed) = match r.kind {
+                ArrowParticleKind::Color(argb) => (
+                    haste_core::Identifier::minecraft("entity_effect"),
+                    Some(argb),
+                    [0.0; 3],
+                ),
+                ArrowParticleKind::SpectralSwirl => (
+                    haste_core::Identifier::minecraft("effect"),
+                    // `SpellParticleOption.create(EFFECT, -1, 1.0F)`: opaque white.
+                    Some(-1),
+                    [0.0; 3],
+                ),
+                ArrowParticleKind::Crit => (
+                    haste_core::Identifier::minecraft("crit"),
+                    None,
+                    [r.vel.x as f32, r.vel.y as f32, r.vel.z as f32],
+                ),
+            };
+            let mut spawn = haste_render::ParticleSpawn::client(kind, r.pos, speed);
+            spawn.color = color;
+            particles.spawn(&spawn, camera, None);
         }
         driver.session.particle_spawned = spawns.len();
         let state_count = data.blocks.len();
@@ -77,18 +108,12 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
         // skull smoke at their position, half a block up, one particle per tick (the dragon
         // fireball's dragon-breath trail is a separate task).
         for pos in shared.entities.read().smoke_trail_positions() {
-            ambient.push(haste_render::ParticleSpawn {
-                kind: haste_core::Identifier::minecraft("smoke"),
-                pos: pos + haste_core::DVec3::new(0.0, 0.5, 0.0),
-                offset: [0.0; 3],
-                // count 0: one particle at the position, no velocity of its own.
-                max_speed: [1.0; 3],
-                count: 0,
-                randomization: 0,
-                override_limiter: false,
-                dust: None,
-                block_state: None,
-            });
+            // count 0: one particle at the position, no velocity of its own.
+            ambient.push(haste_render::ParticleSpawn::client(
+                haste_core::Identifier::minecraft("smoke"),
+                pos + haste_core::DVec3::new(0.0, 0.5, 0.0),
+                [0.0; 3],
+            ));
         }
     }
     for s in &ambient {

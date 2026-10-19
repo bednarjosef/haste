@@ -4,6 +4,7 @@
 
 pub mod animation;
 pub mod armor_stand;
+pub mod arrow;
 pub mod avatar;
 pub mod boat;
 pub mod decoration;

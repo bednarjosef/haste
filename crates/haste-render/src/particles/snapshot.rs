@@ -143,7 +143,7 @@ impl Particles {
                 lifetime: p.lifetime,
                 quad: p.quad,
                 color: p.color,
-                alpha: p.behaviour.alpha.unwrap_or(1.0),
+                alpha: p.alpha,
                 sky_light: light.1,
                 block_light: light.0,
                 rect,

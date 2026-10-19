@@ -1,9 +1,27 @@
 //! The walk and hand-swing animation states (`LivingEntity.walkAnimation` and
-//! `LivingEntity.swingState`), moved out of the store so the store keeps only storage.
+//! `LivingEntity.swingState`), moved out of the store so the store keeps only storage, with
+//! the angle helpers the interpolation reads.
 
 /// `Mth.lerp`.
 pub(crate) fn lerp(delta: f32, start: f32, end: f32) -> f32 {
     start + delta * (end - start)
+}
+
+/// `Mth.rotLerp`.
+pub(crate) fn rot_lerp(delta: f32, start: f32, end: f32) -> f32 {
+    start + delta * wrap_degrees(end - start)
+}
+
+/// `Mth.wrapDegrees`.
+pub(crate) fn wrap_degrees(mut v: f32) -> f32 {
+    v %= 360.0;
+    if v >= 180.0 {
+        v -= 360.0;
+    }
+    if v < -180.0 {
+        v += 360.0;
+    }
+    v
 }
 
 /// Vanilla `WalkAnimationState`: the smoothed horizontal speed and the position that accumulates

@@ -367,9 +367,9 @@ pub struct EntityOverlay {
 /// The special-entity decorations (drawn by the renderer rather than a cube model) live in
 /// their own module; re-exported so the `haste_core::model::...` paths keep working.
 pub use crate::decoration::{
-    BlockDisplay, Decoration, ExperienceOrbDecoration, FallingBlockDecoration, ItemFrameDecoration,
-    LightningDecoration, MinecartDecoration, PaintingDecoration, PrimedTntDecoration,
-    ThrownItemDecoration,
+    ArrowDecoration, BlockDisplay, Decoration, ExperienceOrbDecoration, FallingBlockDecoration,
+    ItemFrameDecoration, LightningDecoration, MinecartDecoration, PaintingDecoration,
+    PrimedTntDecoration, ThrownItemDecoration,
 };
 
 #[cfg(test)]

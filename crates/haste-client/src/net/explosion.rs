@@ -43,17 +43,9 @@ impl Session {
         // The explosion particle at the centre with speed (1, 0, 0) (the seed type
         // ignores it; other types the server names read it as their own).
         if let Some(kind) = self.particle_kind(p.particle.kind) {
-            self.particle_spawns.push(haste_render::ParticleSpawn {
-                kind,
-                pos: p.center,
-                offset: [1.0, 0.0, 0.0],
-                max_speed: [1.0, 0.0, 0.0],
-                count: 0,
-                randomization: 0,
-                override_limiter: false,
-                dust: None,
-                block_state: None,
-            });
+            let mut spawn = haste_render::ParticleSpawn::client(kind, p.center, [1.0, 0.0, 0.0]);
+            spawn.max_speed = [1.0, 0.0, 0.0];
+            self.particle_spawns.push(spawn);
         }
         // `trackExplosionEffects`: the block particles wait for the level tick, which
         // spawns them weighted by the block count. The names resolve against the

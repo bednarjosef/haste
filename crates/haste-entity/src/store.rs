@@ -34,27 +34,11 @@ pub const HEAD_LERP_STEPS: u8 = 3;
 /// `Entity`'s eight (0-7), so index 9 (a float).
 pub const HEALTH_METADATA_INDEX: u8 = 9;
 
-/// `Mth.lerp`.
-pub(crate) fn lerp(delta: f32, start: f32, end: f32) -> f32 {
-    start + delta * (end - start)
-}
-
-/// `Mth.rotLerp`.
-pub(crate) fn rot_lerp(delta: f32, start: f32, end: f32) -> f32 {
-    start + delta * wrap_degrees(end - start)
-}
-
-/// `Mth.wrapDegrees`.
-pub(crate) fn wrap_degrees(mut v: f32) -> f32 {
-    v %= 360.0;
-    if v >= 180.0 {
-        v -= 360.0;
-    }
-    if v < -180.0 {
-        v += 360.0;
-    }
-    v
-}
+// The angle helpers live in `walk_swing` (the rotation states' home); re-exported for the
+// callers that still reach them through this module.
+pub(crate) use crate::walk_swing::{lerp, rot_lerp, wrap_degrees};
+// `hurt_strength` moved to `render.rs` with the draw list that reads it.
+pub use crate::render::hurt_strength;
 
 /// One tracked entity.
 pub struct Entity {
@@ -156,6 +140,16 @@ pub struct Entity {
     pub(crate) is_tnt: bool,
     /// An item use the server started (`useItem`/`useItemRemaining`; see `using_item`).
     pub using_item: crate::using_item::UsingItem,
+    /// `AbstractArrow.shakeTime`: ticks of stuck-in-ground shake left, arrows only.
+    pub shake_time: u8,
+    /// `AbstractArrow.isInGround` as the client knows it (its own ground detection and the
+    /// server's `IN_GROUND` metadata both set it), arrows only.
+    pub arrow_in_ground: bool,
+    /// `AbstractArrow.inGroundTime`: ticks since the arrow stuck, arrows only.
+    pub in_ground_time: u32,
+    /// The entity is a `minecraft:spectral_arrow` (its own per-tick particle,
+    /// `SpectralArrow.tick`).
+    pub spectral: bool,
 }
 
 impl Entity {
@@ -234,6 +228,10 @@ impl Entity {
             is_living: living,
             is_tnt,
             using_item: crate::using_item::UsingItem::default(),
+            shake_time: 0,
+            arrow_in_ground: false,
+            in_ground_time: 0,
+            spectral: type_name == Some("minecraft:spectral_arrow"),
         }
     }
 
@@ -281,18 +279,6 @@ impl Entity {
     }
 }
 
-/// The `EntityInstance::item` entry for a tracked entity: the stack of a dropped item entity
-/// (count included; the renderer draws 1-5 copies from it), aged by the partial tick.
-pub(crate) fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
-    let stack = e.item.as_ref()?;
-    let item = stack.item?;
-    Some(haste_core::model::DroppedItem {
-        item,
-        count: stack.count,
-        age: e.age as f32 + partial_tick,
-    })
-}
-
 /// The hands, equipment layers and custom head item of an entity, resolved through the shared
 /// per-slot rules ([`crate::local_player::equipment_of`]).
 pub struct EntityStore {
@@ -325,18 +311,6 @@ pub struct EntityStore {
     /// The tick's use steps (`LivingEntity.updateUsingItem`), recorded per entity for the
     /// client's effects; reused, so a tick without a use allocates nothing.
     pub(crate) use_ticks: Vec<crate::using_item::UseTick>,
-}
-
-/// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
-/// vanilla's `hurtTime`-driven fade: strong on impact, gone by tick 10). A dead entity keeps
-/// the flash until the server removes it (`LivingEntityRenderer.extractRenderState`:
-/// `hasRedOverlay = hurtTime > 0 || deathTime > 0`, and `deathTime` never resets).
-pub fn hurt_strength(e: &Entity) -> f32 {
-    if e.dead {
-        return 1.0;
-    }
-    let left = e.hurt_ticks.min(HURT_TICKS) as f32 / HURT_TICKS as f32;
-    left * left
 }
 
 impl EntityStore {
@@ -535,6 +509,10 @@ impl EntityStore {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
                 e.velocity = v;
+                // `Projectile.lerpMotion`: a moving arrow leaves the ground it was stuck in.
+                if crate::arrow::is_arrow(e.kind) && v.length_squared() > 0.0 {
+                    e.arrow_in_ground = false;
+                }
             }
         }
     }
@@ -597,6 +575,11 @@ impl EntityStore {
         };
         let old_living = e.metadata.living;
         e.metadata.apply(entries);
+        // `AbstractArrow.onSyncedDataUpdated`: the in-ground flag flipping to true starts the
+        // stuck-in-ground shake (arrows only; other types' index 10 means something else).
+        if crate::arrow::is_arrow(e.kind) {
+            crate::arrow::on_metadata(e, entries);
+        }
         // `onSyncedDataUpdated` for the living-flags byte: a use started or stopped.
         if e.is_living && e.metadata.living != old_living {
             crate::using_item::on_living_flags(e);
@@ -683,12 +666,24 @@ impl EntityStore {
     /// update the walk animation, the body yaw (`LivingEntity.tick` -> `calculateEntityAnimation`
     /// and `tickHeadTurn`) and the swing/swim/chicken timers.
     pub fn tick(&mut self) {
-        self.tick_in_world(&crate::item_entity::NoWorld);
+        self.tick_in_world(
+            &crate::item_entity::NoWorld,
+            &crate::arrow::NoArrowWorld,
+            &mut Vec::new(),
+        );
     }
 
-    /// [`Self::tick`] with a world view for the dropped items (`ItemEntity.tick`).
-    pub fn tick_in_world(&mut self, world: &dyn crate::item_entity::ItemWorld) {
+    /// [`Self::tick`] with a world view for the dropped items (`ItemEntity.tick`) and the
+    /// arrows (`AbstractArrow.tick`); `arrow_particles` collects this tick's particle
+    /// requests (the tipped colour and the crit trail), cleared by the caller.
+    pub fn tick_in_world(
+        &mut self,
+        world: &dyn crate::item_entity::ItemWorld,
+        arrows: &dyn crate::arrow::ArrowWorld,
+        arrow_particles: &mut Vec<crate::arrow::ArrowParticle>,
+    ) {
         self.use_ticks.clear();
+        arrow_particles.clear();
         let EntityStore { slots, riding, .. } = self;
         for slot in slots.iter_mut().flatten() {
             slot.tick_count += 1;
@@ -720,6 +715,11 @@ impl EntityStore {
             // `ItemEntity.tick`: gravity, move, drag, between position packets.
             if slot.is_item {
                 crate::item_entity::tick(slot, world);
+            }
+            // `AbstractArrow.tick`: the client-side flight simulation, between position
+            // packets (arrows are `SERVER_AND_CLIENT` simulated like items).
+            if crate::arrow::is_arrow(slot.kind) {
+                crate::arrow::tick(slot, arrows, arrow_particles);
             }
             // `PrimedTnt.tick` runs on the client too: the fuse counts down locally
             // between the server's entity-data syncs (which overwrite it in lockstep).

@@ -37,17 +37,14 @@ impl TrackedParticle {
     /// velocity in `offset` (`ClientLevel.addParticle`'s direct six-argument form).
     fn spawn(&self, pos: DVec3, velocity: DVec3) -> Option<ParticleSpawn> {
         let kind = self.kind.clone()?;
-        Some(ParticleSpawn {
+        let mut spawn = ParticleSpawn::client(
             kind,
             pos,
-            offset: [velocity.x as f32, velocity.y as f32, velocity.z as f32],
-            max_speed: [1.0, 1.0, 1.0],
-            count: 0,
-            randomization: 0,
-            override_limiter: false,
-            dust: self.dust,
-            block_state: self.block_state,
-        })
+            [velocity.x as f32, velocity.y as f32, velocity.z as f32],
+        );
+        spawn.dust = self.dust;
+        spawn.block_state = self.block_state;
+        Some(spawn)
     }
 }
 
