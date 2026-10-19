@@ -41,6 +41,17 @@ pub struct Session {
     pub entity_id: EntityId,
     /// The current dimension (from `login`, then each `respawn`).
     pub dimension: DimensionInfo,
+    /// The synced biomes' audio attributes (index = biome id, set once at connect — the
+    /// registries are not resent), for the music volume the camera's biome lowers
+    /// (`biomes::audio` resolves the target each tick).
+    pub biome_audio: Vec<crate::app::biomes::audio::BiomeAudio>,
+    /// The dimension type's `audio/music_volume` (vanilla's constant dimension layer of
+    /// the environment attribute system): the base the camera's biome overrides each tick.
+    pub dimension_music_volume: f32,
+    /// The camera's `MUSIC_VOLUME` as of the last tick (vanilla
+    /// `Minecraft.getMusicVolume`): `dimension_music_volume` overridden by the camera's
+    /// biome, clamped to the attribute's unit range (`biomes::audio` resolves it).
+    pub music_volume: f32,
     /// Counters.
     pub counters: NetCounters,
     /// Profiles added by `player_info_update` since the game thread last took them, with their
@@ -225,6 +236,9 @@ impl Session {
             },
             entity_id,
             dimension,
+            biome_audio: Vec::new(),
+            dimension_music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
+            music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
             breaking: HashMap::new(),
             lids: HashMap::new(),
             lid_states: None,

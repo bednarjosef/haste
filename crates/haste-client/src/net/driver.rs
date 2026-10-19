@@ -49,6 +49,12 @@ impl NetDriver {
             particle_names,
         );
         session.view_distance = login.view_distance;
+        // The synced biomes' audio attributes and the dimension type's `audio/music_volume`
+        // (the music volume's biome and constant dimension layers; respawn re-resolves
+        // the dimension one for the new dimension).
+        session.biome_audio = crate::app::biomes::audio::biome_audio(conn.registries());
+        session.dimension_music_volume =
+            crate::app::biomes::audio::dimension_music_volume(conn.registries(), &login.dimension);
         let chat = chat_session::ClientChat::new(conn.profile().uuid, None);
         Ok(Self {
             conn,
