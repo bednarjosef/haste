@@ -10,10 +10,11 @@ pub(crate) fn argb_linear(c: u32) -> [f32; 3] {
     [f(16), f(8), f(0)]
 }
 
-/// A held item's model matrix: its `display.<context>` transform and composite
-/// `transformation`, then the recentring vanilla's `ItemTransform.apply` ends with
-/// (the model's unit cube is drawn around the origin). `left` applies vanilla's left-hand fix
-/// (`ItemTransform.apply(true, ...)`: translation.x and rotation.y/z negated).
+/// A held item's model matrix: vanilla `ItemStackRenderState.LayerRenderState
+/// .applyTransform` — `ItemTransform.apply` (translate, rotate X-Y-Z, scale, then the
+/// recentring translate of the model's unit cube around the origin) with the left-hand fix
+/// (`translation.x` and rotation.y/z negated), then the layer's composite `transformation`
+/// (`mulPose(localTransform)`, after the recentring).
 pub(crate) fn item_display_matrix(
     part: &haste_assets::ItemModelPart,
     display: &haste_assets::DisplayTransform,
@@ -37,8 +38,8 @@ pub(crate) fn item_display_matrix(
         *display
     };
     crate::gui::display_matrix(&display)
-        * crate::gui::part_matrix(&part.transformation)
         * Mat4::from_translation(Vec3::splat(-0.5))
+        * crate::gui::part_matrix(&part.transformation)
 }
 
 /// `ItemFrameRenderer.submit`'s frame transform: translate to `direction * 0.46875`, then the
@@ -98,15 +99,16 @@ pub(super) fn item_model_bbox(
         // entities never draw an item in the left hand).
         let display = match display {
             ItemDisplay::FirstPerson => &part.firstperson,
-            ItemDisplay::ThirdPersonRight | ItemDisplay::ThirdPersonLeft => &part.thirdperson,
+            ItemDisplay::ThirdPersonRight => &part.thirdperson,
+            ItemDisplay::ThirdPersonLeft => &part.thirdperson_left,
             ItemDisplay::Head => &part.head,
             ItemDisplay::Fixed => &part.fixed,
             ItemDisplay::Ground => &part.ground,
             ItemDisplay::OnShelf => &part.on_shelf,
         };
         let m = crate::gui::display_matrix(display)
-            * crate::gui::part_matrix(&part.transformation)
-            * Mat4::from_translation(Vec3::splat(-0.5));
+            * Mat4::from_translation(Vec3::splat(-0.5))
+            * crate::gui::part_matrix(&part.transformation);
         match &part.geometry {
             haste_assets::ItemGeometry::None => {}
             haste_assets::ItemGeometry::Generated { layers } => {

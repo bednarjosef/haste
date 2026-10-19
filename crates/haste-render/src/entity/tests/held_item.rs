@@ -37,6 +37,56 @@ fn the_third_person_item_root_is_vanillas_translate_to_hand() {
     assert!(close(haste, want, 1e-5), "haste {haste:?} want {want:?}");
 }
 
+/// The left hand draws through the model's own `thirdperson_lefthand` entry with the fix
+/// on top (`ItemStackRenderState` uses `ItemTransforms.getTransform(THIRD_PERSON_LEFT_HAND)`
+/// and then `ItemTransform.apply(true, ...)`): `item/handheld`'s left entry [0, 90, -55]
+/// cancels the fix back to the right entry's [0, -90, 55] — not the mirrored-right
+/// [0, 90, -55] a plain fix of the right entry would give (that held the sword pointing up).
+#[test]
+fn the_left_hand_uses_the_models_left_entry() {
+    let part = haste_assets::ItemModelPart {
+        geometry: haste_assets::ItemGeometry::None,
+        tints: vec![],
+        gui: haste_assets::DisplayTransform::IDENTITY,
+        firstperson: haste_assets::DisplayTransform::IDENTITY,
+        thirdperson: haste_assets::DisplayTransform {
+            rotation: [0.0, -90.0, 55.0],
+            translation: [0.0, 0.25, 0.5 / 16.0],
+            scale: [0.85; 3],
+        },
+        thirdperson_left: haste_assets::DisplayTransform {
+            rotation: [0.0, 90.0, -55.0],
+            translation: [0.0, 0.25, 0.5 / 16.0],
+            scale: [0.85; 3],
+        },
+        head: haste_assets::DisplayTransform::IDENTITY,
+        ground: haste_assets::DisplayTransform::IDENTITY,
+        fixed: haste_assets::DisplayTransform::IDENTITY,
+        on_shelf: haste_assets::DisplayTransform::IDENTITY,
+        gui_light_front: false,
+        transformation: None,
+    };
+    // Vanilla: apply(true) on the left entry — the fix negates y and z of [0, 90, -55]
+    // back to the right entry's angle [0, -90, 55].
+    let got = item_display_matrix(&part, &part.thirdperson_left, true);
+    let want = crate::gui::display_matrix(&haste_assets::DisplayTransform {
+        rotation: [0.0, -90.0, 55.0],
+        translation: [0.0, 0.25, 0.5 / 16.0],
+        scale: [0.85; 3],
+    }) * Mat4::from_translation(Vec3::splat(-0.5));
+    assert!(close(got, want, 1e-6), "got {got:?} want {want:?}");
+    // The mirrored-right mistake: the fix of the right entry alone.
+    let wrong = crate::gui::display_matrix(&haste_assets::DisplayTransform {
+        rotation: [0.0, 90.0, -55.0],
+        translation: [0.0, 0.25, 0.5 / 16.0],
+        scale: [0.85; 3],
+    }) * Mat4::from_translation(Vec3::splat(-0.5));
+    assert!(
+        !close(got, wrong, 1e-3),
+        "left hand mirrors the right entry"
+    );
+}
+
 /// The composed custom-head item root is vanilla's `CustomHeadLayer.translateToHead`: the
 /// head part's pivot in block units, the (0, -0.25, 0) offset, the Y turn and the
 /// (0.625, -0.625, -0.625) scale, all at block scale.
