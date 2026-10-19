@@ -10,10 +10,10 @@ use std::collections::HashMap;
 
 use haste_core::entity::MetadataValue;
 use haste_core::model::{
-    Decoration, ExperienceOrbDecoration, ItemFrameDecoration, LightningDecoration,
-    PaintingDecoration,
+    Decoration, ExperienceOrbDecoration, FallingBlockDecoration, ItemFrameDecoration,
+    LightningDecoration, PaintingDecoration, PrimedTntDecoration,
 };
-use haste_core::{Direction, Identifier, RegistryIndex};
+use haste_core::{BlockStateId, Direction, Identifier, RegistryIndex};
 
 /// `ItemFrame.DATA_ITEM`.
 pub const ITEM_FRAME_ITEM: u8 = 9;
@@ -95,8 +95,17 @@ pub enum PaintingVariantRef {
     Inline(PaintingVariant),
 }
 
+/// `TntRenderer.extractRenderState`'s `fuseRemainingInTicks`: `getFuse() - partialTicks + 1`,
+/// so the rendered fuse eases from fuse+1 down to fuse across each tick.
+pub fn tnt_fuse_remaining(fuse: i32, partial_tick: f32) -> f32 {
+    fuse as f32 - partial_tick + 1.0
+}
+
 /// The decoration of an entity, if its type has one. `variants` is the synced
 /// `minecraft:painting_variant` table (empty when the server sent none).
+/// `partial_tick` interpolates the TNT's fuse, `default_tnt_state` is the TNT block's
+/// default state (what a TNT without a synced `DATA_BLOCK_STATE_ID` renders as).
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     kind: RegistryIndex,
     data: i32,
@@ -104,6 +113,8 @@ pub fn build(
     variants: &HashMap<u32, PaintingVariant>,
     entity_id: i32,
     age: f32,
+    partial_tick: f32,
+    default_tnt_state: BlockStateId,
 ) -> Option<Decoration> {
     // The lightning bolt is not hanging: it renders at the entity's own position, its
     // geometry from a seed (the entity id stands in for vanilla's per-bolt random).
@@ -114,6 +125,31 @@ pub fn build(
         return Some(Decoration::Lightning(LightningDecoration {
             seed: entity_id as u32 as u64 | 0x5EED_0000_0000_0000,
         }));
+    }
+    // Falling blocks and primed TNT render as their block model (vanilla
+    // `FallingBlockRenderer`/`TntRenderer`); they are not hanging either, so the client
+    // keeps them at the entity's own (interpolated) position. The falling block's state is
+    // the spawn packet's data field (`FallingBlockEntity.recreateFromPacket` reads
+    // `Block.stateById(packet.getData())`); a negative id is malformed and draws nothing.
+    // The types match by registry name (the decoration-kind table covers the hanging
+    // kinds), so an unknown name is simply not one of these.
+    match crate::registry::entity_type_name(kind) {
+        Some("minecraft:falling_block") => {
+            let block_state = BlockStateId(u32::try_from(data).unwrap_or(BlockStateId::AIR.0));
+            return Some(Decoration::FallingBlock(FallingBlockDecoration {
+                block_state,
+                landed: false,
+            }));
+        }
+        Some("minecraft:tnt") => {
+            // `TntRenderer.extractRenderState`: `getFuse() - partialTicks + 1`; the block
+            // state is `DATA_BLOCK_STATE_ID`, defaulting to the TNT block.
+            return Some(Decoration::PrimedTnt(PrimedTntDecoration {
+                block_state: metadata.tnt_block_state.unwrap_or(default_tnt_state),
+                fuse: tnt_fuse_remaining(metadata.tnt_fuse, partial_tick),
+            }));
+        }
+        _ => {}
     }
     // Experience orbs render as a camera-facing quad with a value-tiered icon and a colour
     // cycle; they are not hanging, so they keep the entity's own position.
@@ -361,7 +397,48 @@ mod tests {
             },
         }]);
         // Unknown kind index: no decoration.
-        assert!(build(RegistryIndex(999), 2, &m, &variants, 1, 0.0).is_none());
+        assert!(build(
+            RegistryIndex(999),
+            2,
+            &m,
+            &variants,
+            1,
+            0.0,
+            0.5,
+            BlockStateId::AIR
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn tnt_metadata_reads_fuse_and_block_state() {
+        // The default fuse is vanilla's `PrimedTnt.DEFAULT_FUSE_TIME` (80), and no block
+        // state means the TNT block's default (the caller resolves it).
+        let m = Metadata::default();
+        assert_eq!(m.tnt_fuse, crate::metadata::DEFAULT_TNT_FUSE);
+        assert_eq!(m.tnt_block_state, None);
+        // `DATA_FUSE_ID` (index 8, int) and `DATA_BLOCK_STATE_ID` (index 9).
+        let m = metadata(vec![
+            MetadataEntry {
+                index: 8,
+                value: MetadataValue::VarInt(37),
+            },
+            MetadataEntry {
+                index: 9,
+                value: MetadataValue::BlockState(BlockStateId(12)),
+            },
+        ]);
+        assert_eq!(m.tnt_fuse, 37);
+        assert_eq!(m.tnt_block_state, Some(BlockStateId(12)));
+    }
+
+    #[test]
+    fn tnt_fuse_eases_from_one_past_the_synced_value() {
+        // `getFuse() - partialTicks + 1`: 10 renders 11 -> 10 across the tick, so the
+        // countdown stays continuous across tick boundaries.
+        assert!((tnt_fuse_remaining(10, 0.0) - 11.0).abs() < 1e-6);
+        assert!((tnt_fuse_remaining(10, 1.0) - 10.0).abs() < 1e-6);
+        assert!((tnt_fuse_remaining(10, 0.25) - 10.75).abs() < 1e-6);
     }
 
     #[test]
