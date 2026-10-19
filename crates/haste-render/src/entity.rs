@@ -10,7 +10,7 @@ use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
     BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
-    ModelPart, PaintingDecoration, PoseOverrides,
+    ModelPart, PaintingDecoration, PoseOverrides, ThrownItemDecoration,
 };
 use haste_core::parts::{self, PartId};
 use haste_core::view::BlockView;
@@ -21,9 +21,12 @@ use crate::gui::Shelf;
 mod atlas;
 mod block_entities;
 mod cape;
+mod dragon_fireball;
 mod equipment;
 mod experience_orb;
 mod flame;
+#[cfg(test)]
+mod flame_tests;
 mod item;
 mod item_frame;
 mod minecart;
@@ -36,6 +39,9 @@ mod shadow;
 mod sign;
 #[cfg(test)]
 mod tests;
+mod thrown_item;
+#[cfg(test)]
+mod thrown_item_tests;
 
 mod hand;
 mod humanoid;
@@ -429,6 +435,10 @@ impl EntityRenderer {
             if let Some(item) = &e.item {
                 let start = self.vertices.len();
                 self.emit_dropped_item(e, item, camera, light, assets);
+                // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
+                if e.display_fire {
+                    self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
+                }
                 if self.vertices.len() > start {
                     self.drawn += 1;
                 }
@@ -445,6 +455,12 @@ impl EntityRenderer {
                     // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
                     Decoration::Lightning(_) => {}
                     Decoration::Minecart(c) => self.emit_minecart(e, c, camera, light, assets),
+                    Decoration::ThrownItem(t) => {
+                        self.emit_thrown_item(e, t, camera, orientation, light, assets)
+                    }
+                    Decoration::DragonFireball => {
+                        self.emit_dragon_fireball(e, camera, orientation, light, assets)
+                    }
                     Decoration::ExperienceOrb(o) => self.emit_experience_orb(
                         e,
                         o.value,
@@ -454,6 +470,12 @@ impl EntityRenderer {
                         orientation,
                         assets,
                     ),
+                }
+                // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer —
+                // a burning small fireball carries its `displayFireAnimation` flames on top
+                // of the thrown-item sprite.
+                if e.display_fire {
+                    self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;

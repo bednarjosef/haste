@@ -73,6 +73,23 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
                 &mut ambient,
             );
         }
+        // `AbstractHurtingProjectile.createParticleTrail`: the fireballs and the wither
+        // skull smoke at their position, half a block up, one particle per tick (the dragon
+        // fireball's dragon-breath trail is a separate task).
+        for pos in shared.entities.read().smoke_trail_positions() {
+            ambient.push(haste_render::ParticleSpawn {
+                kind: haste_core::Identifier::minecraft("smoke"),
+                pos: pos + haste_core::DVec3::new(0.0, 0.5, 0.0),
+                offset: [0.0; 3],
+                // count 0: one particle at the position, no velocity of its own.
+                max_speed: [1.0; 3],
+                count: 0,
+                randomization: 0,
+                override_limiter: false,
+                dust: None,
+                block_state: None,
+            });
+        }
     }
     for s in &ambient {
         particles.spawn(s, camera, None);

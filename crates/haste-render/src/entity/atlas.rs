@@ -68,6 +68,31 @@ impl EntityRenderer {
         self.resident_texture_rect(id)
     }
 
+    /// [`Self::texture_rect`] for animated textures: the first frame of the `.mcmeta`
+    /// animation, not the whole sheet (vanilla's atlas sprites play one frame at a time;
+    /// the entity atlas has no animation ticker, so the fire overlay and friends draw the
+    /// first frame, like the fluid and particle atlases).
+    pub(super) fn texture_rect_first_frame(
+        &mut self,
+        id: &Identifier,
+        assets: &mut Assets,
+    ) -> [u32; 4] {
+        if !self.textures.contains_key(id) {
+            let image = assets.texture_first_frame(id).unwrap_or_else(|e| {
+                tracing::warn!("entity texture {id}: {e:#}");
+                placeholder_texture()
+            });
+            self.textures.insert(
+                id.clone(),
+                EntityTexture {
+                    rect: None,
+                    image: Arc::new(image),
+                },
+            );
+        }
+        self.texture_rect(id, assets)
+    }
+
     /// Uploads `id`'s stored image into the atlas if it is not resident yet and returns its
     /// rectangle. The entry must exist (insert by `texture_rect` / `glyph_page_rect` first).
     pub(super) fn resident_texture_rect(&mut self, id: &Identifier) -> [u32; 4] {
