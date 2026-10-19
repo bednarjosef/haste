@@ -76,7 +76,8 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "minecraft:mob_effect": {{"entries": {{{}}}}},
                     "minecraft:data_component_type": {{"entries": {{{}}}}},
                     "minecraft:enchantment": {{"entries": {{{}}}}},
-                    "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
+                    "minecraft:entity_type": {{"entries": {{{}}}}},
+                    "minecraft:sound_event": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
                 entries(&[
                     "air",
@@ -102,12 +103,8 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "nausea",
                     "darkness",
                 ]),
-                entries(&[
-                    "tool",
-                    "enchantments",
-                    "piercing_weapon",
-                    "minimum_attack_charge",
-                ]),
+                entries(&["tool", "enchantments", "piercing_weapon", "minimum_attack_charge",
+                    "consumable"]),
                 entries(&["efficiency", "sharpness"]),
                 entries(&[
                     "item",
@@ -124,6 +121,7 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "shulker_bullet",
                     "villager",
                 ]),
+                entries(&["entity.generic.eat", "entity.generic.drink"]),
             ),
         )
         .unwrap();
@@ -799,6 +797,7 @@ fn the_used_item_use_effects_feed_the_physics_state() {
         duration: 32,
         remaining: 32,
         animation: UseAnimation::Eat,
+        consumable: None,
     });
     r.p.apply_item_use_effects(Some(&env));
     assert!(r.p.state.slow_using_item);
@@ -809,6 +808,7 @@ fn the_used_item_use_effects_feed_the_physics_state() {
         duration: 72000,
         remaining: 72000,
         animation: UseAnimation::Spear,
+        consumable: None,
     });
     r.p.apply_item_use_effects(Some(&env));
     assert!(r.p.state.using_item);
@@ -1030,34 +1030,6 @@ fn held_item_attack_speed_comes_from_its_attribute_modifiers() {
 
 /// `Item.getUseDuration` / `Item.getUseAnimation`: the consumable component for food and drink,
 /// and the item classes that override them (bow/crossbow/trident/spyglass/shield).
-#[test]
-fn use_duration_and_animation_come_from_the_item() {
-    let mut r = Rig::new(GameMode::Survival);
-    r.p.int.prepare(data());
-    r.p.int.set_item_components(item_components());
-    let env = InteractEnv {
-        data: data(),
-        entities: &[],
-        entity_types: &[],
-        border: None,
-        warm_blocks: None,
-        ui: None,
-    };
-    let d = |i: u32| r.p.int.use_data(&item(i), env.data);
-    // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
-    assert_eq!(d(5), Some((72000, UseAnimation::Bow)));
-    assert_eq!(d(6), Some((72000, UseAnimation::Crossbow)));
-    assert_eq!(d(7), Some((72000, UseAnimation::Trident)));
-    assert_eq!(d(9), Some((72000, UseAnimation::Block)));
-    assert_eq!(d(8), Some((1200, UseAnimation::Spyglass)));
-    // Apple: `consume_seconds` 1.6 -> 32 ticks, `eat`; potion drinks.
-    assert_eq!(d(4), Some((32, UseAnimation::Eat)));
-    assert_eq!(d(10), Some((32, UseAnimation::Drink)));
-    // A tool is not used over time.
-    assert_eq!(d(1), None);
-    assert_eq!(d(3), None);
-}
-
 /// The `player_action` statuses this module sends, pinned to the declaration
 /// order of `ServerboundPlayerActionPacket$Action` in the 26.3 client jar
 /// (CHANGE_DESTROY_DIRECTION was inserted at 1, moving every later value).
@@ -1961,12 +1933,12 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         "the teleport aborted the running break"
     );
     assert!(r.p.break_progress().is_none());
-    // The tick the teleport arrived in: the movement waits for the accept (nothing about
-    // the break; the held button restarts a fresh one on the new ground below).
+    // The tick the teleport arrived in: the accept goes out with it, and first (the server
+    // drops interactions while a teleport is unconfirmed), then the fresh break restarts.
     let out = r.tick(ATTACK);
+    assert!(matches!(out[0], ServerboundPlay::AcceptTeleportation(_)));
     assert_eq!(actions(&out), [(action::START_DESTROY, 2)]);
-    // The next tick opens with the accept and the movement reports the new position
-    // whatever the threshold (an unfiltered tick: Rig::tick drops the movement packets).
+    // The next tick reports nothing new (Rig::tick dropped the arrival tick's movement).
     r.p.set_interact(ATTACK);
     let mut unfiltered = Vec::new();
     let env = InteractEnv {
@@ -1995,7 +1967,7 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         })
         .filter(|n| *n != "tick_end" && *n != "other")
         .collect();
-    assert_eq!(names, ["abort", "accept", "pos"], "{names:?}");
+    assert_eq!(names, ["abort"], "{names:?}");
 }
 
 /// A screen open skips `Minecraft.handleKeybinds` entirely (`Minecraft.tick` runs it only

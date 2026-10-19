@@ -7,8 +7,8 @@ crates/haste-client/src/ambient_particles.rs 626
 crates/haste-client/src/app.rs 4164
 crates/haste-client/src/boat.rs 871
 crates/haste-client/src/net/tests.rs 1788
-crates/haste-client/src/player/interact/tests.rs 2233
-crates/haste-client/src/player.rs 1404
+crates/haste-client/src/player/interact/tests.rs 2205
+crates/haste-client/src/player.rs 1363
 crates/haste-client/src/player/tests.rs 1713
 crates/haste-client/src/script.rs 1159
 crates/haste-client/src/sound/tests.rs 1163
@@ -16,7 +16,7 @@ crates/haste-data/src/blocks.rs 635
 crates/haste-entity/src/animation.rs 747
 crates/haste-entity/src/registry.rs 1164
 crates/haste-entity/src/riding.rs 640
-crates/haste-entity/src/store.rs 1121
+crates/haste-entity/src/store.rs 1120
 crates/haste-jvm/src/host.rs 639
 crates/haste-jvm/src/proxies.rs 630
 crates/haste-jvm/tests/jvm.rs 2750
@@ -28,7 +28,6 @@ crates/haste-protocol/src/connection/tests.rs 1280
 crates/haste-protocol/src/nbt/deserializer.rs 643
 crates/haste-protocol/src/packets/mod.rs 713
 crates/haste-protocol/src/packets/play/clientbound/tests.rs 1047
-crates/haste-protocol/src/wire/components.rs 622
 crates/haste-render/src/animation.rs 631
 crates/haste-render/src/blockentity/tests.rs 1405
 crates/haste-render/src/entity/tests.rs 1034

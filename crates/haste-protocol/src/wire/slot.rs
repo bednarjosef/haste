@@ -118,7 +118,7 @@ impl Codec<ItemStackData> for OptionalItemStackTemplate {
 
 mod patch;
 
-pub(crate) use patch::component_name;
+pub(crate) use patch::{component_name, skip_consume_effect};
 pub use patch::{skip_component, skip_exact_components, skip_patch};
 
 #[cfg(test)]

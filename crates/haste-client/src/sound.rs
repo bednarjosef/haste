@@ -32,11 +32,7 @@ pub use falls::{FallBlockRule, FallSounds, LandedOn};
 pub use own_block::{level_event_sound, OwnBlockSounds};
 pub use steps::{resolve_step_blocks, StepCtx, StepSounds};
 
-/// The `MUSIC_VOLUME` environment attribute's default (vanilla's
-/// `EnvironmentAttributes.MUSIC_VOLUME`): the target the music fade eases toward, on top
-/// of the music option volume. Lowered by the pale garden's biome data (0 there); reading
-/// the camera's biome attribute is a seam left for when the attribute probe exists.
-const MUSIC_VOLUME_ATTRIBUTE_DEFAULT: f32 = 1.0;
+use crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT;
 
 /// Vanilla's `SoundSource` order, 0..=10 (read from the 26.3 jar by the lead; the packet's
 /// category VarInt is the index in it). Matches `haste_audio::engine::SoundSource`.
@@ -222,10 +218,10 @@ pub struct Sounds {
     /// The music event we started and believe is playing.
     music_event: Option<String>,
     /// The target the music fade eases the music gain toward, vanilla's
-    /// `Minecraft.getMusicVolume`: the camera's `MUSIC_VOLUME` environment attribute,
-    /// 1.0 outside the biomes that lower it (the pale garden sets 0). This is on top of
-    /// the music option volume, which multiplies separately; resolving the camera's
-    /// biome attribute is not wired up yet, so it stays at the default.
+    /// `Minecraft.getMusicVolume`: the camera's `MUSIC_VOLUME` environment attribute
+    /// (resolved by the game tick from the dimension type and the camera's biome — see
+    /// [`crate::app::biomes::audio`]), 1.0 outside the biomes that lower it (the pale
+    /// garden sets 0). On top of the music option volume, which multiplies separately.
     music_volume: f32,
     /// Ids/events already logged as unknown (log once per id, no spam).
     unknown_logged: HashSet<String>,
@@ -352,11 +348,19 @@ impl Sounds {
             .is_some_and(|event| self.system.is_event_playing(event))
     }
 
+    /// The camera's `MUSIC_VOLUME` for this tick (vanilla `Minecraft.getMusicVolume`,
+    /// resolved by the game tick: the dimension type's value overridden by the camera's
+    /// biome — see [`crate::app::biomes::audio`]).
+    pub fn set_music_volume(&mut self, volume: f32) {
+        self.music_volume = volume;
+    }
+
     /// The end of a game tick (20 Hz): listener from the camera (position and look —
     /// vanilla's `SoundEngine.updateSource(Camera)`), the music situation, the music
     /// manager, then the system tick. The situation is recomputed where vanilla recomputes
     /// it (`Minecraft.getSituationalMusic`: game mode, eye in water); the manager follows
-    /// vanilla's `MusicManager.tick` from there on.
+    /// vanilla's `MusicManager.tick` from there on, easing the gain toward the volume the
+    /// game tick set.
     pub fn tick(
         &mut self,
         camera_pos: DVec3,
@@ -375,6 +379,7 @@ impl Sounds {
         if let Some(command) = self
             .music
             .tick(&mut self.music_rng, playing, music_volume, |gain| {
+                tracing::debug!("music gain {gain:.4}");
                 system.update_category_volume(SoundSource::Music, gain)
             })
         {

@@ -533,23 +533,23 @@ impl Session {
                         .cloned()
                 })
                 .collect();
-        // The items whose default components carry `minecraft:consumable`: their model
-        // sprites are packed for the item particles a use emits.
-        let consumable_items: Vec<(haste_core::RegistryIndex, haste_core::Identifier)> = data
-            .item_components
-            .consumable_items()
-            .filter_map(|name| {
-                data.registries
-                    .index("minecraft:item", name)
-                    .map(|i| (i, name.clone()))
-            })
-            .collect();
+        // Every item in the registry: their model sprites are packed for the item particles
+        // (a consumable use's crumbs — the stack may be consumable only through its patch —
+        // and the server's `minecraft:item` particles; no model draws the missing sprite).
+        let item_sprites: Vec<(haste_core::RegistryIndex, haste_core::Identifier)> =
+            (0..data.registries.len("minecraft:item") as u32)
+                .filter_map(|i| {
+                    data.registries
+                        .name("minecraft:item", haste_core::RegistryIndex(i))
+                        .map(|n| (haste_core::RegistryIndex(i), n.clone()))
+                })
+                .collect();
         let particle_types = std::sync::Arc::new(
             haste_render::ParticleTypes::build(
                 &mut open_assets_with(&server_packs)?,
                 &particle_ids,
                 Some(&data.blocks),
-                &consumable_items,
+                &item_sprites,
             )
             .context("building the particle atlas")?,
         );
