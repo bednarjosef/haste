@@ -170,7 +170,7 @@ public final class Scenario {
                     RecorderIO.LOGGER.info("haste-recorder: {}", FrameTimes.finish(a[1],
                         mc.options.getEffectiveRenderDistance(),
                         mc.getWindow().getWidth(), mc.getWindow().getHeight(),
-                        mc.levelRenderer.visibleSections().size()));
+                        mc.levelRenderer.visibleSections().size(), FrameTimes.visibleIndexCount(mc)));
                 } catch (IOException e) {
                     throw new IllegalStateException("writing frametimes", e);
                 }
@@ -249,7 +249,7 @@ public final class Scenario {
                     RecorderIO.LOGGER.info("haste-recorder: {}", FrameTimes.finish(a[0],
                         mc.options.getEffectiveRenderDistance(),
                         mc.getWindow().getWidth(), mc.getWindow().getHeight(),
-                        mc.levelRenderer.visibleSections().size()));
+                        mc.levelRenderer.visibleSections().size(), FrameTimes.visibleIndexCount(mc)));
                 } catch (IOException e) {
                     throw new IllegalStateException("writing frametimes", e);
                 }
