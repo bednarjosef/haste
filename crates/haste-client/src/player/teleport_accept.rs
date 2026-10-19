@@ -1,6 +1,7 @@
 //! Answering the server's teleports: `accept_teleportation` (vanilla
-//! `ClientPacketListener.handleMovePlayer` sends it with the teleport) and the first
-//! `player_loaded` after the join teleport.
+//! `ClientPacketListener.handleMovePlayer` sends it with the teleport). The
+//! `player_loaded` after the join or respawn teleport is sent by the tick's level-load
+//! gate (see [`super::level_load`]), once the chunk at the player has streamed in.
 
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ServerboundPlay;
@@ -8,15 +9,19 @@ use haste_protocol::ServerboundPlay;
 use super::LocalPlayer;
 
 impl LocalPlayer {
-    /// Sends the `accept_teleportation` (and the first `player_loaded`) for a teleport that
-    /// arrived a full tick ago. A vanilla client answers teleports from its game loop,
-    /// never from the network reader; answering within microseconds of the join teleport
-    /// races the server's join bookkeeping and it logs
+    /// Sends the `accept_teleportation` for a teleport that arrived a full tick ago. A
+    /// vanilla client answers teleports from its game loop, never from the network
+    /// reader; answering within microseconds of the join teleport races the server's
+    /// join bookkeeping and it logs
     /// "moved too quickly! <spawn position>" (observed on the vanilla 26.3 server, ~1 join
     /// in 8). One full tick later the server holds the login position, so the accept's
     /// position matches it. 26.3's accept carries the resulting position and rotation; the
-    /// first move_player_pos_rot follows one tick after it, as vanilla's `sendPosition`
-    /// does (xLast untouched by the teleport — see the PlayerPosition handler).
+    /// first move_player_pos_rot follows one tick after `player_loaded` (the level-load
+    /// gate) and the accept, as vanilla's `sendPosition` does (xLast untouched by the
+    /// teleport — see the PlayerPosition handler). A movement packet between
+    /// accept_teleportation and player_loaded gets the client kicked
+    /// (invalid_player_movement, observed on the 26.3 server), so `player_loaded` going
+    /// out later than the accept is safe — never the other way round.
     pub(super) fn flush_pending_accept(&mut self, out: &mut Vec<ServerboundPlay>) {
         if self.pending_accept.is_none() {
             return;
@@ -48,12 +53,5 @@ impl LocalPlayer {
                 pitch: self.state.pitch,
             },
         ));
-        if !self.loaded {
-            // Observed on the 26.3 server: a movement packet between accept_teleportation
-            // and player_loaded gets the client kicked (invalid_player_movement), so the
-            // first move goes out next tick.
-            out.push(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
-            self.loaded = true;
-        }
     }
 }
