@@ -23,20 +23,6 @@ fn shadow_eligible(e: &EntityInstance) -> bool {
         )
 }
 
-/// The vertex alpha that darkens the sRGB main target like vanilla's gamma-space blend
-/// darkens its plain UNORM target. Vanilla's `ENTITY_SHADOW` (`BlendFunction.TRANSLUCENT`)
-/// blends the target's sRGB bytes, so a piece alpha `a` removes exactly `a` of them; Haste's
-/// main pass target is an sRGB format, whose blend multiplies linear light instead — the
-/// stored bytes come out as `1 - (1 - a)^(1/2.2)` of darkening, roughly half of vanilla's.
-/// Pre-distorting `a -> 1 - (1 - a)^2.2` makes the linear blend land on vanilla's bytes
-/// (within the sRGB curve's small linear toe).
-///
-/// The srgb-translucent-blend task plans to move the main target to byte-space blending,
-/// which would make this pre-distortion unnecessary — remove it then.
-pub fn srgb_shadow_alpha(alpha: f32) -> f32 {
-    1.0 - (1.0 - alpha).powf(2.2)
-}
-
 impl EntityRenderer {
     /// Vanilla `EntityRenderer.extractShadow`: the round `misc/shadow.png` quads on the full
     /// top faces below each entity. For every entity the shadow is a `shadowRadius` (capped at
@@ -115,8 +101,6 @@ impl EntityRenderer {
                         if alpha <= 0.0 {
                             continue;
                         }
-                        // The sRGB-target blend compensation (see `srgb_shadow_alpha`).
-                        let alpha = srgb_shadow_alpha(alpha);
                         let r = 2.0 * radius as f64;
                         let bx = x as f64;
                         let bz = z as f64;
@@ -228,13 +212,9 @@ mod tests {
         let b = lightmap_brightness(0.0, 15);
         let piece = shadow_piece_alpha(0.6326, b);
         assert!((piece - 0.3163).abs() < 1e-3, "piece alpha {piece}");
-        // Vanilla's `ENTITY_SHADOW` blends that alpha on its plain UNORM target, so the
-        // stored bytes darken by exactly it. Haste's sRGB target blends linear light, so
-        // the vertex alpha is pre-distorted and the stored bytes come out the same.
-        let vertex = srgb_shadow_alpha(piece);
-        assert!((vertex - 0.5669).abs() < 1e-3, "vertex alpha {vertex}");
-        let darkening = 1.0 - (1.0 - vertex).powf(1.0 / 2.2);
-        assert!((darkening - 0.3163).abs() < 1e-3, "darkening {darkening}");
+        // Vanilla's `ENTITY_SHADOW` blends that alpha on the target's sRGB bytes, and so
+        // does Haste's main pass (it renders into the non-sRGB view), so the vertex alpha
+        // is the piece alpha itself and the stored bytes darken by exactly it.
     }
 
     #[test]
