@@ -1,6 +1,7 @@
 //! The minecart renderer offscreen (`AbstractMinecartRenderer`): a plain, a chest, a furnace
 //! and a TNT cart on an east-west rail line, the cart model, the cargo blocks and the
-//! rail-snapped pose all drawn through the entity pass.
+//! rail-snapped pose all drawn through the entity pass, plus a release-timed frame-cost check
+//! of a 50-cart scene against the generic box the entity path drew before.
 use haste_core::model::{BodyTransform, Decoration, EntityInstance, PoseOverrides};
 use haste_core::view::BlockView;
 use haste_core::{BlockPos, BlockStateId, ChunkPos, DVec3, EntityId};
@@ -79,9 +80,9 @@ fn cart(id: i32, x: f64, variant: haste_entity::minecart::Variant) -> EntityInst
     }
 }
 
-#[test]
-#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
-fn minecarts_offscreen() {
+/// The renderer and the rail floor, meshed and settled (the jar, the reports and a Vulkan
+/// driver must be present).
+fn scene() -> (Renderer, RailFloor, haste_data::GameData) {
     let jar = haste_core::paths::client_jar();
     let mut assets =
         haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
@@ -108,35 +109,34 @@ fn minecarts_offscreen() {
         renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    (renderer, world, data)
+}
 
-    let mut entities = vec![
-        cart(1, -2.5, haste_entity::minecart::Variant::Plain),
-        cart(2, -1.0, haste_entity::minecart::Variant::Chest),
-        cart(3, 0.5, haste_entity::minecart::Variant::Furnace),
-        cart(4, 2.0, haste_entity::minecart::Variant::Tnt),
-    ];
-    // The rail snapping the client does per frame (`OldMinecartBehavior.getPos`).
-    haste_entity::minecart::snap_rails(&mut entities, &world, &data.blocks);
-    for e in &mut entities {
-        e.sample_light(&world);
+/// The frame the four-cart scene renders with, from a camera 4 blocks south of the rails.
+/// `gui` outlives the returned frame (the caller owns it).
+fn frame<'a>(
+    entities: &'a mut [EntityInstance],
+    world: &RailFloor,
+    blocks: &haste_data::BlockStates,
+    gui: &'a haste_core::gui::GuiFrame,
+) -> FrameInput<'a> {
+    haste_entity::minecart::snap_rails(entities, world, blocks);
+    for e in entities.iter_mut() {
+        e.sample_light(world);
     }
-    let camera = Camera {
-        pos: DVec3::new(0.0, 2.6, -4.0),
-        yaw: 0.0,
-        pitch: 12.0,
-        fov_deg: 70.0,
-        hand_fov_deg: 70.0,
-        roll_deg: 0.0,
-        bob: ViewBob::default(),
-    };
-    let frame = FrameInput {
-        camera,
-        entities: &entities,
-        block_entities: &[],
-        gui: &haste_core::gui::GuiFrame {
-            scale: 2,
-            ..Default::default()
+    FrameInput {
+        camera: Camera {
+            pos: DVec3::new(0.0, 2.6, -4.0),
+            yaw: 0.0,
+            pitch: 12.0,
+            fov_deg: 70.0,
+            hand_fov_deg: 70.0,
+            roll_deg: 0.0,
+            bob: ViewBob::default(),
         },
+        entities,
+        block_entities: &[],
+        gui,
         sky: SkyState {
             time_of_day: 6000,
             rain: 0.0,
@@ -151,7 +151,29 @@ fn minecarts_offscreen() {
         camera_entity: None,
         spin: None,
         weather: None,
-    };
+    }
+}
+
+/// The empty HUD frame the scenes render with.
+fn gui() -> haste_core::gui::GuiFrame {
+    haste_core::gui::GuiFrame {
+        scale: 2,
+        ..Default::default()
+    }
+}
+
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn minecarts_offscreen() {
+    let (mut renderer, world, data) = scene();
+    let mut entities = vec![
+        cart(1, -2.5, haste_entity::minecart::Variant::Plain),
+        cart(2, -1.0, haste_entity::minecart::Variant::Chest),
+        cart(3, 0.5, haste_entity::minecart::Variant::Furnace),
+        cart(4, 2.0, haste_entity::minecart::Variant::Tnt),
+    ];
+    let gui = gui();
+    let frame = frame(&mut entities, &world, &data.blocks, &gui);
     renderer.render(&frame).unwrap();
     let img = renderer.read_back().unwrap();
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
@@ -181,15 +203,76 @@ fn minecarts_offscreen() {
     );
     assert!(changed > 1000, "the carts and their cargo cover the floor");
     // The carts face along the rail: the plain cart's side (not its narrow end) meets the
-    // camera, so a wide span of the centre row differs.
-    let (top, bottom) = (bounds.0 .1, bounds.1 .1);
+    // camera, so a wide span of the carts' middle row differs.
+    let middle = (bounds.0 .1 + bounds.1 .1) / 2;
     let centre_row = (bounds.0 .0..=bounds.1 .0)
-        .filter(|x| {
-            img.get_pixel(*x, (top + bottom) / 2).0 != empty.get_pixel(*x, (top + bottom) / 2).0
-        })
+        .filter(|x| img.get_pixel(*x, middle).0 != empty.get_pixel(*x, middle).0)
         .count();
     assert!(
         centre_row > 120,
         "four carts side-on span more than a quarter of the row ({centre_row} pixels)"
+    );
+}
+
+/// The per-frame entity cost of ~50 minecarts (the brief's measurement): this branch's
+/// minecart path against the generic box the entity path drew before. Release only; prints
+/// average and worst frame.
+#[test]
+#[ignore = "timed test, run in release: cargo test --release -p haste-render --test minecart_offscreen -- --ignored --nocapture"]
+fn fifty_minecarts_frame_time() {
+    let (mut renderer, world, data) = scene();
+    let variants = [
+        haste_entity::minecart::Variant::Plain,
+        haste_entity::minecart::Variant::Chest,
+        haste_entity::minecart::Variant::Furnace,
+        haste_entity::minecart::Variant::Tnt,
+        haste_entity::minecart::Variant::Hopper,
+        haste_entity::minecart::Variant::Spawner,
+        haste_entity::minecart::Variant::CommandBlock,
+    ];
+    let mut carts: Vec<EntityInstance> = (0..50)
+        .map(|i| {
+            cart(
+                i,
+                -7.0 + f64::from(i % 25) * 0.6,
+                variants[(i % 7) as usize],
+            )
+        })
+        .collect();
+    // The "before" look: the same entities as the generic boxes the entity store fell back
+    // to before the minecart renderer existed.
+    let mut boxes: Vec<EntityInstance> = carts
+        .iter()
+        .map(|e| EntityInstance {
+            model: haste_entity::models::box_for(0.98, 0.7),
+            decoration: None,
+            ..e.clone()
+        })
+        .collect();
+    let gui = gui();
+    let cart_frame = frame(&mut carts, &world, &data.blocks, &gui);
+    let box_frame = frame(&mut boxes, &world, &data.blocks, &gui);
+    let measure = |renderer: &mut Renderer, frame: &FrameInput| {
+        let mut worst = std::time::Duration::ZERO;
+        let mut total = std::time::Duration::ZERO;
+        const FRAMES: u32 = 200;
+        for _ in 0..FRAMES {
+            let start = std::time::Instant::now();
+            renderer.render(frame).unwrap();
+            let d = start.elapsed();
+            worst = worst.max(d);
+            total += d;
+        }
+        (total / FRAMES, worst)
+    };
+    // Warm both paths (texture rects, display quads, the model's OnceLock).
+    for _ in 0..10 {
+        renderer.render(&cart_frame).unwrap();
+        renderer.render(&box_frame).unwrap();
+    }
+    let (avg, worst) = measure(&mut renderer, &cart_frame);
+    let (box_avg, box_worst) = measure(&mut renderer, &box_frame);
+    eprintln!(
+        "50 carts: avg {avg:?} worst {worst:?} (boxes before: avg {box_avg:?} worst {box_worst:?})"
     );
 }
