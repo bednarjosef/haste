@@ -942,18 +942,15 @@ fn set_passengers_mounts_and_dismounts_the_local_player() {
         passengers: vec![],
     }));
     assert_eq!(r.session.player.vehicle(), None);
-    // Normal physics resumes from where we are. The fake world has no chunk loaded at the
-    // player's chunk, so vanilla's unloaded-chunk step (`Player.aiStep`'s `travelInAir`
-    // pin) moves it down by the unloaded-chunk fall speed this tick; x and z stay.
+    // Normal physics resumes: the fake world has no chunk loaded at the player's, so
+    // the unloaded-chunk pin applies from the NEXT tick (it sets the velocity; the
+    // teleport onto the vehicle zeroed it). x and z stay.
+    end_tick_once(&mut r);
+    assert_eq!(r.session.player.state.pos, DVec3::new(45.0, 69.5875, 40.0));
     end_tick_once(&mut r);
     assert_eq!(
-        r.session.player.state.pos,
-        DVec3::new(
-            45.0,
-            69.5875 + crate::player::UNLOADED_CHUNK_FALL_SPEED,
-            40.0
-        ),
-        "normal physics resumes, falling at the unloaded-chunk rate"
+        r.session.player.state.pos.y,
+        69.5875 + crate::player::UNLOADED_CHUNK_FALL_SPEED
     );
 }
 

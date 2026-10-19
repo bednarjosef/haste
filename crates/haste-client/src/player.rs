@@ -33,11 +33,12 @@ use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
 use haste_core::{BlockPos, EntityId, Identifier};
 use haste_data::BlockStates;
 use haste_entity::riding::SeatPoint;
-use haste_physics::movement::{BLOCK_BELOW_OFFSET, SPRINT_JUMP_BOOST, VERTICAL_DRAG};
+use haste_physics::movement::{BLOCK_BELOW_OFFSET, SPRINT_JUMP_BOOST};
 use haste_physics::{PlayerAttributes, PlayerState};
 use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::packets::play::serverbound::{self as sb, input_flags, move_flags};
 use haste_protocol::{ClientboundPlay, Login, ServerboundPlay};
+use level_load::LevelLoad;
 
 /// A position change is sent when its squared length exceeds this (2.0E-4 blocks).
 pub const POSITION_THRESHOLD_SQ: f64 = 2.0e-4 * 2.0e-4;
@@ -53,10 +54,8 @@ pub const JUMP_DOUBLE_TAP_TICKS: u8 = 7;
 /// `options.sprintWindow` (default 7, `Options.java`) on the first forward press with no
 /// impulse and counted down each `aiStep`, so a second press inside the window starts sprinting.
 pub const SPRINT_DOUBLE_TAP_TICKS: u8 = 7;
-/// Vertical movement while the chunk below is not loaded: vanilla `LivingEntity.travelInAir`
-/// skips gravity on the client and pins the vertical movement to -0.1 (0.0 at or below the
-/// world's minimum), with the 0.98 vertical drag applied on top.
-pub const UNLOADED_CHUNK_FALL_SPEED: f64 = -0.1 * VERTICAL_DRAG as f64;
+#[cfg(test)]
+pub use unloaded_chunk::UNLOADED_CHUNK_FALL_SPEED;
 
 /// `player_command` actions (wiki "Player Command"; ordinals from the 26.3
 /// `ServerboundPlayerCommandPacket.Action` enum: STOP_SLEEPING 0, START_SPRINTING 1,
@@ -219,8 +218,12 @@ pub struct LocalPlayer {
     carried_index: i32,
     /// Whether a `player_position` arrived since login/respawn.
     pub has_position: bool,
-    /// Whether `player_loaded` was sent since login/respawn (movement is sent only after).
+    /// Whether `player_loaded` was sent since login/respawn (movement is sent only after):
+    /// it goes out once the level is ready, not with the teleport's accept.
     pub loaded: bool,
+    /// The wait for the level after this login/respawn (vanilla `LevelLoadTracker`): the
+    /// player's tick is held until the chunk at its position has streamed in.
+    level_load: LevelLoad,
     /// The vehicle the server has us riding (`set_passengers`); `None` when on foot. While set,
     /// the player's own physics does not run: each tick its position is the vehicle's position
     /// plus the seat offset ([`LocalPlayer::ride_tick`]).
@@ -335,6 +338,7 @@ impl LocalPlayer {
             carried_index: 0,
             has_position: false,
             loaded: false,
+            level_load: LevelLoad::start(),
             vehicle: None,
             boat: None,
             horse: None,
@@ -597,6 +601,9 @@ impl LocalPlayer {
                     spectator::flying_after_mode_change(self.game_mode, self.state.flying);
                 self.has_position = false;
                 self.loaded = false;
+                // Vanilla starts a new `LevelLoadTracker` on every respawn
+                // (`startWaitingForNewLevel`), dimension change included.
+                self.level_load = LevelLoad::start();
                 self.pending_accept = None;
                 self.pending_accept_age = 0;
                 self.sent = Sent::default();
@@ -863,15 +870,15 @@ impl LocalPlayer {
         self.camera_eye_old = self.camera_eye;
         self.camera_eye += (self.eye_height() as f32 - self.camera_eye) * 0.5;
         self.flush_pending_accept(out);
-        // The effects' tick, in vanilla's `LivingEntity.baseTick` order (before the position
-        // check below): their durations and blend states drive the screen effects.
-        self.int.tick_effects();
-        if !(self.has_position && self.loaded) {
+        if !self.level_ready_gate(ctx.world, out) {
             // `Minecraft.tick` ends with ClientTickEnd every tick a level exists — before
             // `player_loaded`, and with a screen open. Nothing else leaves the client yet.
             out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
             return;
         }
+        // The effects' tick, in vanilla's `LivingEntity.baseTick` order (before the position
+        // check below): their durations and blend states drive the screen effects.
+        self.int.tick_effects();
 
         // Vanilla `Entity.baseTick` starts the tick with the sprint particle
         // (`canSpawnSprintParticle`: sprinting, not in water/lava, not sneaking or
@@ -1129,23 +1136,7 @@ impl LocalPlayer {
         } else {
             self.state.yaw = phys_input.yaw;
             self.state.pitch = phys_input.pitch;
-            // Vanilla `LivingEntity.travelInAir` (which `Player.travel` calls even while flying,
-            // then keeps the flying player's own vertical movement): with the chunk below not
-            // loaded the client skips gravity and pins the vertical movement to -0.1 while the
-            // player is above the world's minimum, with the 0.98 vertical drag on top. At or below
-            // the minimum it is 0.0, so the player is left exactly where it was.
-            if !self.state.flying {
-                let falling = self.state.pos.y > f64::from(ctx.world.min_y());
-                self.state.velocity.y = if falling {
-                    UNLOADED_CHUNK_FALL_SPEED
-                } else {
-                    0.0
-                };
-                if falling {
-                    self.state.pos.y += self.state.velocity.y;
-                    self.state.on_ground = false;
-                }
-            }
+            self.unloaded_chunk_step(ctx.world);
         }
 
         // Vanilla `LocalPlayer.aiStep`: the water-vision ramp, +1/tick with the eyes in water
@@ -1355,9 +1346,11 @@ impl TickCtx<'_> {
 pub mod climbable;
 mod creative_flight;
 pub mod interact;
+mod level_load;
 mod riding;
 pub mod script;
 pub mod spectator;
 mod teleport_accept;
 #[cfg(test)]
 mod tests;
+mod unloaded_chunk;

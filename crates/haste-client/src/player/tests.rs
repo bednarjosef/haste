@@ -581,55 +581,9 @@ fn sneak_cancels_the_sprint_window() {
     assert!(!p.state.sprinting && !names(&out).contains(&"command"));
 }
 
-/// Vanilla `LivingEntity.travelInAir`: with the chunk below not loaded the client skips gravity
-/// and pins the vertical movement to -0.1 (the 0.98 vertical drag on top of it) while the player
-/// is above the world's minimum; at or below the minimum it is 0.0.
-#[test]
-fn unloaded_chunk_below_falls_at_vanillas_rate() {
-    assert!((UNLOADED_CHUNK_FALL_SPEED + 0.098).abs() < 1.0e-8);
-    let (mut p, _) = spawned();
-    // One tick to settle on the floor after the spawn teleport.
-    tick(&mut p, &InputState::default());
-    assert!(p.state.on_ground);
-    let w = Unloaded::new(-64);
-    let mut out = Vec::new();
-    p.tick_with(
-        &InputState::default(),
-        &w,
-        &TestShapes::default(),
-        &TestShapes::default(),
-        None,
-        &mut out,
-    );
-    assert_eq!(p.state.velocity.y, UNLOADED_CHUNK_FALL_SPEED);
-    assert!(!p.state.on_ground);
-    // Gravity stays skipped: the same step every tick, until the chunk is loaded again.
-    for _ in 0..3 {
-        p.tick_with(
-            &InputState::default(),
-            &w,
-            &TestShapes::default(),
-            &TestShapes::default(),
-            None,
-            &mut out,
-        );
-    }
-    assert!((p.state.pos.y - 4.0 * UNLOADED_CHUNK_FALL_SPEED).abs() < 1.0e-12);
-
-    // At or below the world's minimum the vertical movement is 0.0: the player stays put.
-    let (mut p, mut out) = spawned();
-    assert!(p.handle(&teleport(2, DVec3::new(0.5, -65.0, 0.5), 0.0, 0), &mut out));
-    p.tick_with(
-        &InputState::default(),
-        &w,
-        &TestShapes::default(),
-        &TestShapes::default(),
-        None,
-        &mut out,
-    );
-    assert_eq!(p.state.velocity.y, 0.0);
-    assert_eq!(p.state.pos.y, -65.0);
-}
+/// The unloaded-chunk sink and the level-load gate after a respawn have their own file:
+/// `tests/level_load.rs` (they share its stream-in world).
+mod level_load;
 
 #[test]
 fn abilities_packet_sets_flying_and_speed() {

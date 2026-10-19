@@ -1,0 +1,12 @@
+# Teleport into an unloaded chunk on the vanilla reference client, for comparing the
+# player's Y trace with Haste's walk script
+# (crates/haste-client/walks/teleport-unloaded-chunk.txt, the same tp):
+#   scripts/vanilla-client.sh 127.0.0.1:25691 teleport-unloaded-chunk
+# Vanilla `LivingEntity.travelInAir` pins the vertical movement to -0.1 while the chunk
+# below is not loaded, so the reference player should sink ~2 blocks/s, never fall
+# through, and stand once the chunk arrives (a survival fall to the ground follows).
+wait 20
+cmd gamemode survival
+cmd tp @s 30000 200 30000
+wait 200
+quit
