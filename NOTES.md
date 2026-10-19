@@ -335,3 +335,7 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   collapse in 8 gated rd 32 runs. The default stays off until a sustained-load pair confirms it.
   Next idea there: the section slab is looked up through a hash about 45k times per frame at rd 32;
   a grid index would help every lookup site.
+- **2026-10-19 Spectators do not load chunks.** On a 26.3 server a player in spectator mode does not
+  keep the chunks around it loaded, so `fill` and `setblock` near a spectator bot fail with "not
+  loaded". Switch the bot to creative (or `forceload` the area) before building or cleaning up a
+  test scene.
