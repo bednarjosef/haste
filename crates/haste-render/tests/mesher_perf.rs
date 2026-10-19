@@ -387,7 +387,16 @@ fn mesher_output_stable() {
     // quads' lights, the per-direction sink buckets (mesher/sink.rs) changed
     // the index layout, and the occlusion dump's regenerated fields changed
     // the water faces' culling.
-    let expected: u64 = 2_085_296_596_240_799_389;
+    // Then the merged-quad T-junction fix (merge.rs, 2026-10-19): every merged
+    // rectangle became a triangle fan over its boundary ring, with a split
+    // vertex only where the quads sharing an edge's line have a corner
+    // (merge/junction.rs), and at every unit on section-boundary edges. Most
+    // rectangles keep 4 vertices; those with T-junction neighbours gain one
+    // vertex per distinct neighbour corner: 676827 -> 861172 quads, 2707308
+    // -> 3076320 vertices on this AO-heavy world (graded side faces mark
+    // every unit, so merged side rectangles split often; flatter worlds split
+    // less).
+    let expected: u64 = 9_211_466_937_264_128_214;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

@@ -21,6 +21,7 @@ mod tests;
 
 pub use dispatch::{Mesher, SnapshotSource};
 pub use face_occlusion::FaceOccluders;
+pub use merge::set_greedy_merge_enabled;
 pub use skip::SkipTable;
 pub use snapshot::MeshSnapshot;
 pub use tables::{AoTable, MeshTables};
@@ -31,7 +32,9 @@ use haste_core::{BlockPos, BlockStateId, SectionPos};
 use crate::vertex::{pack_ao_shade, pack_light, PackedVertex};
 use fluid_view::FluidView;
 use lighting::{shade_index, vertex_light_for};
-use merge::{flush_staged, merge_face, MergeFace, MergeKey, MergeQuad, StagedQuad};
+use merge::{
+    flush_staged, merge_face, JunctionScratch, MergeFace, MergeKey, MergeQuad, StagedQuad,
+};
 use sink::{layer_index, MeshSink};
 use snapshot::{Cell, EXT};
 
@@ -224,6 +227,9 @@ struct MeshScratch {
     /// The section's quads between emission and the sink: the greedy merge
     /// needs them all before any is written (see `StagedQuad`).
     staged: Vec<StagedQuad>,
+    /// The greedy merge's junction marks and the ring of the rectangle
+    /// being emitted (see `merge/junction.rs`).
+    junction: JunctionScratch,
     state_key: Option<SourceKey>,
 }
 
@@ -247,6 +253,7 @@ impl MeshScratch {
             states: Vec::new(),
             fluid_scratch: Vec::with_capacity(11),
             staged: Vec::new(),
+            junction: JunctionScratch::new(),
             state_key: None,
         }
     }
@@ -354,6 +361,7 @@ pub fn mesh_section_with(
             states,
             fluid_scratch,
             staged,
+            junction,
             state_key: _,
         } = &mut *scratch;
         let mut ctx = MeshContext {
@@ -446,7 +454,8 @@ pub fn mesh_section_with(
                         // merged quad, so the pixels stay identical. Translucent
                         // keeps per-quad order (blending between coplanar
                         // faces depends on it).
-                        let mergeable = quad.merge.is_some()
+                        let mergeable = merge::greedy_merge_enabled()
+                            && quad.merge.is_some()
                             && info.layer != RenderLayer::Translucent
                             && lights[0] == lights[1]
                             && lights[1] == lights[2]
@@ -478,7 +487,7 @@ pub fn mesh_section_with(
                 }
             }
         }
-        flush_staged(staged, sink);
+        flush_staged(staged, sink, junction);
 
         // The section's final output: the sink concatenates its buckets into
         // per-layer index vectors (see `MeshSink::take_layers`).
