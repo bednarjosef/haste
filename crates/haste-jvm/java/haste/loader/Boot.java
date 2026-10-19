@@ -81,6 +81,13 @@ public final class Boot {
     public static String genSummary() { return genSummary; }
 
     /**
+     * One full GC, for the settle diet ({@code JvmHost.request_gc}): with the tight
+     * {@code -XX:MaxHeapFreeRatio} the JVM starts with, this uncommits the heap the join
+     * spike grew. Called once per session, after the world has gone quiet.
+     */
+    public static void collectGarbage() { System.gc(); }
+
+    /**
      * JVM memory diagnostics for the bench's memory line, as {@code key=value} lines:
      * heap committed/used/max, metaspace, code cache and the class data sharing archive (bytes).
      */

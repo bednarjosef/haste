@@ -33,6 +33,7 @@ mod particles;
 pub(crate) mod pickup;
 mod player_model;
 mod run;
+mod settle_diet;
 mod shared;
 mod sound;
 mod tracked_world;

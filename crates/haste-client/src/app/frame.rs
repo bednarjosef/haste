@@ -195,6 +195,18 @@ impl App {
                 camera = still;
             }
         }
+        // The settle diet's quiet clock (see `game/settle_diet.rs`): the frame loop is
+        // the only one that knows whether meshing is still happening, so it postpones
+        // the diet while chunks arrive or meshes are pending.
+        if !self.feed.queue.is_empty()
+            || self.frame_stats.meshes_pending > 0
+            || self
+                .feed
+                .last_arrival
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
+        {
+            session.shared.note_settle_activity();
+        }
         let feed_start = Instant::now();
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
