@@ -190,6 +190,9 @@ pub struct Options {
     /// Vanilla's "Clouds" video setting (`Options.cloudStatus`, options.txt
     /// `renderClouds`; default FANCY).
     pub clouds: CloudStatus,
+    /// Vanilla's "Clouds Distance" video setting (`Options.cloudRange`, options.txt
+    /// `cloudRange`; 2..=128 chunks, default 128). The radius of the cloud mesh.
+    pub cloud_range: u32,
     pub sound: SoundVolumes,
     pub keys: Keybinds,
 }
@@ -214,6 +217,7 @@ impl Default for Options {
             menu_background_blurriness: 5,
             max_fps: 120,
             clouds: CloudStatus::default(),
+            cloud_range: 128,
             sound: SoundVolumes::default(),
             keys: Keybinds::default(),
         }
@@ -236,6 +240,7 @@ impl Options {
         self.entity_distance_scaling = self.entity_distance_scaling.clamp(0.5, 5.0);
         self.menu_background_blurriness = self.menu_background_blurriness.min(10);
         self.max_fps = self.max_fps.clamp(10, 260);
+        self.cloud_range = self.cloud_range.clamp(2, 128);
         self.sound.clamped();
         for (action, key) in &Keybinds::vanilla().bindings {
             self.keys
@@ -362,6 +367,13 @@ impl Options {
             "renderClouds" => {
                 if let Some(v) = CloudStatus::parse(value) {
                     self.clouds = v;
+                }
+                true
+            }
+            // The cloud mesh radius in chunks (vanilla's IntRange(2, 128)).
+            "cloudRange" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.cloud_range = v;
                 }
                 true
             }
