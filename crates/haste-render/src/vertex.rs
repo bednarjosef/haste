@@ -121,11 +121,11 @@ fn unorm_to_u16(x: f32) -> u16 {
     (x.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
 }
 
-fn quantize_coord(local: f32) -> u16 {
+pub(crate) fn quantize_coord(local: f32) -> u16 {
     unorm_to_u16((local + POS_BIAS) / POS_RANGE)
 }
 
-fn pack_sprite_uv(x: f32) -> u16 {
+pub(crate) fn pack_sprite_uv(x: f32) -> u16 {
     (x.clamp(0.0, TERRAIN_UV_MAX_REPEAT) * TERRAIN_UV_FIXED_SCALE + 0.5) as u16
 }
 

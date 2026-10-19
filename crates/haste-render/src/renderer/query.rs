@@ -15,6 +15,9 @@ impl Renderer {
     }
 
     /// Item names by `minecraft:item` protocol id, so `GuiCommand::Item` can find models.
+    /// The same call resolves the `minecraft:map_decoration_type` names the map renderer
+    /// draws decorations with (the registry is not synced with data, so the static
+    /// registry is the only source).
     pub fn set_item_registry(&mut self, registries: &haste_data::Registries) {
         let n = registries.len("minecraft:item");
         let names = (0..n as u32)
@@ -27,6 +30,28 @@ impl Renderer {
             .collect::<Vec<_>>();
         self.entity.set_item_names(names.clone());
         self.gui.set_item_names(names);
+        let n = registries.len("minecraft:map_decoration_type");
+        let names = (0..n as u32)
+            .filter_map(|i| {
+                registries
+                    .name(
+                        "minecraft:map_decoration_type",
+                        haste_core::RegistryIndex(i),
+                    )
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        self.entity.set_map_decoration_names(names);
+    }
+
+    /// The maps to draw (`MapTextureManager`'s data side): the client publishes the whole
+    /// map set through an `Arc` swap whenever one changed, so this is cheap to call every
+    /// frame and does nothing when the set did not move.
+    pub fn set_maps(
+        &mut self,
+        maps: std::sync::Arc<std::collections::HashMap<i32, crate::entity::MapData>>,
+    ) {
+        self.entity.set_maps(maps);
     }
 
     /// Whether GUI blending happens on sRGB values like vanilla (false on backends without

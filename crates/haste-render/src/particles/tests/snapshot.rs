@@ -35,7 +35,7 @@ impl BlockView for FlatLight {
 fn snapshot_poses_light_and_sprites() {
     let mut particles = Particles::new(types_for_tests(&[("flame", &[[0, 0, 8, 8]])]));
     spawn_fixed(&mut particles, "flame", 3);
-    particles.tick();
+    particles.tick(DVec3::new(10.0, 64.0, -5.0));
     let mut views = Vec::new();
     particles.build_snapshot(&FlatLight(11, 3), &mut views);
     assert_eq!(views.len(), 3);
@@ -91,7 +91,7 @@ fn snapshot_picks_the_age_sprite() {
             let index = crate::particles::snapshot::age_sprite(v.age, v.lifetime, sprites.len());
             assert_eq!(v.rect, sprites[index]);
         }
-        particles.tick();
+        particles.tick(DVec3::new(10.0, 64.0, -5.0));
     }
     // The last surviving sprite is the list's last.
     assert_eq!(last_rect, Some(sprites[2]));
@@ -111,7 +111,7 @@ fn snapshot_double_buffer_publishes_and_reuses() {
         assert!(taken.views.is_empty());
     }
     spawn_fixed(&mut particles, "smoke", 2);
-    particles.tick();
+    particles.tick(DVec3::new(10.0, 64.0, -5.0));
     particles.publish_snapshot(&FlatLight(15, 0), &snapshots);
     let taken = snapshots.take().expect("published");
     assert_eq!(taken.alive, 2);

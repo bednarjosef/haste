@@ -1,6 +1,7 @@
 //! The item frame renderer (`ItemFrameRenderer`): the frame block model quads and the
 //! framed item at `rotation * 45` degrees, half scale.
 
+use super::map::framed_map_transform;
 use super::*;
 
 impl EntityRenderer {
@@ -20,10 +21,11 @@ impl EntityRenderer {
         let base =
             Mat4::from_translation((e.pos - camera).as_vec3()) * item_frame_transform(f.facing);
 
-        let map = f
-            .item
-            .and_then(|i| self.item_names.get(i.0 as usize))
-            .is_some_and(|n| n.path() == "filled_map");
+        // `ItemFrameRenderer.submit`'s map branch: a stack with a map id whose data has
+        // arrived (`state.mapId != null` only then) draws the map renderer's view of it —
+        // the decorations that also draw on a frame — instead of the item model; the frame
+        // block model switches to its `map=true` variant for the same condition.
+        let map = f.map_id.is_some_and(|id| self.maps.contains_key(&id));
         // `ItemFrameRenderer.extractRenderState`: an invisible frame clears its block model,
         // so only the item inside draws, pushed flush to the wall (z 0.5 instead of 0.4375,
         // `ItemFrameRenderer.submit`).
@@ -54,7 +56,15 @@ impl EntityRenderer {
                 );
             }
         }
-        if let Some(idx) = f.item {
+        if let Some(id) = f.map_id.filter(|_| map) {
+            // The map pose (`ItemFrameRenderer.submit`): the item transform up to the framed
+            // item's plane, then vanilla's map rotations into the map's pixel space. The map
+            // is drawn a bit less than full-bright in glow frames
+            // (`getLightCoords(isGlowFrame, 15728850)`: block 13, sky 15).
+            let light = if f.glow { (13, 15) } else { (block, sky) };
+            let root = base * framed_map_transform(f.rotation, e.invisible);
+            self.emit_map(&mut out, id, root, true, light, assets);
+        } else if let Some(idx) = f.item {
             if let Some(item) = self.item_model_for(idx, assets) {
                 // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`,
                 // block 15 / sky 15); otherwise the frame's own (block, sky) light.

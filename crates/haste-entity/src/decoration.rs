@@ -174,6 +174,9 @@ pub fn build(
                 rotation: item_frame_rotation(metadata),
                 glow,
                 item: item_frame_item(metadata),
+                // Filled in by the client from the framed stack's component patch (the
+                // component tables live there, not in this crate).
+                map_id: None,
             }))
         }
         crate::registry::DecorationKind::Painting => {
