@@ -17,6 +17,7 @@ mod error;
 mod gui;
 mod host;
 pub mod keys;
+mod launch_options;
 mod loader;
 mod natives;
 mod proxies;

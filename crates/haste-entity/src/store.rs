@@ -15,10 +15,10 @@ use uuid::Uuid;
 
 use crate::dims::EntityDimensions;
 use crate::lerp::{LerpState, LerpTarget};
+
 use crate::metadata::Metadata;
 use crate::riding::Riding;
-use crate::swing::SwingState;
-use crate::walk_animation::WalkAnimationState;
+use crate::walk_swing::{SwingState, WalkAnimationState};
 
 /// Hurt flash duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TICKS: u32 = 10;
@@ -136,6 +136,12 @@ pub struct Entity {
     /// True for a `minecraft:item` entity: its client-side motion is simulated
     /// (`ItemEntity.getMoveSimulationType()` is `SERVER_AND_CLIENT`).
     pub is_item: bool,
+    /// True for an `AbstractBoat` family entity (vanilla's or a mod's): its client-side
+    /// paddle and bubble-column state is ticked (`crate::boat`).
+    pub is_boat: bool,
+    /// `AbstractBoat`'s client-side state (paddle sweeps, bubble-column rocking, the
+    /// under-water flag the water patch reads); only meaningful for boats.
+    pub boat: crate::boat::BoatState,
     /// Ticks since spawn: drives the dropped items' spin and bob.
     pub age: u32,
     /// A player's trailing cape point (`ClientAvatarState`'s cloak), ticked for players only.
@@ -175,6 +181,9 @@ impl Entity {
         };
         // `ItemEntity`: simulated client-side; `set_metadata` confirms it at index 8.
         let is_item = type_name == Some("minecraft:item");
+        // The `AbstractBoat` family (vanilla's or a mod's): the client ticks its paddle and
+        // bubble-column state (`crate::boat`).
+        let is_boat = type_name.is_some_and(crate::boat::is_boat_family);
         Entity {
             id: s.id,
             uuid: s.uuid,
@@ -221,6 +230,8 @@ impl Entity {
             attack_ticks: 0,
             item: None,
             is_item,
+            is_boat,
+            boat: crate::boat::BoatState::default(),
             age: 0,
             cloak: crate::avatar::Cloak::default(),
             is_living: living,
@@ -273,32 +284,6 @@ impl Entity {
     /// Head yaw between the last two ticks (`Mth.rotLerp(partial, yHeadRotO, yHeadRot)`).
     pub fn head_yaw_at(&self, partial: f32) -> f32 {
         self.prev_head_yaw + partial * wrap_degrees(self.head_yaw - self.prev_head_yaw)
-    }
-}
-
-/// `LivingEntity.tick`'s body-rotation step: follow the horizontal movement direction, then
-/// `tickHeadTurn` (0.3 lerp, 50 degree head/body split).
-pub(crate) fn update_body_yaw(e: &mut Entity, d: DVec3) {
-    let mut target = e.body_yaw;
-    let side_dist = (d.x * d.x + d.z * d.z) as f32;
-    if side_dist > 0.002_500_000_2 {
-        let walk_direction = (d.z.atan2(d.x) as f32).to_degrees() - 90.0;
-        let diff = (wrap_degrees(e.yaw) - walk_direction).abs();
-        target = if 95.0 < diff && diff < 265.0 {
-            walk_direction - 180.0
-        } else {
-            walk_direction
-        };
-    }
-    if e.swing.progress() > 0.0 {
-        target = e.yaw;
-    }
-    let body_delta = wrap_degrees(target - e.body_yaw);
-    e.body_yaw += body_delta * 0.3;
-    let head_diff = wrap_degrees(e.yaw - e.body_yaw);
-    let max_head = 50.0;
-    if head_diff.abs() > max_head {
-        e.body_yaw += head_diff - head_diff.signum() * max_head;
     }
 }
 
@@ -584,6 +569,16 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 70 (`MinecartTNT.handleEntityEvent` -> `primeFuse`): the TNT cart's fuse
+    /// starts at 80 ticks and counts down client-side (`MinecartTNT.tick`).
+    pub fn prime_tnt_minecart(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                crate::minecart::prime(&mut e.metadata);
+            }
+        }
+    }
+
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
         let Some(e) = &mut self.slots[i as usize] else {
@@ -610,16 +605,24 @@ impl EntityStore {
         }
         // A dropped item entity's stack: `ItemEntity.DATA_ITEM`, the first slot after
         // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
-        // clears the drop.
+        // clears the drop. Thrown projectiles carry their item in the same slot
+        // (`ThrowableItemProjectile.DATA_ITEM_STACK`): it feeds their sprite decoration
+        // (`crate::thrown_item`), never the dropped-item path.
+        let thrown = crate::registry::entity_type_name(e.kind)
+            .is_some_and(|n| crate::thrown_item::variant_for_name(n).is_some());
         if let Some(entry) = e.metadata.get(8) {
-            if matches!(entry.value, MetadataValue::ItemStack(_)) {
+            if matches!(entry.value, MetadataValue::ItemStack(_)) && !thrown {
                 // Only `ItemEntity` defines an item stack at this slot, so it also confirms the
                 // type when the registry name was unavailable at spawn (no cache).
                 e.is_item = true;
             }
-            e.item = match &entry.value {
-                MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
-                _ => None,
+            e.item = if thrown {
+                None
+            } else {
+                match &entry.value {
+                    MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                }
             };
         }
         if let Some(pose) = e.metadata.pose {
@@ -729,6 +732,12 @@ impl EntityStore {
             if crate::arrow::is_arrow(slot.kind) {
                 crate::arrow::tick(slot, arrows, arrow_particles);
             }
+            // `AbstractBoat.tick`'s client-side state: the paddle sweeps and the
+            // bubble-column rocking, from the synced flags and bubble time.
+            if slot.is_boat {
+                let eye_height = self.dims.eye_height(slot.kind, false);
+                crate::boat::tick(slot, world, eye_height);
+            }
             // `LivingEntity.tick`'s use step (`updatingUsingItem`), after `super.tick()`
             // like vanilla: the tick is recorded for the client's effects.
             crate::using_item::step(slot, &self.dims, &mut self.use_ticks);
@@ -745,7 +754,7 @@ impl EntityStore {
             } else {
                 slot.walk.stop();
             }
-            update_body_yaw(slot, d);
+            crate::walk_swing::update_body_yaw(slot, d);
             // `LivingEntity.updateSwimAmount` (smoothed 0.09 per tick).
             slot.swim_amount_o = slot.swim_amount;
             if slot.pose == Pose::Swimming {
@@ -774,6 +783,9 @@ impl EntityStore {
             slot.swell = (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
             // `IronGolem.tick`: the attack animation tick counts down.
             slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
+            // `AbstractMinecart.tick`'s countdowns (hurt time, damage, the TNT cart's fuse);
+            // read only by minecarts, harmless elsewhere.
+            crate::minecart::tick(&mut slot.metadata);
             // `LivingEntity.tick`: fallFlyTicks counts while the fall-flying flag is set.
             if slot.metadata.shared.elytra_flying {
                 slot.fall_flying_ticks = slot.fall_flying_ticks.saturating_add(1);
@@ -797,6 +809,17 @@ impl EntityStore {
         self.slot(id).and_then(|i| self.slots[i as usize].as_ref())
     }
 
+    /// The current positions of the entities that trail smoke
+    /// (`AbstractHurtingProjectile.createParticleTrail`), for the client's per-tick particle
+    /// spawn — no allocation, one position per trailing entity.
+    pub fn smoke_trail_positions(&self) -> impl Iterator<Item = DVec3> + '_ {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| crate::thrown_item::has_smoke_trail(slot.kind))
+            .map(|slot| slot.pos)
+    }
+
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
@@ -813,20 +836,16 @@ impl EntityStore {
     /// overrides.
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {
-            // Hanging entities (item frames, paintings) are drawn specially, and the client
-            // moved them to the bounding-box centre vanilla's `recalculateBoundingBox` computes
-            // (the spawn packet carries the block position, not the render origin).
-            let decoration = crate::arrow::decoration(slot, partial_tick).or_else(|| {
-                crate::decoration::build(
-                    slot.kind,
-                    slot.data,
-                    &slot.metadata,
-                    &self.painting_variants,
-                    slot.id.0,
-                    slot.tick_count as f32 + partial_tick,
-                )
-            });
-            let pos = if decoration.is_some() {
+            // The decoration an entity draws through, if any (one renderer per vanilla
+            // concept; `decoration::resolve` names them).
+            let (decoration, non_hanging, is_minecart) = crate::decoration::resolve(
+                slot,
+                partial_tick,
+                &self.painting_variants,
+            );
+            let pos = if non_hanging {
+                slot.prev_pos.lerp(slot.pos, partial_tick as f64)
+            } else if decoration.is_some() {
                 crate::decoration::render_center(
                     slot.kind,
                     slot.data,
@@ -837,81 +856,30 @@ impl EntityStore {
             } else {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             };
-            let (model, has_head, overlays) = if slot.is_player_type {
-                (crate::models::humanoid(false), true, Default::default())
-            } else {
-                // Registry table first (shared per type, head flag precomputed), then the box.
-                // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
-                // Variant mobs (cat/wolf/frog/pig/cow/chicken) instead resolve their look from
-                // the synced variant registry through the entity's metadata, falling back to
-                // the table's default row when the variant is unknown or absent.
-                let baby = crate::registry::is_baby(&slot.metadata);
-                let variant =
-                    crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby)
-                        .or_else(|| {
-                            // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/
-                            // parrot/fox/bee/strider/mooshroom): the same layer, the variant's
-                            // texture.
-                            crate::variants::metadata_model_for(
-                                slot.kind,
-                                &slot.metadata,
-                                baby,
-                                slot.metadata.custom_name_plain(),
-                                self.world_age,
-                            )
-                        });
-                // The tropical fish's shape follows its packed pattern; the shulker's base
-                // texture follows its colour byte. Both are plain model swaps, and both
-                // must be gated on the entity's own type: their metadata slots (17, 18)
-                // collide with other mobs' fields (e.g. a sheep's wool byte sits where a
-                // shulker's colour byte would).
-                let type_name = crate::registry::entity_type_name(slot.kind);
-                let variant = variant.or_else(|| {
-                    if type_name == Some("minecraft:tropical_fish") {
-                        crate::variants::tropical_fish_model(&slot.metadata)
-                    } else {
-                        None
-                    }
-                });
-                let variant = match type_name {
-                    Some("minecraft:shulker") => {
-                        match crate::variants::shulker_texture(&slot.metadata) {
-                            // The colour texture swap is cached per texture (the model is cloned
-                            // once per colour, never per frame).
-                            Some(texture) => crate::variants::shulker_model_for(&texture),
-                            None => variant,
-                        }
-                    }
-                    _ => variant,
-                };
-                let entry = crate::registry::model_entry(slot.kind);
-                let overlays = crate::variants::overlays_for(slot.kind, &slot.metadata, baby);
-                match (variant, entry) {
-                    // A variant model (already the baby's when `baby`); all six variant mobs
-                    // have a head part, so the head aim stays on.
-                    (Some(v), _) => (v, true, overlays),
-                    (None, Some((head, m))) => {
-                        let baby_model = type_name
-                            .filter(|_| baby)
-                            .and_then(crate::registry::baby_model_for_name);
-                        (baby_model.unwrap_or(m), head, overlays)
-                    }
-                    (None, None) => (
-                        crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
-                        false,
-                        overlays,
-                    ),
-                }
-            };
-            let is_passenger = self.riding.vehicle_of(slot.id).is_some();
-            let pose =
-                crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger);
-            let texture = model.texture.path();
-            let body = crate::animation::body_transform(
+            let (model, has_head, overlays) = crate::models::model_for_entity(
                 slot,
-                partial_tick,
-                texture.contains("iron_golem"),
+                is_minecart,
+                &self.mob_variants,
+                self.world_age,
             );
+            let is_passenger = self.riding.vehicle_of(slot.id).is_some();
+            // `AbstractBoatModel.setupAnim` for boats (the paddles); the generic `setupAnim`
+            // for everything else. A player-typed entity is never posed as a boat (its kind
+            // may be anything the server paired it with).
+            let is_boat = slot.is_boat && !slot.is_player_type;
+            let pose = if is_boat {
+                crate::boat::setup_anim(slot, &model, partial_tick)
+            } else {
+                crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger)
+            };
+            let texture = model.texture.path();
+            // `AbstractBoatRenderer.submit`'s rotations for boats; the generic
+            // `setupRotations` for everything else.
+            let body = if is_boat {
+                crate::boat::body_transform(slot, partial_tick)
+            } else {
+                crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"))
+            };
             // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
             let body_scale = if texture.contains("creeper") {
                 crate::animation::creeper_scale(slot, partial_tick)

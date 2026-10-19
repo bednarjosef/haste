@@ -54,6 +54,8 @@ pub struct Session {
     pub music_volume: f32,
     /// Counters.
     pub counters: NetCounters,
+    /// Game ticks since the join (the packet handlers' log lines carry it).
+    pub tick: u64,
     /// Profiles added by `player_info_update` since the game thread last took them, with their
     /// `textures` property, for the skin manager (`game::skins`).
     pub profiles: Vec<crate::game::skins::ProfileRequest>,
@@ -164,12 +166,17 @@ pub struct Session {
     /// Item particles queued since the last tick (a consumable in use: the eat/drink
     /// crumbs), drained by the game thread into the shared pool.
     pub item_particle_requests: Vec<crate::item_particles::ItemParticleRequest>,
+    /// The `explode` packets' block particles (vanilla `ClientExplosionTracker`), ticked
+    /// in `end_tick` into the particle queue.
+    explosions: explosion_tracker::ExplosionTracker,
+    /// The explosion sound's pitch and seed random (vanilla draws them from the level's
+    /// `RandomSource`).
+    explosion_rng: haste_audio::random::LegacyRandom,
     /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
     /// the pool by the game thread.
     pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
-    /// The arrows' own particle requests since the last tick (the tipped colour and the crit
-    /// trail, `AbstractArrow.tick` / `Arrow.makeParticle`), drained by the game thread into
-    /// the shared pool.
+    /// The arrows' particle requests since the last tick (`Arrow.makeParticle`), drained
+    /// into the shared pool.
     pub arrow_particles: Vec<haste_entity::arrow::ArrowParticle>,
     /// Particle spawns the game thread took over the whole session (counters).
     pub particle_spawned: usize,
@@ -238,6 +245,7 @@ impl Session {
                 got_login: true,
                 ..Default::default()
             },
+            tick: 0,
             entity_id,
             dimension,
             biome_audio: Vec::new(),
@@ -286,6 +294,13 @@ impl Session {
             particle_spawns: Vec::new(),
             block_particle_requests: Vec::new(),
             item_particle_requests: Vec::new(),
+            explosions: explosion_tracker::ExplosionTracker::default(),
+            explosion_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
             ambient_spawns: Vec::new(),
             arrow_particles: Vec::new(),
             particle_spawned: 0,
@@ -485,11 +500,14 @@ impl Session {
             damage::hurt_to(self, old, h.health);
         }
         if player_packet {
-            // The drain holds the player's borrow, so the edits apply from a collected copy.
-            let edits: Vec<_> = self.player.take_world_edits().collect();
-            for (pos, state) in edits {
+            // The edits are taken out first: the loop below borrows the session.
+            for (pos, state) in self.player.take_world_edits() {
                 self.set_block_with_block_entities(world, pos, state);
             }
+            // The predictions the ack in this batch released (`ClientLevel
+            // .syncBlockState`: the server's state restored, the player snapped back
+            // only when it collides with it).
+            self.sync_block_state(world);
             // The boat we steer is this side's authoritative instance of it (vanilla
             // `Entity.isLocalInstanceAuthoritative`): the entity the world draws sits where our
             // simulation put it, not where the server's move packets for it still have it.
@@ -510,6 +528,9 @@ impl Session {
             return;
         };
         let Some(p) = self.apply_particles(p, world, regs) else {
+            return;
+        };
+        let Some(p) = self.apply_explosion(p) else {
             return;
         };
         let Some(p) = self.apply_effects(p, own) else {
@@ -542,6 +563,8 @@ pub(crate) mod damage;
 mod driver;
 mod effects;
 mod entities;
+mod explosion;
+mod explosion_tracker;
 mod fov;
 mod item_world;
 mod lightmap;
@@ -554,6 +577,7 @@ mod registries;
 mod remote_use;
 mod session_tick;
 mod sinks;
+mod sync_block_state;
 mod vehicle;
 mod weather;
 mod world;

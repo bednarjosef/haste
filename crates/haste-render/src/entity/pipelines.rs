@@ -359,6 +359,56 @@ impl EntityRenderer {
             multiview_mask: None,
             cache: None,
         });
+        // The boats' water mask (vanilla `RenderPipelines.WATER_MASK`): position-only
+        // vertices, a colour target whose writes are all masked off, and the depth write
+        // kept, so the patch hides the water inside a hull without painting anything.
+        let mask_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("water-mask"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../water_mask.wgsl").into()),
+        });
+        let mask_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("water-mask-layout"),
+            bind_group_layouts: &[Some(camera_layout)],
+            immediate_size: 0,
+        });
+        let water_mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water-mask"),
+            layout: Some(&mask_layout),
+            vertex: wgpu::VertexState {
+                module: &mask_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(crate::entity::boat::MaskVertex::LAYOUT)],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &mask_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::empty(),
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let mask_capacity = 256;
+        let mask_buffer = crate::entity::boat::make_mask_buffer(&device, mask_capacity);
         EntityRenderer {
             device,
             queue,
@@ -383,6 +433,7 @@ impl EntityRenderer {
             arm_models: [None, None, None, None],
             frame_models: HashMap::new(),
             piston_quads: ahash::AHashMap::new(),
+            minecart_quads: ahash::AHashMap::new(),
             beam_vertices: Vec::new(),
             beam_buffer,
             beam_capacity: 1024,
@@ -394,6 +445,10 @@ impl EntityRenderer {
             portal_capacity: 256,
             beam_radius_scale: 1.0,
             view_scale: 1.0,
+            mask_vertices: Vec::new(),
+            mask_buffer,
+            mask_capacity,
+            water_mask_pipeline,
             beams: crate::blockentity::BeamPipelines {
                 opaque: beam_opaque,
                 glow: beam_glow,

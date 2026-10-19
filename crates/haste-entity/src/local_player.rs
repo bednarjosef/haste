@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::dims::EntityDimensions;
 use crate::store::{Entity, DEATH_TICKS};
-use crate::swing::SwingState;
+use crate::walk_swing::SwingState;
 
 impl Entity {
     /// The local player's model state, created at join with the login's entity id and profile
@@ -79,7 +79,7 @@ impl Entity {
         } else {
             self.walk.stop();
         }
-        crate::store::update_body_yaw(self, d);
+        crate::walk_swing::update_body_yaw(self, d);
         // `LivingEntity.updateSwimAmount` (smoothed 0.09 per tick).
         self.swim_amount_o = self.swim_amount;
         if self.pose == Pose::Swimming {

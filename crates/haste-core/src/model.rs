@@ -364,77 +364,13 @@ pub struct EntityOverlay {
     pub tint: [f32; 3],
 }
 
-/// A decoration the renderer draws itself rather than from a cube model.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Decoration {
-    ItemFrame(ItemFrameDecoration),
-    Painting(PaintingDecoration),
-    Lightning(LightningDecoration),
-    ExperienceOrb(ExperienceOrbDecoration),
-    Arrow(ArrowDecoration),
-}
-
-/// The state `ArrowRenderer.extractRenderState` collects for an arrow (vanilla
-/// `ArrowRenderState` plus `TippableArrowRenderState.isTipped`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ArrowDecoration {
-    /// `ArrowRenderState.xRot` (`ArrowRenderer.extractRenderState`:
-    /// `entity.getXRot(partialTicks)`).
-    pub x_rot: f32,
-    /// `ArrowRenderState.yRot` (`entity.getYRot(partialTicks)`).
-    pub y_rot: f32,
-    /// `ArrowRenderState.shake`: `entity.shakeTime - partialTicks`, the stuck-in-ground
-    /// shake (`AbstractArrow.shakeTime`, set to 7 by `onSyncedDataUpdated`).
-    pub shake: f32,
-    /// `TippableArrowRenderState.isTipped` (`Arrow.getColor() > 0`): the tipped texture.
-    pub tipped: bool,
-    /// The entity is a `minecraft:spectral_arrow` (`SpectralArrowRenderer`'s own texture,
-    /// never the tipped one).
-    pub spectral: bool,
-}
-
-/// The state `ExperienceOrbRenderer.submit` collects for an experience orb.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExperienceOrbDecoration {
-    /// The orb's `Value` metadata, which picks the icon tier (`ExperienceOrb.getIcon`).
-    pub value: i32,
-    /// The orb's age in ticks (plus the partial tick), driving the colour cycle.
-    pub age: f32,
-}
-
-/// The state `ItemFrameRenderer.extractRenderState` collects for an item frame.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ItemFrameDecoration {
-    /// The direction the frame faces (`ItemFrame.getDirection`, from the spawn packet's data).
-    pub facing: crate::Direction,
-    /// `ItemFrame.getRotation` 0..7; the item turns `rotation * 45` degrees.
-    pub rotation: u8,
-    /// Glow item frames light the frame at least block-light 5 and the item full-bright.
-    pub glow: bool,
-    /// The framed item (`DATA_ITEM`), by item registry index.
-    pub item: Option<crate::RegistryIndex>,
-}
-
-/// The state `PaintingRenderer.extractRenderState` collects for a painting.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PaintingDecoration {
-    /// The direction the painting faces (`Painting.getDirection`).
-    pub facing: crate::Direction,
-    /// The variant's size in blocks (`PaintingVariant.width`/`height`).
-    pub width: u8,
-    pub height: u8,
-    /// The front sprite's texture id, `None` for a variant we do not know (draw the back only).
-    pub front: Option<Identifier>,
-}
-
-/// The state `LightningBoltRenderer.extractRenderState` collects for a lightning bolt: the
-/// seed its geometry is generated from. Vanilla's seed is the entity's own random (not
-/// synced, re-rolled per flash), so a seed derived from the entity id stands in — the bolt's
-/// shape is procedural either way.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LightningDecoration {
-    pub seed: u64,
-}
+/// The decorations: one module per concept (all the state the non-model renderers
+/// extract), re-exported so `haste_core::model::Decoration` keeps working.
+mod decoration;
+pub use decoration::{
+    ArrowDecoration, BlockDisplay, Decoration, ExperienceOrbDecoration, ItemFrameDecoration,
+    LightningDecoration, MinecartDecoration, PaintingDecoration, ThrownItemDecoration,
+};
 
 #[cfg(test)]
 mod tests {

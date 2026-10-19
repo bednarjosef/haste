@@ -142,6 +142,10 @@ pub trait EntitySink {
     fn mark_attack(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
+    fn prime_tnt_minecart(&mut self, id: EntityId) {
+        let _ = id;
+    }
     /// `EntityStore::set_metadata`.
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]);
     /// `EntityStore::set_equipment`.

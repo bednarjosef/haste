@@ -7,6 +7,8 @@
 #   <name>  copy lives in $HASTE_CACHE/servers/<name> (created from cache/server-spike on first use)
 #   <port>  server-port; each workstream brief names its own
 #   level-type defaults to minecraft:flat; pass minecraft:normal for terrain (delete world/ first)
+#   HASTE_SERVER_HEAP sets the Java heap (default 2G: a shared server with many test players
+#   and summoned entities ran out of 1500M after ~21 hours)
 # Stop: kill "$(pgrep -f "servers/<name>.*fabric-server-launch")" or let the timeout end it.
 # Logs: $HASTE_CACHE/servers/<name>/logs/latest.log ("moved wrongly", "moved too quickly",
 # kicks and disconnect reasons are the server's verdict on our client).
@@ -25,4 +27,4 @@ sed -i -e "s/^server-port=.*/server-port=$PORT/" -e "s/^query.port=.*/query.port
 cd "$DIR"
 JAR=fabric-server-launch.jar
 [ "${HASTE_SERVER:-fabric}" = vanilla ] && JAR=server.jar
-exec timeout "$SECS" "$CACHE/jdk/bin/java" -Xmx1500M -jar "$JAR" nogui
+exec timeout "$SECS" "$CACHE/jdk/bin/java" "-Xmx${HASTE_SERVER_HEAP:-2G}" -jar "$JAR" nogui

@@ -53,6 +53,7 @@ impl Assets {
         let mut gui_display: Option<crate::model::DisplayTransform> = None;
         let mut firstperson_display: Option<crate::model::DisplayTransform> = None;
         let mut thirdperson_display: Option<crate::model::DisplayTransform> = None;
+        let mut thirdperson_left_display: Option<crate::model::DisplayTransform> = None;
         let mut head_display: Option<crate::model::DisplayTransform> = None;
         let mut ground_display: Option<crate::model::DisplayTransform> = None;
         let mut fixed_display: Option<crate::model::DisplayTransform> = None;
@@ -92,6 +93,21 @@ impl Assets {
                     .display
                     .get("thirdperson_righthand")
                     .and_then(crate::model::DisplayTransform::parse);
+            }
+            // `ItemTransforms.getTransform(THIRD_PERSON_LEFT_HAND)`: the file's left entry,
+            // falling back to its own right entry when it names none (then the left-hand fix
+            // is applied on top at draw time; the entry and the fix are not the same thing).
+            if thirdperson_left_display.is_none() {
+                thirdperson_left_display = model
+                    .display
+                    .get("thirdperson_lefthand")
+                    .and_then(crate::model::DisplayTransform::parse)
+                    .or_else(|| {
+                        model
+                            .display
+                            .get("thirdperson_righthand")
+                            .and_then(crate::model::DisplayTransform::parse)
+                    });
             }
             if head_display.is_none() {
                 head_display = model
@@ -149,6 +165,7 @@ impl Assets {
             gui_display,
             firstperson_display,
             thirdperson_display,
+            thirdperson_left_display,
             head_display,
             ground_display,
             fixed_display,

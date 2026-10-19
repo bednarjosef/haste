@@ -268,3 +268,57 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   RCON `gamemode spectator HasteRef` + `tp HasteRef x y z yaw pitch` once it joined, and a Haste
   bot holding or doing the thing in front of it, gives a vanilla reference of any entity visual
   in a minute. Use it before calling a visual done.
+- **2026-10-19 Left-hand item display.** Vanilla resolves the left hand's
+  `ItemDisplayContext.THIRD_PERSON_LEFT_HAND` to the model's own `thirdperson_lefthand` entry
+  (e.g. `item/handheld`'s), not to the right-hand entry mirrored; mirroring drew an off-hand
+  sword about twice too long and too upright.
+- **2026-10-19 Returning memory after the join (perf-ram-diet).** The join floods the client with
+  short-lived chunk data; glibc keeps freed arena pages and the JVM keeps its grown heap. Fixes:
+  `malloc_trim(0)` on a background thread once the world is quiet (no chunk arrivals for 15 s, at
+  most once a minute; 5-6 ms off the game and render threads), the atlas releasing its CPU pixel
+  copy after upload, and the embedded JVM on G1 with a 5 s periodic GC, `MaxGCPauseMillis=5`,
+  10-30 % free ratios and no class unloading at concurrent mark (remarks were 8-18 ms with it;
+  pauses now at most 2.5 ms). A forced full GC returned the same memory but froze play for
+  150-290 ms. Shenandoah never uncommitted (+174 MiB RSS); ZGC's multi-mapped heap counts
+  twice in RSS (1.1 GiB). Settled RSS rd 12 635 -> 558 MiB, rd 32 766 -> ~675. The two ~150 MiB
+  anonymous mappings in smaps were the glibc heap and the JVM heap. Phase 2: mods that churn
+  classes may need class unloading at concurrent mark back.
+- **2026-10-19 Pop-in under a still camera.** Sections held back because a neighbour chunk was
+  missing were re-checked only when the camera turned, so they stayed holes until the next turn.
+  They now register their neighbour columns and are re-promoted when one loads (vanilla re-checks
+  its dirty set every frame). Pop-in while turning was not meshing throughput: a turn meshes and
+  uploads ~640 sections within a second. `--work-budget adaptive` (EWMA of CPU, GPU and frame
+  interval, 2-8 ms per frame) makes `--premesh cone` cheap at rd 32 but not yet at rd 12; both
+  stay off by default until a quiet-machine A/B says otherwise.
+- **2026-10-19 Benches at the reference spot.** The bench player stands at 144.5 100 -191.5 only
+  if its player data has creative flight (`perfmem` has it); a new user name falls. The bench
+  scripts are not executable: run them as `bash scripts/...`. The reference server on 25620 lives
+  two hours per start; a bench that starts during its restart fails with "Connection refused".
+- **2026-10-19 Entity type id 0 is acacia_boat.** Test fixtures that spawn a default-kind entity
+  now spawn a boat; use an explicit kind (`minecraft:arrow`, `minecraft:zombie`).
+- **2026-10-19 Shadows: blend space and depth.** Two separate bugs hid entity shadows. The main
+  pass target is sRGB, so the GPU blends in linear light while vanilla's UNORM target blends the
+  stored bytes: a shadow alpha of 0.32 darkened by about half of vanilla's. And the shadow quad lies
+  exactly on the block top, while terrain positions are quantized (~0.37 mm steps), so the quad
+  lost the depth test by a rounding hair in game (an offscreen test passed by luck). Vanilla
+  layers shadows toward the camera (`VIEW_OFFSET_Z_LAYERING`); Haste uses a depth bias of -16.
+  The blend-space difference affects every translucent pass (water, glass, particles, weather);
+  a renderer-wide fix is its own task.
+- **2026-10-19 Entity fire draws one frame.** The entity atlas has no animation ticker, so
+  animated sprites (`fire_0`, `fire_1`) must be added as their first frame; uploading the whole
+  `.mcmeta` strip drew the burning overlay as thin horizontal stripes.
+- **2026-10-19 26.3 NBT for test scenes.** Falling blocks: `BlockState:"minecraft:gravel"` (a plain
+  string, not the old compound). Armour stands: `Pose:{Head:[..],RightArm:[..]}` (unchanged
+  keys), `equipment:{head:{id:..},mainhand:{id:..}}`. Item frames with a map:
+  `Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":N}}`; a map id without
+  saved data draws the plain map item. A NoGravity falling block needs `Time` set far negative
+  or it drops after 600 ticks. Vanilla re-derives a resting arrow's rotation from its motion, so
+  a summoned `Rotation` is not kept.
+- **2026-10-19 Vanilla reference shots.** The reference client runs fov 70, `fovEffectScale` 0 and
+  clouds off (`scripts/vanilla-options.sh`): Haste shots for a side-by-side need the same (no
+  flying FOV in spectator, ignore clouds). F1 also hides the hand: take held-item shots with the
+  HUD on. Several workers sharing one test platform need fixed, tagged scenes and a rule never
+  to kill by type.
+- **2026-10-19 Test server memory.** The shared test server on 25691 ran out of its 1500M heap after
+  ~21 hours of many players and summoned entities and stopped answering RCON; test-server.sh now
+  defaults to 2G (`HASTE_SERVER_HEAP`).

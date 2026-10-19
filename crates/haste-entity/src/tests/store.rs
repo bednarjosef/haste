@@ -337,14 +337,60 @@ fn equipment_replaces_slot() {
     assert_eq!(s.get(EntityId(1)).unwrap().equipment.len(), 2);
 }
 
+/// A tracked player carries its held items through to the render instance (main hand ->
+/// right, off hand -> left), like vanilla's `ItemInHandLayer` inputs.
+#[test]
+fn player_hands_reach_the_render_instance() {
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    let uuid = Uuid::new_v4();
+    sp.uuid = uuid;
+    s.player_info(&[PlayerInfo {
+        uuid,
+        name: "Alex".into(),
+        display_name: None,
+        latency: 30,
+        game_mode: Some(GameMode::Creative),
+        listed: true,
+        skin_texture_url: None,
+    }]);
+    s.spawn(&sp);
+    let bread = haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(RegistryIndex(7)),
+        components_raw: Default::default(),
+    };
+    let sword = haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(RegistryIndex(8)),
+        components_raw: Default::default(),
+    };
+    s.set_equipment(EntityId(1), 0, bread);
+    s.set_equipment(EntityId(1), 1, sword);
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    let inst = out.iter().find(|i| i.id == EntityId(1)).unwrap();
+    assert_eq!(inst.hands, [Some(RegistryIndex(7)), Some(RegistryIndex(8))]);
+}
+
 /// 10k entities tick in < 1 ms. Timed tests only mean something optimized; run with
 /// `cargo test --release -p haste-entity -- --ignored`.
 #[test]
 #[ignore = "timed test, run in release: cargo test --release -p haste-entity -- --ignored"]
 fn ten_k_entities_tick_under_1ms() {
     let mut s = store();
+    // A type no renderer covers, so the entities stay on the generic box path (the registry's
+    // first id is a boat, whose renderer the boat path draws).
+    let arrow = crate::registry::entity_type_names().and_then(|names| {
+        names
+            .iter()
+            .find(|(_, n)| **n == "minecraft:arrow")
+            .map(|(k, _)| *k)
+    });
     for i in 0..10_000 {
-        s.spawn(&spawn(i, DVec3::new(f64::from(i) * 0.1, 64.0, 0.0)));
+        let mut sp = spawn(i, DVec3::new(f64::from(i) * 0.1, 64.0, 0.0));
+        sp.kind = arrow.unwrap_or(sp.kind);
+        s.spawn(&sp);
     }
     // Half of them get a delta each tick, so the lerp path is exercised too.
     for t in 0..10 {

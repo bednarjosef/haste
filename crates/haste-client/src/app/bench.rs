@@ -85,6 +85,8 @@ pub(super) struct BenchSample {
     /// Section meshes uploaded this frame and their vertex+index bytes.
     pub(super) uploads: u32,
     pub(super) upload_bytes: u64,
+    /// The upload budget this frame's feed worked to, in ms (`--work-budget`).
+    pub(super) upload_budget_ms: f32,
     /// Terrain indices drawn (six per quad): the vertex-fetch load.
     pub(super) indices_drawn: u32,
     /// Frame index since the measure phase started.

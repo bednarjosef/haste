@@ -101,7 +101,7 @@ pub(super) fn emit_object(
 
 /// One part and its children, vanilla's `ModelPart.render` then `ModelPart.Cube.compile`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn emit_object_part(
+pub(crate) fn emit_object_part(
     out: &mut Vec<EntityVertex>,
     model: &CubeModel,
     part: &ModelPart,

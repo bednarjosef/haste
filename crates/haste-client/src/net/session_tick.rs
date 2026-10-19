@@ -25,6 +25,7 @@ impl Session {
         // Sound requests nobody drained (headless) are dropped here; the game thread
         // drains them between `receive` and `end_tick`.
         self.sound_requests.clear();
+        self.tick += 1;
         // The player's own block sounds this tick (footsteps, mining, placing): played
         // through the same request channel the packets use, so the game thread's
         // `Sounds::apply` picks them up; headless only counts them. Each one is logged
@@ -107,9 +108,21 @@ impl Session {
         // `ParticleEngine.tick` runs after `tickEntities`/`level.tick`), so their target is the
         // collector's position at the end of the tick.
         self.tick_pickup_particles(entities);
-        // The drain holds the player's borrow, so the edits apply from a collected copy.
-        let edits: Vec<_> = self.player.take_world_edits().collect();
-        for (pos, state) in edits {
+        // The explosion tracker's tick (vanilla `ClientLevel.tick` ->
+        // `ClientExplosionTracker.tick`): the block particles the `explode` packets
+        // carried, spawned into air blocks weighted by block count, into this tick's
+        // particle queue (a world without physics data is all air, like an empty one).
+        {
+            let is_air = |pos: BlockPos| {
+                world.physics().is_none_or(|(_, data)| {
+                    haste_physics::BlockPhysics::is_air(data, world.block_state_at(pos))
+                })
+            };
+            self.explosions
+                .tick(&mut self.explosion_rng, is_air, &mut self.particle_spawns);
+        }
+        // The edits are taken out first: the loop below borrows the session.
+        for (pos, state) in self.player.take_world_edits() {
             self.set_block_with_block_entities(world, pos, state);
             self.lids.remove(&pos);
             self.bells.remove(&pos);

@@ -14,11 +14,14 @@ use crate::store::{Entity, EntityStore};
 use haste_core::model::{CubeModel, ModelPart};
 
 mod animation;
+mod arm_pose;
 mod arrow;
+mod boat;
 mod connectivity;
 mod hurt;
 mod item_entity;
 mod local_player;
+mod minecart;
 mod mob_animation;
 mod model_dump;
 mod models;
@@ -26,6 +29,7 @@ mod registry;
 mod riding;
 mod setup_rotations;
 mod store;
+mod thrown_item;
 mod using_item;
 fn store() -> EntityStore {
     EntityStore::new(EntityDimensions::default())

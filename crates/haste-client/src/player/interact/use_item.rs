@@ -315,19 +315,36 @@ impl LocalPlayer {
                             let placing = self.is_block_item(&stack, env.data);
                             if placing {
                                 // `BlockItem.place` -> `canPlace` -> `Level.isUnobstructed`:
-                                // an entity box in the new block's collision shape fails the
-                                // placement (FAIL), and `Minecraft.startUseItem` returns on a
-                                // Fail — no swing, no place sound, no fall-through to `useItem`
-                                // or the other hand. The `use_item_on` packet above went out
-                                // either way, inside `startPrediction` as vanilla sends it.
-                                if let Some(place_pos) = self.placement_pos(h, &stack, world, env) {
+                                // an entity box in the placement state's collision shape
+                                // fails the placement (FAIL), and `Minecraft.startUseItem`
+                                // returns on a Fail — no swing, no place sound, no
+                                // fall-through to `useItem` or the other hand. The
+                                // `use_item_on` packet above went out either way, inside
+                                // `startPrediction` as vanilla sends it.
+                                if let Some(place) = self.placement(h, &stack, world, env, look.0) {
+                                    // The prediction's local half (`ClientLevel.setBlock`
+                                    // under `startPredicting`): the block is in the client
+                                    // world this same tick, so physics and the renderer see
+                                    // it at once, and the server's state of the cell is
+                                    // retained — with where we stand — until the ack
+                                    // (`BlockStatePredictionHandler`, see `prediction.rs`).
+                                    if let Some(state) = place.state {
+                                        let old = world.block_state(place.pos);
+                                        self.int.prediction.set_predicted(
+                                            seq,
+                                            place.pos,
+                                            old,
+                                            self.state.pos,
+                                            state,
+                                        );
+                                    }
                                     self.hand.swing();
                                     self.hand.item_used();
                                     // `BlockItem.place` plays the place sound on the client
                                     // too (the server's copy excludes us), at the placement
                                     // position. The held block item's block decides; unknown
                                     // items play nothing.
-                                    self.own_place_sound(place_pos, &stack, env);
+                                    self.own_place_sound(place.pos, &stack, env);
                                 }
                                 return;
                             }
