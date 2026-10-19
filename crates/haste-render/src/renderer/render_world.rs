@@ -463,10 +463,12 @@ impl Renderer {
             // Layered draw order (RenderLayer Ord: Solid < Cutout < CutoutMipped
             // < Translucent). Section origins come from the instance-rate origin buffer, one
             // instance per draw; buffers are bound once per arena. In the quad format
-            // the instance buffer also carries each draw's record base and span kind,
-            // and the arena's storage buffers are bound as group 3 instead of vertex
-            // and index buffers.
+            // the instance buffer also carries each draw's span kind, the arena's
+            // storage buffers are bound as group 3, and the static index pattern
+            // (quads) or sequential buffer (triangle soups) replaces the arena's
+            // index buffer — the draw's base_vertex carries the record base.
             let quad = crate::quad_format::quad_format_enabled();
+            let mut bound_soup = None;
             if quad {
                 pass.set_vertex_buffer(0, self.quad_instance_buffer.slice(..));
             } else {
@@ -547,35 +549,50 @@ impl Renderer {
                     }
                     bound_arena = d.arena;
                 }
+                // The quad format's index buffer: the static pattern for quad
+                // spans, the sequential buffer for triangle soups.
+                let (quad_count, quad_base) = if quad {
+                    d.kind.indexed_draw(d.first_index, d.index_count)
+                } else {
+                    (0, 0)
+                };
+                if quad {
+                    let soup = matches!(d.kind, crate::quad_format::SpanKind::Tri);
+                    if bound_soup != Some(soup) {
+                        let buf = if soup {
+                            &self.quad_seq_index
+                        } else {
+                            &self.quad_pattern_index
+                        };
+                        pass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
+                        bound_soup = Some(soup);
+                    }
+                }
                 if self.gpu.multi_draw {
-                    // One call for the run of draws sharing this layer and arena.
+                    // One call for the run of draws sharing this layer, arena
+                    // and (quad format) index buffer.
                     let end = draws[i..]
                         .iter()
-                        .position(|e| e.layer != d.layer || e.arena != d.arena)
+                        .position(|e| {
+                            e.layer != d.layer
+                                || e.arena != d.arena
+                                || (quad
+                                    && matches!(e.kind, crate::quad_format::SpanKind::Tri)
+                                        != matches!(d.kind, crate::quad_format::SpanKind::Tri))
+                        })
                         .map_or(draws.len(), |n| i + n);
-                    let stride = if quad {
-                        std::mem::size_of::<crate::quad_format::DrawIndirect>()
-                    } else {
-                        std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>()
-                    };
-                    if quad {
-                        pass.multi_draw_indirect(
-                            &self.indirect_buffer,
-                            (i * stride) as u64,
-                            (end - i) as u32,
-                        );
-                    } else {
-                        pass.multi_draw_indexed_indirect(
-                            &self.indirect_buffer,
-                            (i * stride) as u64,
-                            (end - i) as u32,
-                        );
-                    }
+                    let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>();
+                    pass.multi_draw_indexed_indirect(
+                        &self.indirect_buffer,
+                        (i * stride) as u64,
+                        (end - i) as u32,
+                    );
                     draw_calls += 1;
                     i = end;
                 } else if quad {
-                    pass.draw(
-                        0..d.kind.vertex_count(d.index_count),
+                    pass.draw_indexed(
+                        0..quad_count,
+                        quad_base as i32,
                         instance as u32..instance as u32 + 1,
                     );
                     draw_calls += 1;

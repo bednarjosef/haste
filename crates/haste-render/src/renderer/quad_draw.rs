@@ -1,9 +1,11 @@
 // Per-frame terrain draw data (`render_world.rs`'s cull fills the draw list;
 // this prepares what the draw loop binds): the section origins written into
-// the instance-rate buffer (vertex format), the per-draw record bases and
-// span kinds (quad format), and the indirect multi-draw arguments for both.
+// the instance-rate buffer (vertex format), the per-draw span kinds (quad
+// format; the record base rides each draw's base_vertex), and the indirect
+// multi-draw arguments — one five-u32 record per draw in both formats, so
+// the draw loop issues the same `multi_draw_indexed_indirect`.
 
-use crate::quad_format::{quad_format_enabled, DrawIndirect, QuadInstance};
+use crate::quad_format::{quad_format_enabled, QuadInstance};
 
 use super::{Renderer, SectionDraw};
 
@@ -17,7 +19,6 @@ impl Renderer {
             self.quad_instances
                 .extend(draws.iter().map(|d| QuadInstance {
                     origin: d.origin,
-                    first: d.first_index,
                     kind: QuadInstance::kind_of(d.kind),
                 }));
             if self.quad_instances.len() > self.quad_instance_capacity {
@@ -51,28 +52,21 @@ impl Renderer {
         if !self.gpu.multi_draw {
             return;
         }
+        // One DrawIndexedIndirectArgs per draw: index count, instance count,
+        // first index, base vertex, first instance. In the quad format the
+        // static pattern or sequential buffer is bound, so first index is 0
+        // and base vertex is the span's record base (four records per quad
+        // before it, so the shader's vertex_index >> 2 is the record).
         self.indirect.clear();
-        if quad_format_enabled() {
-            for (i, d) in draws.iter().enumerate() {
-                let args = DrawIndirect {
-                    vertex_count: d.kind.vertex_count(d.index_count),
-                    instance_count: 1,
-                    first_vertex: 0,
-                    first_instance: i as u32,
-                };
-                self.indirect
-                    .extend_from_slice(bytemuck::cast_slice(&[args]));
-            }
-        } else {
-            for (i, d) in draws.iter().enumerate() {
-                self.indirect.extend_from_slice(&[
-                    d.index_count,
-                    1,
-                    d.first_index,
-                    d.base_vertex,
-                    i as u32,
-                ]);
-            }
+        for (i, d) in draws.iter().enumerate() {
+            let (count, first, base) = if quad_format_enabled() {
+                let (count, base) = d.kind.indexed_draw(d.first_index, d.index_count);
+                (count, 0, base)
+            } else {
+                (d.index_count, d.first_index, d.base_vertex)
+            };
+            self.indirect
+                .extend_from_slice(&[count, 1, first, base, i as u32]);
         }
         if draws.len() > self.indirect_capacity {
             self.indirect_capacity = draws.len().next_power_of_two();

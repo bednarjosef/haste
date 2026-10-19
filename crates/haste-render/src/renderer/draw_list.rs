@@ -105,12 +105,12 @@ impl Renderer {
         self.layer_buckets = buckets;
         let sections_total = self.sections.len() as u32;
         let drawn = draws.len() as u32;
-        // The vertex-fetch load: indices in the vertex format, generated
-        // vertices in the quad format.
+        // The vertex-fetch load: indices in the vertex format, the same
+        // triangles through the static pattern in the quad format.
         let indices_drawn: u32 = if crate::quad_format::quad_format_enabled() {
             draws
                 .iter()
-                .map(|d| d.kind.vertex_count(d.index_count))
+                .map(|d| d.kind.indexed_draw(d.first_index, d.index_count).0)
                 .sum()
         } else {
             draws.iter().map(|d| d.index_count).sum()

@@ -28,20 +28,20 @@ pub enum SpanKind {
     /// Four `PackedVertex` records per quad in the vertex arena (the AO-flip
     /// corner rotation is baked into the stored order); six vertices per quad.
     Quad,
-    /// A greedy-merge fan ring in the vertex arena: `count` records forming
-    /// `count - 2` triangles (apex, ring[i], ring[i+1]); three vertices per
-    /// triangle.
-    Fan,
+    /// A flat triangle soup in the vertex arena: one record per vertex, three
+    /// per triangle, so any triangulation (a merged rectangle's fan, with
+    /// the apex repeated per triangle) becomes one mergeable span.
+    Tri,
 }
 
 impl SpanKind {
-    /// The draw call's vertex count for a span of `count` units (indices for
-    /// `Indexed`, whose draws are `draw_indexed` and never ask).
-    pub fn vertex_count(self, count: u32) -> u32 {
+    /// The indexed draw for a span of `count` units at record base `first`:
+    /// (index count, base vertex) into the static pattern or sequential index
+    /// buffer. The vertex-fetch load (for stats) is the index count.
+    pub fn indexed_draw(self, first: u32, count: u32) -> (u32, u32) {
         match self {
-            SpanKind::Indexed => count,
-            SpanKind::Rect | SpanKind::Quad => count * 6,
-            SpanKind::Fan => count.saturating_sub(2) * 3,
+            SpanKind::Rect | SpanKind::Quad => (count * 6, first * 4),
+            SpanKind::Indexed | SpanKind::Tri => (count, first),
         }
     }
 }
@@ -279,23 +279,22 @@ pub fn pack_rect_quad(
 }
 
 /// One quad-format draw's instance data (instance-rate vertex buffer): the
-/// section origin plus where the span's records start and which kind they are.
+/// section origin and the span kind. The span's record base rides the draw's
+/// `base_vertex` (the static index pattern plus `base_vertex` reproduces the
+/// record index in `vertex_index`), so no per-draw `first` is needed.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct QuadInstance {
     /// Section origin in world blocks.
     pub origin: [i32; 3],
-    /// First record (quad-arena index for `Rect`, vertex-arena index
-    /// (in records, 4 per quad) for `Quad`/`Fan`).
-    pub first: u32,
-    /// `SpanKind` as u32: 0 = Rect, 1 = Quad, 2 = Fan.
+    /// `SpanKind` as u32: 0 = Rect, 1 = Quad, 2 = Tri.
     pub kind: u32,
 }
 
 impl QuadInstance {
     /// Attribute layout: one instance per terrain draw.
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: 20,
+        array_stride: 16,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &[
             wgpu::VertexAttribute {
@@ -308,11 +307,6 @@ impl QuadInstance {
                 offset: 12,
                 shader_location: 1,
             },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Uint32,
-                offset: 16,
-                shader_location: 2,
-            },
         ],
     };
 
@@ -320,18 +314,25 @@ impl QuadInstance {
         match kind {
             SpanKind::Indexed | SpanKind::Rect => 0,
             SpanKind::Quad => 1,
-            SpanKind::Fan => 2,
+            SpanKind::Tri => 2,
         }
     }
 }
 
-/// The five-u32 indirect argument record for a non-indexed multi-draw (the
-/// spec's DrawIndirect command; wgpu's util type is indexed-only here).
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct DrawIndirect {
-    pub vertex_count: u32,
-    pub instance_count: u32,
-    pub first_vertex: u32,
-    pub first_instance: u32,
-}
+/// The static quad index pattern: the two triangles (0, 1, 2) and (2, 3, 0)
+/// over a record's four corners, the order the AO-flip corner rotation in
+/// `pack_rect_quad` assumes. Drawn with `base_vertex = 4 * record_base`, the
+/// shader's `vertex_index >> 2` is the record and `vertex_index & 3` the
+/// corner — and the post-transform cache turns the six indices into four
+/// shader invocations per quad, like the vertex format's indexed drawing.
+pub const QUAD_INDEX_PATTERN: [u16; 6] = [0, 1, 2, 2, 3, 0];
+
+/// Maximum quads in one Rect/Quad span: the static pattern buffer repeats
+/// [`QUAD_INDEX_PATTERN`] this many times, and `take_layers` chunks longer
+/// spans (a section bucket never comes close; the arena's tier-0 mesh cap
+/// would allow it in theory).
+pub const QUADS_PER_SPAN: u32 = 1 << 16;
+
+/// Maximum triangles in one Tri span (the static sequential index buffer
+/// covers three indices per triangle).
+pub const TRIS_PER_SPAN: u32 = 1 << 16;

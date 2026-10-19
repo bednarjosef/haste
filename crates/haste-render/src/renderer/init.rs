@@ -255,99 +255,13 @@ impl Renderer {
         // fragment stages, but the vertex stage reads one record per quad
         // from the arena storage buffers (group 3, bound per arena) and the
         // only vertex buffer is the instance-rate draw data.
-        let quad_bind_group_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("chunk-quad-arena-layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-        let make_quad_pipeline = |label: &str, fragment: &str, blend: Option<wgpu::BlendState>| {
-            gpu.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&gpu.device.create_pipeline_layout(
-                        &wgpu::PipelineLayoutDescriptor {
-                            label: Some("chunk-quad-layout"),
-                            bind_group_layouts: &[
-                                Some(&camera_bind_group_layout),
-                                Some(&atlas_bind_group_layout),
-                                Some(&lightmap_bind_group_layout),
-                                Some(&quad_bind_group_layout),
-                            ],
-                            immediate_size: 0,
-                        },
-                    )),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_quad"),
-                        compilation_options: Default::default(),
-                        buffers: &[Some(crate::quad_format::QuadInstance::LAYOUT)],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some(fragment),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: surface_format,
-                            blend,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        cull_mode: Some(wgpu::Face::Back),
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: wgpu::TextureFormat::Depth24Plus,
-                        depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: Default::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
-        };
-        let quad_pipeline_solid = make_quad_pipeline("chunk-quad-solid", "fs_main", None);
-        let quad_pipeline_cutout = make_quad_pipeline("chunk-quad-cutout", "fs_cutout", None);
-        let quad_pipeline_translucent = make_quad_pipeline(
-            "chunk-quad-translucent",
-            "fs_translucent",
-            Some(wgpu::BlendState {
-                color: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::SrcAlpha,
-                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                    operation: wgpu::BlendOperation::Add,
-                },
-                alpha: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::One,
-                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                    operation: wgpu::BlendOperation::Add,
-                },
-            }),
+        let quad = super::quad_pipelines::make(
+            &gpu.device,
+            &shader,
+            surface_format,
+            &camera_bind_group_layout,
+            &atlas_bind_group_layout,
+            &lightmap_bind_group_layout,
         );
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
@@ -409,7 +323,7 @@ impl Renderer {
         let arenas = MeshArenas::new(
             gpu.device.clone(),
             gpu.queue.clone(),
-            Some(quad_bind_group_layout),
+            Some(quad.bind_group_layout),
         );
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
@@ -539,6 +453,8 @@ impl Renderer {
             quad_instances: Vec::new(),
             quad_instance_buffer,
             quad_instance_capacity: 4096,
+            quad_pattern_index: quad.pattern_index,
+            quad_seq_index: quad.seq_index,
             indirect: Vec::new(),
             indirect_buffer,
             indirect_capacity: 4096,
@@ -556,9 +472,9 @@ impl Renderer {
             pipeline_solid,
             pipeline_cutout,
             pipeline_translucent,
-            quad_pipeline_solid,
-            quad_pipeline_cutout,
-            quad_pipeline_translucent,
+            quad_pipeline_solid: quad.solid,
+            quad_pipeline_cutout: quad.cutout,
+            quad_pipeline_translucent: quad.translucent,
             depth: None,
             size,
             gui,

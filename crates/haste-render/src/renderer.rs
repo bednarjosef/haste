@@ -29,6 +29,7 @@ mod init;
 mod mesh_gate;
 mod premesh;
 mod quad_draw;
+mod quad_pipelines;
 mod query;
 mod readback;
 mod render_world;
@@ -344,11 +345,15 @@ pub struct Renderer {
     origins: Vec<[i32; 3]>,
     origin_buffer: wgpu::Buffer,
     origin_capacity: usize,
-    /// Quad format: per-draw instance data (origin, record base, span kind),
-    /// reused across frames.
+    /// Quad format: per-draw instance data (origin, span kind), reused across
+    /// frames.
     quad_instances: Vec<crate::quad_format::QuadInstance>,
     quad_instance_buffer: wgpu::Buffer,
     quad_instance_capacity: usize,
+    /// The quad format's static index buffers: the per-quad corner pattern
+    /// and the sequential soup pattern (see `quad_format.rs`).
+    quad_pattern_index: wgpu::Buffer,
+    quad_seq_index: wgpu::Buffer,
     /// Indirect draw arguments (multi-draw path), reused across frames.
     /// Five u32 per draw: index count, instance count, first index, base vertex, first instance
     /// (`wgpu::util::DrawIndexedIndirectArgs` layout).

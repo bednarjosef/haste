@@ -5,7 +5,7 @@
 # second while the bench runs, plus the client's own per-subsystem breakdown lines.
 #
 # usage: scripts/bench-haste-memory.sh <render distance> <seconds> <tag> [width] [height]
-#        [username] ["x y z yaw pitch"]
+#        [username] ["x y z yaw pitch"] [extra haste args...]
 # Needs the reference server (default port 25620) running with a view distance at least the
 # render distance. Output: target/bench-haste-memory/<tag>/.
 # env: HASTE_BENCH_SPOT ("x y z yaw pitch", default the screenshot spot below),
@@ -15,6 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE="${HASTE_CACHE:-$ROOT/cache}"
 PORT="${HASTE_BENCH_PORT:-25620}"
 RD=$1; SECS=$2; TAG=$3; W=${4:-1408}; H=${5:-828}; USER_ARG=${6:-}; SPOT_ARG=${7:-}
+EXTRA=("${@:8}")
 OUT="$ROOT/target/bench-haste-memory/$TAG"
 mkdir -p "$OUT"
 GAME="$CACHE/bench-haste-game"
@@ -55,6 +56,7 @@ HASTE_GAME_DIR="$GAME" "$ROOT/target/release/haste" --server "127.0.0.1:$PORT" \
   --bench-window "$SECS" --bench-out "$OUT/haste-rd$RD.json" --x11 \
   --width "$W" --height "$H" --render-distance "$RD" \
   --pos "$X" "$Y" "$Z" --yaw "$YAW" --pitch "$PITCH" --seconds 100 \
+  "${EXTRA[@]}" \
   > "$OUT/haste-rd$RD.log" 2>&1 &
 PID=$!
 # Watchdog, not a `timeout` wrapper: the sampler must see the client's own PID (timeout

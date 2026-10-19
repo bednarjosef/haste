@@ -177,20 +177,17 @@ fn finish_vertex(
 // quad_format.rs for the record layouts.
 
 struct QuadIn {
-    // Instance-rate, one per draw: the section origin, the span's first
-    // record and the span kind (0 = rect records, 1 = four-vertex quads,
-    // 2 = fan rings).
+    // Instance-rate, one per draw: the section origin and the span kind
+    // (0 = rect records, 1 = four-vertex quads, 2 = triangle soups). The
+    // span's record base rides the draw's base_vertex: the static index
+    // pattern (0..3 per quad, or sequential for soups) plus base_vertex
+    // makes vertex_index the record index (quad formats: >> 2).
     @location(0) origin: vec3<i32>,
-    @location(1) first: u32,
-    @location(2) kind: u32,
+    @location(1) kind: u32,
 };
 
 @group(3) @binding(0) var<storage, read> quad_records: array<u32>;
 @group(3) @binding(1) var<storage, read> quad_vertices: array<u32>;
-
-// The two triangles of a quad over corners 0..3: (0, 1, 2) and (2, 3, 0),
-// the order the AO-flip corner rotation in quad_format.rs assumes.
-const QUAD_CORNERS = array<u32, 6>(0u, 1u, 2u, 2u, 3u, 0u);
 
 /// A decoded corner, whichever format it came from.
 struct Decoded {
@@ -297,23 +294,14 @@ fn pull_rect(base_word: u32, c: u32) -> Decoded {
 fn vs_quad(in: QuadIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     var d: Decoded;
     if (in.kind == 0u) {
-        // Rect records: six vertices per quad, corner from the fixed table.
-        d = pull_rect((in.first + vi / 6u) * 8u, QUAD_CORNERS[vi % 6u]);
+        // Rect records: the index pattern makes vi = 4 * record + corner.
+        d = pull_rect((vi >> 2u) * 8u, vi & 3u);
     } else if (in.kind == 1u) {
-        // Four-vertex quads: corner `c` of quad `g` at first + g*4 + c.
-        let g = vi / 6u;
-        d = pull_vertex(in.first + g * 4u + QUAD_CORNERS[vi % 6u]);
+        // Four-vertex quads: vi = 4 * record + corner, record = vi >> 2.
+        d = pull_vertex(vi >> 2u);
     } else {
-        // Fan rings: triangle `t` is (0, t+1, t+2) over the ring records.
-        let t = vi / 3u;
-        let c = vi % 3u;
-        var ring = 0u;
-        if (c == 1u) {
-            ring = t + 1u;
-        } else if (c == 2u) {
-            ring = t + 2u;
-        }
-        d = pull_vertex(in.first + ring);
+        // Triangle soups: sequential indices make vi the record.
+        d = pull_vertex(vi);
     }
     return finish_vertex(
         d.local, d.sprite_uv, d.sky16, d.block16, d.ao_count, d.shade_index, d.tint, d.sprite,

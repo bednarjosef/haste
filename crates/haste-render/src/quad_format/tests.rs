@@ -219,10 +219,10 @@ fn constant_uv_still_packs() {
 }
 
 #[test]
-fn span_vertex_counts() {
-    assert_eq!(SpanKind::Rect.vertex_count(3), 18);
-    assert_eq!(SpanKind::Quad.vertex_count(3), 18);
-    assert_eq!(SpanKind::Fan.vertex_count(7), 15);
-    assert_eq!(SpanKind::Fan.vertex_count(2), 0);
-    assert_eq!(SpanKind::Fan.vertex_count(0), 0);
+fn span_indexed_draws() {
+    // (index count, base vertex): 4 vertices per record before the base.
+    assert_eq!(SpanKind::Rect.indexed_draw(7, 3), (18, 28));
+    assert_eq!(SpanKind::Quad.indexed_draw(7, 3), (18, 28));
+    assert_eq!(SpanKind::Tri.indexed_draw(7, 15), (15, 7));
+    assert_eq!(SpanKind::Tri.indexed_draw(0, 0), (0, 0));
 }
