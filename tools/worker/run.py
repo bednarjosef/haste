@@ -136,6 +136,11 @@ def launch(a):
     pack = subprocess.run([str(REPO / "scripts" / "hx"), "context", a.brief], env=env,
                           capture_output=True, text=True).stdout
     prompt = header(a.branch, wt, user) + brief + "\n\n" + pack
+    # Checklist items the brief spells out (`- [ ]` lines) start the worker's checklist.
+    items = [l.strip() for l in brief.splitlines() if l.strip().startswith("- [ ]")]
+    if items:
+        (wt / "target").mkdir(exist_ok=True)
+        (wt / "target" / "hx-checklist.md").write_text("\n".join(items) + "\n")
     budget = a.budget or BUDGET.get(model_key, 10)
     cmd = claude_cmd(prompt, model, a.effort, budget)
     if a.dry_run:

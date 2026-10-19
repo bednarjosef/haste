@@ -143,5 +143,27 @@ class Guard(unittest.TestCase):
         self.assertEqual(self.decide('grep -n "end$" Cargo.toml'), "allow")
 
 
+class Checklist(unittest.TestCase):
+    def test_open_items_block_done(self):
+        import tempfile
+        import checks
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "target"))
+            old = checks.ROOT
+            checks.ROOT = d
+            try:
+                self.assertIn("no checklist", checks.checklist_missing()[0])
+                with open(os.path.join(d, "target", "hx-checklist.md"), "w") as f:
+                    f.write("- [x] pose\n- [ ] armour layer\n- [blocked: no server] screenshot\n")
+                left = checks.checklist_missing()
+                self.assertEqual(len(left), 1)
+                self.assertIn("armour layer", left[0])
+                with open(os.path.join(d, "target", "hx-checklist.md"), "w") as f:
+                    f.write("- [x] pose\n- [x] armour layer\n")
+                self.assertEqual(checks.checklist_missing(), [])
+            finally:
+                checks.ROOT = old
+
+
 if __name__ == "__main__":
     unittest.main()

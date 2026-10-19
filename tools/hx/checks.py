@@ -176,7 +176,30 @@ def missing():
             if status == "pass":
                 why = "the code changed since"
             todo.append(f"hx check has not passed on the current tree ({why}): run `hx check`")
-    return todo
+    return checklist_missing() + todo
+
+
+def checklist_path():
+    return os.path.join(ROOT, "target", "hx-checklist.md")
+
+
+def checklist_missing():
+    """The deliverables still open in target/hx-checklist.md (written at the start of a task:
+    one `- [ ]` line per deliverable of the brief, ticked `[x]` or marked `[blocked: why]`)."""
+    if os.environ.get("HX_CHECKLIST", "1") == "0":
+        return []
+    path = checklist_path()
+    if not os.path.isfile(path):
+        return ["no checklist: write target/hx-checklist.md with one `- [ ] item` line per "
+                "deliverable of the brief (what to port, tests, checks, measurements, report "
+                "items), then tick each `- [x]` when done or mark it `- [blocked: why]`"]
+    open_items = [l.strip() for l in open(path) if re.match(r"\s*[-*] \[ \]", l)]
+    if not open_items:
+        return []
+    return [f"{len(open_items)} checklist items still open in target/hx-checklist.md: "
+            + "; ".join(clip(l[6:], 70) for l in open_items[:6])
+            + ". Do them, or mark one `- [blocked: why]` only when it truly cannot be done here "
+            "(look for existing Haste code first: hx map, hx ported, hx refs)"]
 
 
 def cmd_done():

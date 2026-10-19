@@ -39,6 +39,12 @@ task: it already resolves every vanilla class and method the task names.
 | fmt + file sizes + clippy + tests of changed crates | `hx check` (errors only; `--filter NAME` runs some tests) |
 | What is still missing before you may finish | `hx done` |
 
+First, write `target/hx-checklist.md`: one `- [ ] item` line per deliverable of the brief (each
+thing to port, the tests, checks, measurements and report items; the launcher may have started
+it). Tick `- [x]` as you finish each one; mark `- [blocked: why]` only what truly cannot be done
+here, after looking for existing Haste code to build on. `hx done` (and so the end of your turn)
+waits for every item.
+
 Work in this order: read the pack; read the vanilla code you port (`hx vanilla`); find the
 Haste code it belongs next to (`hx ported`, `hx map`) and an existing feature of the same kind
 to follow (another renderer, packet handler, screen); write the code; `hx check`; commit;

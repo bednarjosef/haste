@@ -20,6 +20,48 @@ def cited_by(name, n=3):
     return sorted(hits)[:n], len(hits)
 
 
+SUFFIXES = ("Renderer", "Model", "Layer", "Screen", "Packet", "Handler", "Manager")
+WORD = re.compile(r"\b[a-z][a-z_]{4,}\b")
+
+
+def snake(name):
+    for suf in SUFFIXES:
+        if name.endswith(suf) and name != suf:
+            name = name[: -len(suf)]
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def task_section(text):
+    """The brief's own task text ("What to port"/"What to do"), without the shared rules."""
+    m = re.search(r"^## What to (?:port|do|build|fix)\b.*?$(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return m.group(1) if m else text
+
+
+def concept_files(text, names, limit=15):
+    """Haste files named after a concept the task mentions (files follow vanilla's concepts:
+    `ArmorStandRenderer` -> armor_stand.rs, "equipment layers" -> equipment.rs): the existing
+    seams a task should plug into. Vanilla-name matches first, then the task's own words."""
+    task = task_section(text)
+    strong = {snake(c.split(".")[-1]) for c, _, _ in names if c in task}
+    weak = set(WORD.findall(task.lower())) - strong
+    hits = []
+    for r, dirs, fs in os.walk(os.path.join(ROOT, "crates")):
+        dirs[:] = [d for d in dirs if d not in ("target", "tests")]
+        for f in fs:
+            stem = f[:-3]
+            if f.endswith(".rs") and stem not in ("mod", "lib", "main", "tests"):
+                rank = 0 if stem in strong else 1 if stem in weak else None
+                if rank is not None:
+                    hits.append((rank, os.path.relpath(os.path.join(r, f), ROOT)))
+    if not hits:
+        return
+    out("Existing Haste files named after concepts in the task (plug into these; "
+        "`hx outline FILE`):")
+    for _, p in sorted(hits)[:limit]:
+        full = os.path.join(ROOT, p)
+        out(f"- {p} ({haste.count_lines(full)} lines) {clip(haste.module_doc(full), 110)}")
+
+
 def cmd_context(brief_path):
     text = open(brief_path, encoding="utf-8").read()
     seen, names = set(), []
@@ -68,6 +110,7 @@ def cmd_context(brief_path):
         shown += 1
     if not shown:
         out("  (the brief names no vanilla class)")
+    concept_files(text, names)
     paths = sorted({p.rstrip(".,:;)`/") for p in PATH.findall(text)})
     if paths:
         out("Haste paths in the brief:")
