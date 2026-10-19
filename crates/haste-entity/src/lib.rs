@@ -16,6 +16,7 @@ pub mod minecart;
 pub mod model_dump;
 pub mod models;
 pub mod registry;
+pub mod render;
 pub mod riding;
 pub mod skin;
 pub mod store;
