@@ -34,27 +34,11 @@ pub const HEAD_LERP_STEPS: u8 = 3;
 /// `Entity`'s eight (0-7), so index 9 (a float).
 pub const HEALTH_METADATA_INDEX: u8 = 9;
 
-/// `Mth.lerp`.
-pub(crate) fn lerp(delta: f32, start: f32, end: f32) -> f32 {
-    start + delta * (end - start)
-}
-
-/// `Mth.rotLerp`.
-pub(crate) fn rot_lerp(delta: f32, start: f32, end: f32) -> f32 {
-    start + delta * wrap_degrees(end - start)
-}
-
-/// `Mth.wrapDegrees`.
-pub(crate) fn wrap_degrees(mut v: f32) -> f32 {
-    v %= 360.0;
-    if v >= 180.0 {
-        v -= 360.0;
-    }
-    if v < -180.0 {
-        v += 360.0;
-    }
-    v
-}
+// The angle helpers live in `walk_swing` (the rotation states' home); re-exported for the
+// callers that still reach them through this module.
+pub(crate) use crate::walk_swing::{lerp, rot_lerp, wrap_degrees};
+// `hurt_strength` moved to `render.rs` with the draw list that reads it.
+pub use crate::render::hurt_strength;
 
 /// One tracked entity.
 pub struct Entity {
@@ -295,18 +279,6 @@ impl Entity {
     }
 }
 
-/// The `EntityInstance::item` entry for a tracked entity: the stack of a dropped item entity
-/// (count included; the renderer draws 1-5 copies from it), aged by the partial tick.
-pub(crate) fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
-    let stack = e.item.as_ref()?;
-    let item = stack.item?;
-    Some(haste_core::model::DroppedItem {
-        item,
-        count: stack.count,
-        age: e.age as f32 + partial_tick,
-    })
-}
-
 /// The hands, equipment layers and custom head item of an entity, resolved through the shared
 /// per-slot rules ([`crate::local_player::equipment_of`]).
 pub struct EntityStore {
@@ -339,18 +311,6 @@ pub struct EntityStore {
     /// The tick's use steps (`LivingEntity.updateUsingItem`), recorded per entity for the
     /// client's effects; reused, so a tick without a use allocates nothing.
     pub(crate) use_ticks: Vec<crate::using_item::UseTick>,
-}
-
-/// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
-/// vanilla's `hurtTime`-driven fade: strong on impact, gone by tick 10). A dead entity keeps
-/// the flash until the server removes it (`LivingEntityRenderer.extractRenderState`:
-/// `hasRedOverlay = hurtTime > 0 || deathTime > 0`, and `deathTime` never resets).
-pub fn hurt_strength(e: &Entity) -> f32 {
-    if e.dead {
-        return 1.0;
-    }
-    let left = e.hurt_ticks.min(HURT_TICKS) as f32 / HURT_TICKS as f32;
-    left * left
 }
 
 impl EntityStore {

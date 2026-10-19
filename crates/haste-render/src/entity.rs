@@ -86,7 +86,7 @@ pub(crate) use vertex::{
     entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_flat_quad,
     push_world_quad,
 };
-pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
+pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha, EntityVertex};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
@@ -167,28 +167,6 @@ pub(crate) fn append_upload_range(
     } else {
         start..len
     }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct EntityVertex {
-    pub pos: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
-    pub rect: [u16; 4],
-    /// Light levels for the vanilla light texture: block, sky, unused, unused.
-    pub light: [u16; 4],
-}
-
-impl EntityVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4, 4 => Uint16x4
-    ];
-    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<EntityVertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &Self::ATTRIBUTES,
-    };
 }
 
 /// The texture an instance is drawn with and its model scale: players (haste-entity's

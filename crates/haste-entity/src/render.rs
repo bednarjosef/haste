@@ -5,7 +5,31 @@
 use haste_core::math::Vec3;
 use haste_core::model::EntityInstance;
 
-use crate::store::{hurt_strength, item_of, EntityStore};
+use crate::store::{Entity, EntityStore, HURT_TICKS};
+
+/// The `EntityInstance::item` entry for a tracked entity: the stack of a dropped item entity
+/// (count included; the renderer draws 1-5 copies from it), aged by the partial tick.
+fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
+    let stack = e.item.as_ref()?;
+    let item = stack.item?;
+    Some(haste_core::model::DroppedItem {
+        item,
+        count: stack.count,
+        age: e.age as f32 + partial_tick,
+    })
+}
+
+/// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
+/// vanilla's `hurtTime`-driven fade: strong on impact, gone by tick 10). A dead entity keeps
+/// the flash until the server removes it (`LivingEntityRenderer.extractRenderState`:
+/// `hasRedOverlay = hurtTime > 0 || deathTime > 0`, and `deathTime` never resets).
+pub fn hurt_strength(e: &Entity) -> f32 {
+    if e.dead {
+        return 1.0;
+    }
+    let left = e.hurt_ticks.min(HURT_TICKS) as f32 / HURT_TICKS as f32;
+    left * left
+}
 
 impl EntityStore {
     /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
