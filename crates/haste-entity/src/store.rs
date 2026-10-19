@@ -838,11 +838,8 @@ impl EntityStore {
         for slot in self.slots.iter().flatten() {
             // The decoration an entity draws through, if any (one renderer per vanilla
             // concept; `decoration::resolve` names them).
-            let (decoration, non_hanging, is_minecart) = crate::decoration::resolve(
-                slot,
-                partial_tick,
-                &self.painting_variants,
-            );
+            let (decoration, non_hanging, is_minecart) =
+                crate::decoration::resolve(slot, partial_tick, &self.painting_variants);
             let pos = if non_hanging {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             } else if decoration.is_some() {

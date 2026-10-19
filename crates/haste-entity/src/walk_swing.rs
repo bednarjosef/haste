@@ -143,3 +143,29 @@ impl SwingState {
         self.animation
     }
 }
+
+/// `LivingEntity.tick`'s body-rotation step: follow the horizontal movement direction, then
+/// `tickHeadTurn` (0.3 lerp, 50 degree head/body split).
+pub(crate) fn update_body_yaw(e: &mut crate::store::Entity, d: haste_core::DVec3) {
+    let mut target = e.body_yaw;
+    let side_dist = (d.x * d.x + d.z * d.z) as f32;
+    if side_dist > 0.002_500_000_2 {
+        let walk_direction = (d.z.atan2(d.x) as f32).to_degrees() - 90.0;
+        let diff = (crate::store::wrap_degrees(e.yaw) - walk_direction).abs();
+        target = if 95.0 < diff && diff < 265.0 {
+            walk_direction - 180.0
+        } else {
+            walk_direction
+        };
+    }
+    if e.swing.progress() > 0.0 {
+        target = e.yaw;
+    }
+    let body_delta = crate::store::wrap_degrees(target - e.body_yaw);
+    e.body_yaw += body_delta * 0.3;
+    let head_diff = crate::store::wrap_degrees(e.yaw - e.body_yaw);
+    let max_head = 50.0;
+    if head_diff.abs() > max_head {
+        e.body_yaw += head_diff - head_diff.signum() * max_head;
+    }
+}

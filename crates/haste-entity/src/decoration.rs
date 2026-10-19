@@ -188,6 +188,46 @@ pub fn hanging_render_center(
     }
 }
 
+/// The decoration an entity draws through, if any: which renderer its type maps to (vanilla
+/// `EntityRenderers`) and whether it keeps the entity's own interpolated position rather
+/// than a hanging render centre. The third flag is the minecart-ness the model choice reads
+/// (`models::model_for_entity`).
+pub fn resolve(
+    e: &crate::store::Entity,
+    partial_tick: f32,
+    painting_variants: &HashMap<u32, PaintingVariant>,
+) -> (Option<Decoration>, bool, bool) {
+    let minecart_variant = crate::minecart::variant_for_kind(e.kind);
+    let minecart =
+        minecart_variant.map(|v| crate::minecart::decoration(&e.metadata, v, partial_tick));
+    let thrown = crate::thrown_item::variant_for_kind(e.kind);
+    let dragon_fireball = crate::dragon_fireball::is_dragon_fireball(e.kind);
+    let non_hanging = minecart_variant.is_some()
+        || thrown.is_some()
+        || dragon_fireball
+        || crate::arrow::is_arrow(e.kind);
+    let decoration = minecart
+        .map(Decoration::Minecart)
+        .or_else(|| {
+            thrown
+                .and_then(|t| crate::thrown_item::decoration(&t, &e.metadata))
+                .map(Decoration::ThrownItem)
+        })
+        .or_else(|| dragon_fireball.then_some(Decoration::DragonFireball))
+        .or_else(|| crate::arrow::decoration(e, partial_tick))
+        .or_else(|| {
+            build(
+                e.kind,
+                e.data,
+                &e.metadata,
+                painting_variants,
+                e.id.0,
+                e.tick_count as f32 + partial_tick,
+            )
+        });
+    (decoration, non_hanging, minecart_variant.is_some())
+}
+
 /// The render origin for the entity's decoration, resolving a painting's size from the variant
 /// table; falls back to the wall center when the type is not a known decoration.
 pub fn render_center(
