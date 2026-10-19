@@ -124,11 +124,39 @@ fn render_flat(quad: bool) -> image::RgbaImage {
         stats.chunk_sections_drawn > 0,
         "no sections drawn (quad={quad}, stats {stats:?})"
     );
-    renderer.read_back().unwrap()
+    let image = renderer.read_back().unwrap();
+    assert_terrain_visible(&image, quad);
+    image
+}
+
+/// The camera looks 60 degrees down onto the stone floor, so the lower half of
+/// the frame is grey stone, not blue sky. Two blank frames (terrain never
+/// drawn) would otherwise compare equal.
+fn assert_terrain_visible(image: &image::RgbaImage, quad: bool) {
+    let (w, h) = image.dimensions();
+    let total = (w * (h - h / 2)) as usize;
+    let grey = (h / 2..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let [r, _, b, _] = image.get_pixel(x, y).0;
+            (b as i32 - r as i32).abs() < 20
+        })
+        .count();
+    assert!(
+        grey * 2 > total,
+        "terrain not drawn (quad={quad}): only {grey} of {total} lower-half pixels are stone grey"
+    );
 }
 
 #[test]
 #[ignore = "needs the client jar, datagen reports, and a Vulkan driver (source scripts/env.sh)"]
+fn vertex_format_draws_terrain() {
+    render_flat(false);
+}
+
+#[test]
+#[ignore = "known broken since 2026-10-19: the quad format draws scattered garbage (see NOTES); \
+            also needs the client jar, datagen reports, and a Vulkan driver"]
 fn quad_format_renders_the_vertex_format_pixels() {
     let vertex = render_flat(false);
     let quad = render_flat(true);

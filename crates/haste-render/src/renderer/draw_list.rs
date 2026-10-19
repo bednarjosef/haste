@@ -116,6 +116,7 @@ impl Renderer {
             draws.iter().map(|d| d.index_count).sum()
         };
         self.prepare_draw_data(&draws);
+        self.draw_list = draws;
         (sections_total, drawn, indices_drawn)
     }
 }
