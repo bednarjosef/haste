@@ -70,6 +70,7 @@ impl Particles {
             },
             quad,
             color: [1.0; 3],
+            alpha: 1.0,
             portal_start: pos,
             block_sprite: Some(sub),
         };

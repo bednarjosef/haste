@@ -142,6 +142,11 @@ pub trait EntitySink {
     fn mark_attack(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::mark_hit`: entity event 32 (an armour stand was hit, starting its
+    /// wobble). Default no-op.
+    fn mark_hit(&mut self, id: EntityId) {
+        let _ = id;
+    }
     /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
@@ -193,11 +198,26 @@ pub trait EntitySink {
     fn clear(&mut self);
     /// `EntityStore::tick`.
     fn tick(&mut self);
-    /// `EntityStore::tick_in_world`: the tick with the world the dropped items move in
-    /// (`ItemEntity.tick`'s collision, friction and fluids). Fakes ignore the world.
-    fn tick_in_world(&mut self, world: &dyn haste_entity::item_entity::ItemWorld) {
-        let _ = world;
+    /// `Arrow.handleEntityEvent` 0: a stuck tipped arrow's potion puff, 20 colour particles
+    /// over its box (queued into `out`). Fakes know no arrows.
+    fn arrow_potion_puff(
+        &mut self,
+        id: EntityId,
+        out: &mut Vec<haste_entity::arrow::ArrowParticle>,
+    ) {
+        let _ = (id, out);
+    }
+    /// `EntityStore::tick_in_world`: the tick with the world the dropped items and the
+    /// arrows move in (`ItemEntity.tick`'s and `AbstractArrow.tick`'s collision, friction
+    /// and fluids), collecting the arrows' own particle requests. Fakes ignore the world.
+    fn tick_in_world(
+        &mut self,
+        _world: &dyn haste_entity::item_entity::ItemWorld,
+        _arrows: &dyn haste_entity::arrow::ArrowWorld,
+        arrow_particles: &mut Vec<haste_entity::arrow::ArrowParticle>,
+    ) {
         self.tick();
+        arrow_particles.clear();
     }
     /// `EntityStore::len`.
     fn len(&self) -> usize;
@@ -289,6 +309,9 @@ impl EntitySink for EntityStore {
     fn mark_attack(&mut self, id: EntityId) {
         EntityStore::mark_attack(self, id)
     }
+    fn mark_hit(&mut self, id: EntityId) {
+        EntityStore::mark_hit(self, id)
+    }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)
     }
@@ -336,8 +359,22 @@ impl EntitySink for EntityStore {
     fn tick(&mut self) {
         EntityStore::tick(self)
     }
-    fn tick_in_world(&mut self, world: &dyn haste_entity::item_entity::ItemWorld) {
-        EntityStore::tick_in_world(self, world)
+    fn arrow_potion_puff(
+        &mut self,
+        id: EntityId,
+        out: &mut Vec<haste_entity::arrow::ArrowParticle>,
+    ) {
+        if let Some(e) = EntityStore::get(self, id) {
+            haste_entity::arrow::potion_puff(e, out);
+        }
+    }
+    fn tick_in_world(
+        &mut self,
+        world: &dyn haste_entity::item_entity::ItemWorld,
+        arrows: &dyn haste_entity::arrow::ArrowWorld,
+        arrow_particles: &mut Vec<haste_entity::arrow::ArrowParticle>,
+    ) {
+        EntityStore::tick_in_world(self, world, arrows, arrow_particles)
     }
     fn len(&self) -> usize {
         EntityStore::len(self)

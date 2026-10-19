@@ -6,6 +6,7 @@
 use haste_core::{ChunkPos, SectionPos};
 
 use crate::arena::ResidentSection;
+use crate::quad_format::SpanKind;
 
 /// One resident section: the arena placement plus the SoA columns the cull
 /// loop reads (world bounds for the frustum test and the bonus flag for
@@ -14,8 +15,13 @@ pub struct SlabSection {
     pub pos: SectionPos,
     pub arena: u32,
     pub base_vertex: u32,
-    /// For `MeshArenas::free` (vertex/index ranges of the whole section).
+    /// For `MeshArenas::free` (vertex/index/quad ranges of the whole section).
     pub vertex_count: u32,
+    pub base_quad: u32,
+    /// Quad format: the section's general records.
+    pub base_general: u32,
+    pub general_count: u32,
+    pub quad_count: u32,
     pub index_start: u32,
     pub index_total: u32,
     pub layers_len: u32,
@@ -29,15 +35,17 @@ pub struct SlabSection {
     pub bonus: bool,
 }
 
-/// One section layer to draw: the render layer plus its arena index range.
+/// One section layer to draw: the render layer plus its arena record range.
 #[derive(Clone, Copy)]
 pub struct SlabLayer {
     pub layer: haste_assets::RenderLayer,
-    pub first_index: u32,
-    pub index_count: u32,
+    pub first: u32,
+    pub count: u32,
     /// Face direction (`Direction::ALL` index) of this group; 6 = the whole
     /// layer (translucent, never direction-skipped). See `LayerDraw`.
     pub dir: u8,
+    /// Which pool `first` addresses (indices or quad-format records).
+    pub kind: SpanKind,
 }
 
 impl SlabLayer {
@@ -123,9 +131,10 @@ impl SectionSlab {
             .iter()
             .map(|l| SlabLayer {
                 layer: l.layer,
-                first_index: l.first_index,
-                index_count: l.index_count,
+                first: l.first,
+                count: l.count,
                 dir: l.dir,
+                kind: l.kind,
             })
             .collect();
         let layers_base = self.layers.len() as u32;
@@ -142,6 +151,10 @@ impl SectionSlab {
             arena: s.arena,
             base_vertex: s.base_vertex,
             vertex_count: s.vertex_count,
+            base_quad: s.base_quad,
+            quad_count: s.quad_count,
+            base_general: s.base_general,
+            general_count: s.general_count,
             index_start: s.index_start,
             index_total: s.index_total,
             layers_len: s.layers.len() as u32,
@@ -167,6 +180,10 @@ impl SectionSlab {
             arena: s.arena,
             base_vertex: s.base_vertex,
             vertex_count: s.vertex_count,
+            base_quad: s.base_quad,
+            quad_count: s.quad_count,
+            base_general: s.base_general,
+            general_count: s.general_count,
             index_start: s.index_start,
             index_total: s.index_total,
             layers: Vec::new(),
@@ -244,14 +261,19 @@ mod tests {
             arena: 0,
             base_vertex: 0,
             vertex_count: 0,
+            base_quad: 0,
+            quad_count: 0,
+            base_general: 0,
+            general_count: 0,
             index_start: 0,
             index_total: 0,
             layers: (0..n_layers)
                 .map(|i| LayerDraw {
                     layer: haste_assets::RenderLayer::Solid,
-                    first_index: i as u32 * 6,
-                    index_count: 6,
+                    first: i as u32 * 6,
+                    count: 6,
                     dir: 6,
+                    kind: crate::quad_format::SpanKind::Indexed,
                 })
                 .collect(),
             aabb: ([0.0; 3], [16.0; 3]),
@@ -297,7 +319,7 @@ mod tests {
         slab.insert(resident(SectionPos::new(0, 1, 0), 1));
         let s0 = slab.get(SectionPos::new(0, 0, 0)).unwrap();
         assert_eq!(slab.layers(s0).len(), 2);
-        assert_eq!(slab.layers(s0)[1].first_index, 6);
+        assert_eq!(slab.layers(s0)[1].first, 6);
         let s1 = slab.get(SectionPos::new(0, 1, 0)).unwrap();
         assert_eq!(slab.layers(s1).len(), 1);
         // After removing the middle record the other's slice is still right.

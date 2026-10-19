@@ -102,6 +102,11 @@ pub struct Args {
     /// predictor. The default comes from the config's `[options] premesh`.
     #[arg(long)]
     pub premesh: Option<String>,
+    /// Terrain GPU format: `vertex` (four 20-byte vertices plus six indices per
+    /// quad) or `quad` (vertex pulling: one 32-byte record per axis-aligned quad,
+    /// no index buffer). Set before the renderer and mesher start.
+    #[arg(long, default_value = "vertex")]
+    pub terrain_format: String,
     /// Windowed bench camera path: `still` (default) holds the settle camera, `turns`
     /// holds, then does 180-degree turns at a fixed speed every few seconds plus a
     /// straight flight leg — the same motion every run, for the pre-mesh comparison.
@@ -163,6 +168,11 @@ fn main() -> anyhow::Result<()> {
         haste_setup::worlds::set_dir(dir.clone());
     }
     app::set_hud_from_args(&args.hud)?;
+    match args.terrain_format.as_str() {
+        "vertex" => {}
+        "quad" => haste_render::set_terrain_format_quad(true),
+        other => anyhow::bail!("--terrain-format must be `vertex` or `quad`, got `{other}`"),
+    }
     if let Some(cmd) = args.command {
         return launch::run(cmd, &args.username);
     }

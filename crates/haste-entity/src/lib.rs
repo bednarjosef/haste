@@ -3,6 +3,8 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
 pub mod animation;
+pub mod armor_stand;
+pub mod arrow;
 pub mod avatar;
 pub mod boat;
 pub mod decoration;
@@ -16,6 +18,7 @@ pub mod minecart;
 pub mod model_dump;
 pub mod models;
 pub mod registry;
+pub mod render;
 pub mod riding;
 pub mod skin;
 pub mod store;
@@ -36,3 +39,4 @@ pub use metadata::{Metadata, MobFlags, SharedFlags};
 pub use riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 pub use store::{Entity, EntityStore};
 pub use variants::{MobVariants, VariantAssets, VariantModel, VARIANT_REGISTRIES};
+pub use walk_swing::{SwingState, WalkAnimationState};

@@ -296,3 +296,42 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   two hours per start; a bench that starts during its restart fails with "Connection refused".
 - **2026-10-19 Entity type id 0 is acacia_boat.** Test fixtures that spawn a default-kind entity
   now spawn a boat; use an explicit kind (`minecraft:arrow`, `minecraft:zombie`).
+- **2026-10-19 Shadows: blend space and depth.** Two separate bugs hid entity shadows. The main
+  pass target is sRGB, so the GPU blends in linear light while vanilla's UNORM target blends the
+  stored bytes: a shadow alpha of 0.32 darkened by about half of vanilla's. And the shadow quad lies
+  exactly on the block top, while terrain positions are quantized (~0.37 mm steps), so the quad
+  lost the depth test by a rounding hair in game (an offscreen test passed by luck). Vanilla
+  layers shadows toward the camera (`VIEW_OFFSET_Z_LAYERING`); Haste uses a depth bias of -16.
+  The blend-space difference affects every translucent pass (water, glass, particles, weather);
+  a renderer-wide fix is its own task.
+- **2026-10-19 Entity fire draws one frame.** The entity atlas has no animation ticker, so
+  animated sprites (`fire_0`, `fire_1`) must be added as their first frame; uploading the whole
+  `.mcmeta` strip drew the burning overlay as thin horizontal stripes.
+- **2026-10-19 26.3 NBT for test scenes.** Falling blocks: `BlockState:"minecraft:gravel"` (a plain
+  string, not the old compound). Armour stands: `Pose:{Head:[..],RightArm:[..]}` (unchanged
+  keys), `equipment:{head:{id:..},mainhand:{id:..}}`. Item frames with a map:
+  `Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":N}}`; a map id without
+  saved data draws the plain map item. A NoGravity falling block needs `Time` set far negative
+  or it drops after 600 ticks. Vanilla re-derives a resting arrow's rotation from its motion, so
+  a summoned `Rotation` is not kept.
+- **2026-10-19 Vanilla reference shots.** The reference client runs fov 70, `fovEffectScale` 0 and
+  clouds off (`scripts/vanilla-options.sh`): Haste shots for a side-by-side need the same (no
+  flying FOV in spectator, ignore clouds). F1 also hides the hand: take held-item shots with the
+  HUD on. Several workers sharing one test platform need fixed, tagged scenes and a rule never
+  to kill by type.
+- **2026-10-19 Test server memory.** The shared test server on 25691 ran out of its 1500M heap after
+  ~21 hours of many players and summoned entities and stopped answering RCON; test-server.sh now
+  defaults to 2G (`HASTE_SERVER_HEAP`).
+- **2026-10-19 Colours from the game are sRGB bytes.** Vanilla writes packet and option colours
+  (particle `ColorParticleOption`, tints) straight into a target that does not convert, so the bytes
+  are the displayed colour. Haste's main target is sRGB: a byte colour must be decoded to linear
+  before it goes into a vertex colour, or the target encodes it a second time and it comes out pale
+  (the tipped-arrow poison swirls read (192,208,160) against vanilla's dark olive). Alpha bytes are
+  not gamma-encoded and stay as they are.
+- **2026-10-19 Pre-mesh slack gate.** Cone pre-meshing (sections in the turn direction meshed before
+  they are visible) collapsed to 15-16 ms frames on a loaded machine. The gate stops pre-meshing
+  while the mesh backlog stays above 1536 sections for 400 ms and resumes below 512. Interleaved
+  runs at the reference spot: rd 12 cone 2.30 ms against off 3.02 ms, rd 32 6.59 against 6.69, no
+  collapse in 8 gated rd 32 runs. The default stays off until a sustained-load pair confirms it.
+  Next idea there: the section slab is looked up through a hash about 45k times per frame at rd 32;
+  a grid index would help every lookup site.

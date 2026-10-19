@@ -15,6 +15,8 @@ use haste_core::model::{CubeModel, ModelPart};
 
 mod animation;
 mod arm_pose;
+mod armor_stand;
+mod arrow;
 mod boat;
 mod connectivity;
 mod hurt;

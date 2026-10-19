@@ -187,7 +187,11 @@ fn ice_friction_slows_the_item_less() {
     s.teleport(id, floor, 0.0, 0.0, true);
     s.set_velocity(id, DVec3::new(0.1, 0.0, 0.0));
 
-    s.tick_in_world(&TestWorld { friction: 0.98 });
+    s.tick_in_world(
+        &TestWorld { friction: 0.98 },
+        &crate::arrow::NoArrowWorld,
+        &mut Vec::new(),
+    );
     let e = s.get(id).unwrap();
     let want_x = 0.1 * f64::from(AIR_DRAG * 0.98_f32);
     assert!(

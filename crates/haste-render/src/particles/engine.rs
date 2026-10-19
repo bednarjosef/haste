@@ -30,6 +30,9 @@ pub(super) struct ParticleState {
     pub(super) quad: f32,
     /// Spawn-time colour jitter already applied, so the renderer multiplies once.
     pub(super) color: [f32; 3],
+    /// The particle's alpha (`Particle.alpha`): the behaviour's, or the colour option's
+    /// (`SpellParticle.MobEffectProvider`'s `setAlpha`).
+    pub(super) alpha: f32,
     /// Start position for the spiral path (`PortalParticle`).
     pub(super) portal_start: DVec3,
     /// Terrain-particle override: the block sprite (clamping rect) and its 4x4
@@ -60,6 +63,13 @@ pub struct Particles {
     /// them white, which only headless runs without a pool ever see).
     pub(super) biome_colors: Option<crate::tint::BiomeColors>,
     pub(super) rng: Rng,
+    /// The camera the seed particles' children are limiter-checked against (vanilla
+    /// `ClientLevel.doAddParticle` reads the game camera; set at the tick's start).
+    pub(super) camera: DVec3,
+    /// The `NoRenderParticle` seeds' children this tick (vanilla queues adds during the
+    /// tick in `particlesToAdd` and appends them after it). Reused, so a tick without a
+    /// seed allocates nothing.
+    pub(super) seed_children: Vec<ParticleSpawn>,
 }
 
 impl Particles {
@@ -71,6 +81,8 @@ impl Particles {
             unknown: Vec::new(),
             biome_colors: None,
             rng: Rng(0x853C_49E6_748F_EA9B),
+            camera: DVec3::ZERO,
+            seed_children: Vec::new(),
         }
     }
 
@@ -120,14 +132,24 @@ impl Particles {
         let kind = if terrain.is_some() {
             None
         } else {
-            match types.index(&s.kind) {
-                Some(k) => Some(k),
-                None => {
-                    if !self.unknown.contains(&s.kind) {
-                        self.unknown.push(s.kind.clone());
-                        tracing::warn!("particle type {} has no atlas sprites; skipped", s.kind);
+            // A NoRenderParticle type (`HugeExplosionSeedParticle`) has no sprites and no
+            // provider sprite set in vanilla either; the sentinel index is never read
+            // (the snapshot skips no-render particles before it looks anything up).
+            if ParticleBehaviour::of(&s.kind).no_render {
+                Some(u32::MAX)
+            } else {
+                match types.index(&s.kind) {
+                    Some(k) => Some(k),
+                    None => {
+                        if !self.unknown.contains(&s.kind) {
+                            self.unknown.push(s.kind.clone());
+                            tracing::warn!(
+                                "particle type {} has no atlas sprites; skipped",
+                                s.kind
+                            );
+                        }
+                        return;
                     }
-                    return;
                 }
             }
         };
@@ -152,7 +174,7 @@ impl Particles {
             }
             let speed = Vec3::from(s.offset) * Vec3::from(s.max_speed);
             match (kind, terrain) {
-                (Some(kind), _) => self.push(kind, behaviour, s.pos, speed, s.dust),
+                (Some(kind), _) => self.push(kind, behaviour, s.pos, speed, s.dust, s.color),
                 (None, Some(sprite)) => self.push_terrain(&sprite, s.pos, speed, 1.0, None, tint),
                 (None, None) => {}
             }
@@ -198,7 +220,7 @@ impl Particles {
                 };
                 if within_limiter(pos) {
                     match (kind, terrain) {
-                        (Some(kind), _) => self.push(kind, behaviour, pos, speed, s.dust),
+                        (Some(kind), _) => self.push(kind, behaviour, pos, speed, s.dust, s.color),
                         (None, Some(sprite)) => {
                             self.push_terrain(&sprite, pos, speed, 1.0, None, tint)
                         }
@@ -216,6 +238,7 @@ impl Particles {
         pos: DVec3,
         speed: Vec3,
         dust: Option<DustOption>,
+        color: Option<i32>,
     ) {
         if self.pool.len() >= MAX_PARTICLES {
             return;
@@ -230,7 +253,23 @@ impl Particles {
             lifetime *= dust_scale;
             quad *= dust_scale;
         }
-        let color = spawn_color(behaviour, dust, &mut self.rng);
+        // A `ColorParticleOption` replaces the type's colour (its sRGB bytes decoded to the
+        // linear RGB the sRGB target encodes back at output) and carries the option's own
+        // alpha (`SpellParticle.MobEffectProvider`'s `setAlpha`).
+        let (color, alpha) = match color {
+            Some(argb) => (
+                crate::sky::linear([
+                    ((argb >> 16) & 0xFF) as f32 / 255.0,
+                    ((argb >> 8) & 0xFF) as f32 / 255.0,
+                    (argb & 0xFF) as f32 / 255.0,
+                ]),
+                ((argb >> 24) & 0xFF) as f32 / 255.0,
+            ),
+            None => (
+                spawn_color(behaviour, dust, &mut self.rng),
+                behaviour.alpha.unwrap_or(1.0),
+            ),
+        };
         // `Particle`'s speed constructor: the packet speed inside a ±0.4 jitter per axis,
         // rescaled to `(r+r+1) * 0.15` and lifted by 0.1 on y.
         let jittered = {
@@ -286,6 +325,33 @@ impl Particles {
             Motion::Damped { keep, lift } => {
                 Vec3::new(speed.x * keep, speed.y * keep + lift, speed.z * keep)
             }
+            // `SpellParticle`: the drift replaces the packet's x/z speeds before the speed
+            // constructor's jitter, then y is damped and a zero packet x/z speed damps the
+            // drift to a tenth.
+            Motion::Spell => {
+                let base = Vec3::new(
+                    0.5 - self.rng.next_f32(),
+                    speed.y,
+                    0.5 - self.rng.next_f32(),
+                );
+                let mut v = base
+                    + Vec3::new(
+                        (self.rng.next_f32() * 2.0 - 1.0) * 0.4,
+                        (self.rng.next_f32() * 2.0 - 1.0) * 0.4,
+                        (self.rng.next_f32() * 2.0 - 1.0) * 0.4,
+                    );
+                let scale = (self.rng.next_f32() + self.rng.next_f32() + 1.0) * 0.15;
+                let len = v.length();
+                if len > 0.0 {
+                    v *= scale * 0.4 / len;
+                }
+                v.y = v.y * 0.2 + 0.02;
+                if speed.x == 0.0 && speed.z == 0.0 {
+                    v.x *= 0.1;
+                    v.z *= 0.1;
+                }
+                v
+            }
         };
         let state = ParticleState {
             kind,
@@ -297,6 +363,7 @@ impl Particles {
             behaviour: *behaviour,
             quad,
             color,
+            alpha,
             portal_start: pos,
             block_sprite: None,
         };
@@ -310,8 +377,10 @@ impl Particles {
     /// One 20 Hz step: expire, then move. The renderer interpolates between `prev_pos` and
     /// `pos` within the tick. Vanilla's `Particle.tick` order: `yd -= 0.04 * gravity`, move,
     /// then `velocity *= friction`; `BubbleParticle`/`WaterDropParticle`/`SuspendedTownParticle`
-    /// override that with their own orders, modelled here by `behaviour`.
-    pub fn tick(&mut self) {
+    /// override that with their own orders, modelled here by `behaviour`. `camera` is the
+    /// eye position the seed particles' children are limiter-checked against.
+    pub fn tick(&mut self, camera: DVec3) {
+        self.camera = camera;
         let mut i = 0;
         while i < self.pool.len() {
             if self.tick_one(i) {
@@ -322,6 +391,16 @@ impl Particles {
                 self.pool.swap(i, last);
                 self.pool.truncate(last);
             }
+        }
+        // The seed particles' children, appended after the tick loop like vanilla's
+        // `particlesToAdd` (they are not stepped this tick).
+        if !self.seed_children.is_empty() {
+            let mut children = std::mem::take(&mut self.seed_children);
+            for child in &children {
+                self.spawn(child, self.camera, None);
+            }
+            children.clear();
+            self.seed_children = children;
         }
     }
 
@@ -334,6 +413,33 @@ impl Particles {
         }
         p.prev_pos = p.pos;
         let b = p.behaviour;
+        if b.no_render {
+            // HugeExplosionSeedParticle.tick: six `explosion` particles per tick at ±4
+            // around the seed, each one's size this tick's age/lifetime (0-based, the
+            // increment above undone). They are queued and appended after the tick loop,
+            // like vanilla's `particlesToAdd`.
+            let (x, y, z) = (p.pos.x, p.pos.y, p.pos.z);
+            let size = (p.age - 1.0) / p.lifetime;
+            for _ in 0..6 {
+                self.seed_children.push(ParticleSpawn {
+                    kind: Identifier::minecraft("explosion"),
+                    pos: DVec3::new(
+                        x as f64 + (self.rng.next_f64() - self.rng.next_f64()) * 4.0,
+                        y as f64 + (self.rng.next_f64() - self.rng.next_f64()) * 4.0,
+                        z as f64 + (self.rng.next_f64() - self.rng.next_f64()) * 4.0,
+                    ),
+                    offset: [size, 0.0, 0.0],
+                    max_speed: [1.0, 0.0, 0.0],
+                    count: 0,
+                    randomization: 0,
+                    override_limiter: false,
+                    dust: None,
+                    color: None,
+                    block_state: None,
+                });
+            }
+            return true;
+        }
         if b.portal_motion {
             // PortalParticle.tick: pos = start + vel * (-p + 2p²) with p = age/lifetime,
             // and y lifted by the remaining fraction; no gravity, no friction.
@@ -377,8 +483,9 @@ impl Particles {
 }
 
 /// The spawn colour: the behaviour's base, its spawn-time jitter (`BaseAshSmokeParticle`'s
-/// grey, `CritParticle`'s bright grey), the `dust` option colour, and finally any scale
-/// (`enchanted_hit`).
+/// grey, `CritParticle`'s bright grey), the `dust` option colour and finally any scale
+/// (`enchanted_hit`). A `ColorParticleOption` colour never reaches here — `push` replaces
+/// the whole colour (and alpha) with the option's.
 pub(super) fn spawn_color(
     behaviour: &ParticleBehaviour,
     dust: Option<DustOption>,

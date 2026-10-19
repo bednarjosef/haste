@@ -254,6 +254,7 @@ impl Particles {
             },
             quad,
             color: tint,
+            alpha: 1.0,
             portal_start: pos,
             block_sprite: Some(sub),
         };

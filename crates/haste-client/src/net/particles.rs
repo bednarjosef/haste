@@ -70,6 +70,7 @@ impl Session {
         };
         let dust = dust_option(&kind, &p.particle.data);
         let block_state = block_state_option(&kind, &p.particle.data);
+        let color = color_option(&kind, &p.particle.data);
         self.particle_spawns.push(haste_render::ParticleSpawn {
             kind,
             pos: p.pos,
@@ -79,6 +80,7 @@ impl Session {
             randomization: p.randomization.max(0) as u32,
             override_limiter: p.override_limiter,
             dust,
+            color,
             block_state,
         });
     }
@@ -86,7 +88,7 @@ impl Session {
 
 /// `DustParticleOptions` from a particle's raw data (the ARGB colour int, then the size
 /// scale f32); `None` for every other type and for a malformed payload.
-fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOption> {
+pub(super) fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOption> {
     if kind.path() != "dust" || data.len() < 8 {
         return None;
     }
@@ -106,7 +108,10 @@ fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOptio
 /// `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`); `None` for every other
 /// type and for a malformed payload. The fall-damage landing particles
 /// (`LivingEntity.checkFallDamage` -> `sendParticles`) arrive this way.
-fn block_state_option(kind: &Identifier, data: &[u8]) -> Option<haste_core::BlockStateId> {
+pub(super) fn block_state_option(
+    kind: &Identifier,
+    data: &[u8],
+) -> Option<haste_core::BlockStateId> {
     const BLOCK_KINDS: [&str; 5] = [
         "block",
         "block_marker",
@@ -126,4 +131,14 @@ fn block_state_option(kind: &Identifier, data: &[u8]) -> Option<haste_core::Bloc
         }
     }
     None
+}
+
+/// `entity_effect`'s `ColorParticleOption` from a particle's raw data (one ARGB int, colour
+/// and alpha; `SpellParticle.MobEffectProvider` tints the particle with it); `None` for
+/// every other type and for a malformed payload.
+fn color_option(kind: &Identifier, data: &[u8]) -> Option<i32> {
+    if kind.path() != "entity_effect" || data.len() < 4 {
+        return None;
+    }
+    Some(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))
 }

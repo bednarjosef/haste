@@ -23,6 +23,7 @@ pub mod overlay;
 pub mod panorama;
 pub mod particles;
 pub mod pipeline;
+pub mod quad_format;
 pub mod renderer;
 pub mod section_slab;
 pub mod sky;
@@ -38,7 +39,7 @@ pub use blockentity::{
     BlockEntityInstance, BlockEntityKind, ChestHalf, ChestMaterial, GatewayBeam, PistonData,
     PotSherds, SignSideText, SignTextData,
 };
-pub use entity::{EntityRenderer, FirstPerson, Nametag, TickPair};
+pub use entity::{EntityRenderer, FirstPerson, MapData, MapMarker, Nametag, TickPair};
 pub use fog::{
     frame_fog, setup_fog, BiomeFog, DimensionFog, FogData, FogEnvironment, FogInputs, FogType,
 };
@@ -50,6 +51,7 @@ pub use particles::{
     ParticleTypes, ParticleView, Particles, MAX_PARTICLES,
 };
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
+pub use quad_format::{set_terrain_format_quad, PackedGeneral, PackedQuad, QuadInstance, SpanKind};
 pub use renderer::SectionLoadState;
 pub use renderer::{
     Camera, FrameInput, FrameStats, LightmapFrame, PremeshMode, Renderer, SkyState, ViewBob,

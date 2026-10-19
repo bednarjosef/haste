@@ -342,6 +342,7 @@ fn invisible_item_frame_offscreen() {
                 rotation: 0,
                 glow: false,
                 item,
+                map_id: None,
             },
         )
     };

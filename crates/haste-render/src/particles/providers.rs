@@ -47,6 +47,9 @@ pub(super) struct ParticleBehaviour {
     pub(super) speed_up_when_blocked: bool,
     /// `CritParticle` runs one tick in its constructor.
     pub(super) tick_at_spawn: bool,
+    /// `NoRenderParticle` subclasses (`HugeExplosionSeedParticle`): the type has no
+    /// atlas sprites and draws nothing; its tick is the behaviour's own instead.
+    pub(super) no_render: bool,
     /// Full light (`HugeExplosionParticle.getLightCoords` returns 15728880).
     pub(super) full_light: bool,
     /// `PortalParticle`'s spiral path instead of the generic integration.
@@ -83,6 +86,7 @@ impl ParticleBehaviour {
         },
         speed_up_when_blocked: false,
         tick_at_spawn: false,
+        no_render: false,
         full_light: false,
         portal_motion: false,
     };
@@ -289,6 +293,30 @@ impl ParticleBehaviour {
                 color_fade: [1.0, 0.96, 0.9],
                 ..ParticleBehaviour::DEFAULT
             },
+            // SpellParticle.MobEffectProvider (entity_effect) and SpellParticle.Provider
+            // (effect, always white — the provider ignores the option's colour): friction
+            // 0.96, gravity -0.1, life (int)(8/(r*0.8+0.2)) = 8..=40, quad 0.75x, the option's
+            // colour on entity_effect (a tipped arrow's trail), no collision, the spell drift
+            // for velocity.
+            "entity_effect" | "effect" => &ParticleBehaviour {
+                source: "SpellParticle",
+                gravity: -0.1,
+                friction: 0.96,
+                lifetime: Lifetime::Rolled {
+                    base: 8.0,
+                    low: 0.2,
+                    scale: 1.0,
+                    add: 0.0,
+                    min: 1.0,
+                },
+                quad: Quad::Default {
+                    scale: 0.75,
+                    lo: 1.0,
+                    hi: 1.0,
+                },
+                motion: Motion::Spell,
+                ..ParticleBehaviour::DEFAULT
+            },
             // enchanted_hit is CritParticle.MagicProvider (rCol 0.3x, gCol 0.8x).
             "enchanted_hit" => &ParticleBehaviour {
                 source: "CritParticle.MagicProvider",
@@ -468,6 +496,16 @@ impl ParticleBehaviour {
                 color_jitter: Some((0.4, 1.0)),
                 motion: Motion::None,
                 full_light: true,
+                ..ParticleBehaviour::DEFAULT
+            },
+            // HugeExplosionSeedParticle (explosion_emitter, a NoRenderParticle): life 8,
+            // no quad of its own — every tick it spawns six `explosion` particles at ±4
+            // around itself, their size this tick's age/lifetime (see the engine's tick).
+            "explosion_emitter" => &ParticleBehaviour {
+                source: "HugeExplosionSeedParticle",
+                lifetime: Lifetime::Fixed(8),
+                motion: Motion::None,
+                no_render: true,
                 ..ParticleBehaviour::DEFAULT
             },
             // NoteParticle: friction 0.66, life 6, quad 1.5x, the jittered velocity damped

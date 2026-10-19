@@ -9,8 +9,9 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
-    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
-    ModelPart, PaintingDecoration, PoseOverrides, ThrownItemDecoration,
+    ArrowDecoration, BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance,
+    FallingBlockDecoration, ItemFrameDecoration, ModelPart, PaintingDecoration, PoseOverrides,
+    PrimedTntDecoration, ThrownItemDecoration,
 };
 use haste_core::parts::{self, PartId};
 use haste_core::view::BlockView;
@@ -18,19 +19,30 @@ use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;
 
+mod arrow;
 mod atlas;
 mod block_entities;
+mod block_model;
 mod boat;
 mod cape;
 mod dragon_fireball;
 mod equipment;
 mod experience_orb;
+mod falling_block;
 mod first_person;
 mod flame;
 #[cfg(test)]
 mod flame_tests;
 mod item;
+mod item_entity;
 mod item_frame;
+pub mod map;
+mod map_color;
+#[cfg(test)]
+mod map_color_tests;
+mod map_decoration_types;
+#[cfg(test)]
+mod map_tests;
 mod minecart;
 #[cfg(test)]
 mod minecart_tests;
@@ -44,16 +56,18 @@ mod tests;
 mod thrown_item;
 #[cfg(test)]
 mod thrown_item_tests;
+mod tnt;
 
+mod armor_stand;
 mod hand;
 mod humanoid;
 mod item_display;
 mod model_parts;
 mod vertex;
 
+pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matrix};
 #[cfg(test)]
-use hand::{arm_matrix, arm_model, hand_root_matrix, item_arm_matrix};
-pub(crate) use hand::{custom_head_layer_matrix, held_item_layer_matrix};
+use hand::{arm_model, hand_root_matrix, item_arm_matrix};
 pub(crate) use humanoid::{elytra_model, humanoid_armor};
 use humanoid::{missing_item_model, missing_texture, placeholder_texture};
 use item_display::item_model_bbox;
@@ -61,15 +75,18 @@ pub(crate) use item_display::{
     argb_linear, item_display_matrix, item_frame_item_transform, item_frame_transform,
     painting_transform,
 };
+pub use map::{MapData, MapMarker};
 pub(crate) use model_parts::{
     aabb_in_frustum, emit_part, emit_part_tinted, model_extents, model_top, part_matrix,
+    pose_without_hidden,
 };
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
 pub(crate) use vertex::{
-    entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_world_quad,
+    entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_flat_quad,
+    push_world_quad,
 };
-pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
+pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha, EntityVertex};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
@@ -87,29 +104,12 @@ pub fn should_render_at_sqr_distance(
     dist_sq < f64::from(limit * limit)
 }
 
+pub(crate) use item_entity::{
+    item_entity_bob, item_entity_copies, item_entity_lift, item_entity_spin,
+};
+
 /// Vanilla renders the player model at 15/16 scale.
 const PLAYER_SCALE: f32 = 0.9375;
-
-/// Dropped items spin about the vertical axis: `ItemEntity.getSpin`, the age in ticks
-/// (plus the partial tick) over 20, plus the entity's random phase, in radians.
-pub(crate) fn item_entity_spin(age: f32, bob_offs: f32) -> f32 {
-    age / 20.0 + bob_offs
-}
-
-/// ... and bob up and down: `ItemEntityRenderer.submit`'s
-/// `sin(age / 10 + phase) * 0.1 + 0.1` blocks, on top of the lift that puts the
-/// model's bounding box above the ground (see `item_entity_lift`).
-pub(crate) fn item_entity_bob(age: f32, bob_offs: f32) -> f32 {
-    ((age / 10.0 + bob_offs).sin()) * 0.1 + 0.1
-}
-
-/// The lift `ItemEntityRenderer.submit` applies so the model's bounding box sits above
-/// the ground: `-bbox.minY + 1/16`. The bounding box is the model drawn through its
-/// `display.ground` transform (which carries vanilla's 0.5/0.25 ground scales), so no
-/// extra scale is applied here.
-pub(crate) fn item_entity_lift(bbox_min_y: f32) -> f32 {
-    -bbox_min_y + 1.0 / 16.0
-}
 
 /// Which of vanilla's `ItemDisplayContext`s an item is drawn through: the `display`
 /// section of the model it names (firstperson_righthand for the held item, fixed for
@@ -128,19 +128,6 @@ pub enum ItemDisplay {
     Ground,
     /// `on_shelf` (`ShelfRenderer`: items on a shelf block, small and sunk into the board).
     OnShelf,
-}
-
-/// How many copies of the item a stack draws: `ItemClusterRenderState
-/// .getRenderedAmount` — 1 for a single item, then one more per full 16 of the count,
-/// up to 5.
-pub(crate) fn item_entity_copies(count: i32) -> u32 {
-    match count {
-        ..=1 => 1,
-        2..=16 => 2,
-        17..=32 => 3,
-        33..=48 => 4,
-        _ => 5,
-    }
 }
 
 /// The per-entity phase `ItemEntity.bobOffs` stands in for: vanilla draws it from the
@@ -180,28 +167,6 @@ pub(crate) fn append_upload_range(
     } else {
         start..len
     }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct EntityVertex {
-    pub pos: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
-    pub rect: [u16; 4],
-    /// Light levels for the vanilla light texture: block, sky, unused, unused.
-    pub light: [u16; 4],
-}
-
-impl EntityVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4, 4 => Uint16x4
-    ];
-    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<EntityVertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &Self::ATTRIBUTES,
-    };
 }
 
 /// The texture an instance is drawn with and its model scale: players (haste-entity's
@@ -299,14 +264,20 @@ pub struct EntityRenderer {
     hand: Vec<EntityVertex>,
     item_names: Vec<Identifier>,
     item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
-    /// The first-person arm model, by [`FirstPerson::slim`] and [`FirstPerson::sleeve`]
-    /// (built once on first use).
-    arm_models: [Option<Arc<CubeModel>>; 4],
+    /// The first-person arm models, by left, [`FirstPerson::slim`] and
+    /// [`FirstPerson::sleeve`] (built once on first use; the left arm serves the two-handed
+    /// map pose).
+    arm_models: [Option<Arc<CubeModel>>; 8],
     /// The item frame block model quads, by `(glow, map)`, built once on first use.
     frame_models: HashMap<(bool, bool), Arc<Vec<haste_assets::BakedQuad>>>,
     /// The moving pistons' moved-block quads, by the state string (resolved once per state a
     /// piston ever moves).
     piston_quads: ahash::AHashMap<String, Option<Arc<Vec<crate::blockentity::PistonQuad>>>>,
+    /// The terrain's baked block models and its atlas: the moving-block path
+    /// (`FallingBlockRenderer`, `TntRenderer` — see `entity/block_model.rs`) draws block
+    /// states through them, textures resolved into the entity atlas like the piston's.
+    baked: Arc<haste_assets::BakedBlockModels>,
+    terrain_atlas: Arc<haste_assets::AtlasBuilder>,
     /// The minecarts' display-block geometry, by state id (resolved once per state a cart
     /// ever shows; vanilla's `BlockModelResolver` caches the same way).
     minecart_quads: ahash::AHashMap<u32, Option<Arc<minecart::DisplayGeometry>>>,
@@ -339,6 +310,15 @@ pub struct EntityRenderer {
     /// Equipment asset info (`equipment/<asset>.json`), by asset id, loaded once (`None` for an
     /// asset that failed to load, so it is not retried every frame).
     equipment_infos: HashMap<Identifier, Option<Arc<haste_assets::EquipmentInfo>>>,
+    /// The maps to draw (`MapTextureManager`'s data side): published by the client through an
+    /// `Arc` swap whenever a map's packets changed it.
+    maps: Arc<HashMap<i32, map::MapData>>,
+    /// Each drawn map's atlas entry (see `map::MapTexture`).
+    map_textures: HashMap<i32, map::MapTexture>,
+    /// Each map decoration type's sprite rectangle, resolved once (`None`: no sprite).
+    map_decoration_rects: HashMap<u32, Option<[u32; 4]>>,
+    /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
+    map_decoration_names: Vec<Identifier>,
     pub drawn: u32,
 }
 
@@ -381,7 +361,14 @@ impl EntityRenderer {
             let (size, half) = model_extents(&e.model.root);
             let rel = e.pos - camera;
             let dist2 = rel.length_squared();
-            if !should_render_at_sqr_distance(size, e.scale, dist2, view_scale) {
+            // `AbstractArrow.shouldRenderAtSqrDistance` overrides the generic limit with the
+            // bounding box diagonal times ten, so arrows stay visible much farther out.
+            let visible = if matches!(&e.decoration, Some(Decoration::Arrow(_))) {
+                arrow::arrow_should_render(dist2, e.width, e.height, view_scale)
+            } else {
+                should_render_at_sqr_distance(size, e.scale, dist2, view_scale)
+            };
+            if !visible {
                 continue;
             }
             if !aabb_in_frustum(frustum, rel, half + 0.5) {
@@ -428,6 +415,13 @@ impl EntityRenderer {
                         orientation,
                         assets,
                     ),
+                    Decoration::Arrow(a) => self.emit_arrow(e, a, camera, light, assets),
+                    // Vanilla `FallingBlockRenderer` / `TntRenderer`: the entity's block
+                    // state drawn as the block model (see the renderer modules).
+                    Decoration::FallingBlock(f) => {
+                        self.emit_falling_block(e, f, camera, light, assets)
+                    }
+                    Decoration::PrimedTnt(t) => self.emit_primed_tnt(e, t, camera, light, assets),
                 }
                 // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer —
                 // a burning small fireball carries its `displayFireAnimation` flames on top
@@ -472,17 +466,33 @@ impl EntityRenderer {
             // entities still wear armour and hold items.
             if !e.invisible {
                 let rect = self.texture_rect(&texture, assets);
-                emit_part_tinted(
-                    &mut self.vertices,
-                    &e.model,
-                    &e.model.root,
-                    &e.pose,
-                    root,
-                    rect,
-                    light,
-                    e.hurt,
-                    [1.0; 3],
-                );
+                // A small armour stand's model is authored with big cubes and small pivots;
+                // its root children go through the small layer's per-part scale (heads 3/4,
+                // the rest 1/2, about each pivot), which the cubes' UV layout needs vanilla's
+                // original sizes for.
+                if armor_stand::small_of(&e.model).is_some() {
+                    armor_stand::emit_small_body(
+                        &mut self.vertices,
+                        &e.model,
+                        &e.pose,
+                        root,
+                        rect,
+                        light,
+                        e.hurt,
+                    );
+                } else {
+                    emit_part_tinted(
+                        &mut self.vertices,
+                        &e.model,
+                        &e.model.root,
+                        &e.pose,
+                        root,
+                        rect,
+                        light,
+                        e.hurt,
+                        [1.0; 3],
+                    );
+                }
                 // Overlay layers: the same transform and pose, each with its own texture and
                 // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
                 for overlay in e.overlays.iter().flatten() {
@@ -553,11 +563,6 @@ impl EntityRenderer {
                 bytemuck::cast_slice(&self.mask_vertices),
             );
         }
-    }
-    /// Item registry names by protocol id (for the held item).
-    pub fn set_item_names(&mut self, names: Vec<Identifier>) {
-        self.item_names = names;
-        self.item_models.clear();
     }
 
     /// Draws into the main pass (camera bind group at group 0); the boats' water masks ride

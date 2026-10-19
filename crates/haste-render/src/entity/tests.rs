@@ -405,7 +405,7 @@ fn the_arm_sits_at_vanilla_rest_position() {
     // `PartPose` (-5, 2, 0) and its 0.1 rad z tilt: the hand ends up right of the view
     // centre, below it and in front of the camera, reaching down and forward.
     let m = arm_matrix(&still_hand(), 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
-    let model = arm_model(false, true);
+    let model = arm_model(false, true, false);
     let mut out = Vec::new();
     emit_part_tinted(
         &mut out,
@@ -441,8 +441,8 @@ fn the_arm_sits_at_vanilla_rest_position() {
     let mut out2 = Vec::new();
     emit_part_tinted(
         &mut out2,
-        &arm_model(false, true),
-        &arm_model(false, true).root,
+        &arm_model(false, true, false),
+        &arm_model(false, true, false).root,
         &PoseOverrides::default(),
         swung,
         [0, 0, 64, 64],
@@ -680,7 +680,7 @@ fn the_hand_lags_behind_the_camera_turn() {
 #[test]
 fn the_arm_model_is_the_player_models_right_arm() {
     // `HumanoidModel.createMesh` + `PlayerModel.createMesh` + `AvatarRenderer.renderHand`.
-    let wide = arm_model(false, true);
+    let wide = arm_model(false, true, false);
     assert_eq!(wide.root.pivot, Vec3::new(-5.0, 2.0, 0.0));
     assert_eq!(wide.root.rotation, Vec3::new(0.0, 0.0, 0.1));
     let cube = &wide.root.cubes[0];
@@ -692,26 +692,24 @@ fn the_arm_model_is_the_player_models_right_arm() {
     assert_eq!(sleeve.cubes[0].uv, [40, 32]);
     assert_eq!(sleeve.cubes[0].inflate, 0.25);
     // Slim: a 3 px arm one pixel to the right.
-    let slim = arm_model(true, true);
+    let slim = arm_model(true, true, false);
     assert_eq!(slim.root.cubes[0].origin, Vec3::new(-2.0, -2.0, -2.0));
     assert_eq!(slim.root.cubes[0].size, Vec3::new(3.0, 12.0, 4.0));
 }
 
 /// `ItemInHandLayer.submitArmWithItem`: rotate X -90, rotate Y 180, translate
-/// (±1, 2, -10)/16 (adult). The left hand is the right hand offset to -1 in x.
+/// (±1, 2, -10) model units (vanilla's `/16` on its block-space pose stack; adult). The left
+/// hand is the right hand offset to -1 in x.
 #[test]
 fn the_held_item_layer_transform_is_vanillas() {
     let deg = |d: f32| d.to_radians();
-    let right = held_item_layer_matrix(false);
-    let mut want = Mat4::from_rotation_x(deg(-90.0));
-    want *= Mat4::from_rotation_y(deg(180.0));
-    want *= Mat4::from_translation(Vec3::new(1.0 / 16.0, 2.0 / 16.0, -10.0 / 16.0));
-    assert!(close(right, want, 1e-6));
-    let left = held_item_layer_matrix(true);
-    let mut want_left = Mat4::from_rotation_x(deg(-90.0));
-    want_left *= Mat4::from_rotation_y(deg(180.0));
-    want_left *= Mat4::from_translation(Vec3::new(-1.0 / 16.0, 2.0 / 16.0, -10.0 / 16.0));
-    assert!(close(left, want_left, 1e-6));
+    let want = |x: f32| {
+        Mat4::from_rotation_x(deg(-90.0))
+            * Mat4::from_rotation_y(deg(180.0))
+            * Mat4::from_translation(Vec3::new(x, 2.0 / 16.0, -10.0 / 16.0))
+    };
+    assert!(close(held_item_layer_matrix(false), want(1.0 / 16.0), 1e-6));
+    assert!(close(held_item_layer_matrix(true), want(-1.0 / 16.0), 1e-6));
 }
 
 /// `ItemTransform.apply(true, ...)`: the left-hand item negates translation.x and

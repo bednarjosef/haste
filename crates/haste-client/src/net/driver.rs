@@ -155,7 +155,16 @@ impl NetDriver {
     ) -> anyhow::Result<()> {
         match world.physics() {
             Some((view, data)) => {
-                entities.tick_in_world(&super::item_world::ItemWorldView { view, data })
+                // The client-side entity motion (`ItemEntity.tick`, `AbstractArrow.tick`) and
+                // the arrows' own particle requests this tick (`Arrow.makeParticle`, the
+                // crit trail), drained by the game thread's particle step.
+                let mut arrow_particles = std::mem::take(&mut self.session.arrow_particles);
+                entities.tick_in_world(
+                    &super::item_world::ItemWorldView { view, data },
+                    &super::arrow_world::ArrowWorldView { view, data },
+                    &mut arrow_particles,
+                );
+                self.session.arrow_particles = arrow_particles;
             }
             None => entities.tick(),
         }

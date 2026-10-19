@@ -259,6 +259,18 @@ impl Renderer {
         };
         let pipeline_solid = make_pipeline("chunk-solid", "fs_main", None);
         let pipeline_cutout = make_pipeline("chunk-cutout", "fs_cutout", None);
+        // The quad-pulling pipelines (`--terrain-format quad`): the same
+        // fragment stages, but the vertex stage reads one record per quad
+        // from the arena storage buffers (group 3, bound per arena) and the
+        // only vertex buffer is the instance-rate draw data.
+        let quad = super::quad_pipelines::make(
+            &gpu.device,
+            &shader,
+            surface_format,
+            &camera_bind_group_layout,
+            &atlas_bind_group_layout,
+            &lightmap_bind_group_layout,
+        );
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
             "fs_translucent",
@@ -316,10 +328,15 @@ impl Renderer {
             // No face-skip rules until then (installed with `set_shapes`).
             Arc::new(crate::mesher::SkipTable::absent()),
         ));
-        let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
+        let arenas = MeshArenas::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            Some(quad.bind_group_layout),
+        );
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
         let indirect_buffer = Self::make_indirect_buffer(&gpu.device, 4096);
+        let quad_instance_buffer = Self::make_quad_instance_buffer(&gpu.device, 4096);
 
         // GUI: the font (with unifont when the assets index has it) and a renderer drawing into
         // a non-sRGB view of the target so blending happens on sRGB values like vanilla.
@@ -338,6 +355,8 @@ impl Renderer {
             &lightmap_bind_group_layout,
             font.clone(),
             assets,
+            baked.clone(),
+            atlas.clone(),
         );
         let sky = crate::sky::SkyRenderer::new(
             gpu.device.clone(),
@@ -425,6 +444,8 @@ impl Renderer {
             premesh: super::premesh::Premesh::new(),
             work_budget: super::work_budget::WorkBudget::new(),
             premesh_hold: std::collections::VecDeque::new(),
+            premesh_saturated_since: None,
+            premesh_gated: false,
             camera_spectator: false,
             cull_sections: true,
             visible_for: None,
@@ -444,6 +465,10 @@ impl Renderer {
             origins: Vec::new(),
             origin_buffer,
             origin_capacity: 4096,
+            quad_instances: Vec::new(),
+            quad_instance_buffer,
+            quad_instance_capacity: 4096,
+            quad_pattern_index: quad.pattern_index,
             indirect: Vec::new(),
             indirect_buffer,
             indirect_capacity: 4096,
@@ -461,6 +486,9 @@ impl Renderer {
             pipeline_solid,
             pipeline_cutout,
             pipeline_translucent,
+            quad_pipeline_solid: quad.solid,
+            quad_pipeline_cutout: quad.cutout,
+            quad_pipeline_translucent: quad.translucent,
             depth: None,
             size,
             gui,

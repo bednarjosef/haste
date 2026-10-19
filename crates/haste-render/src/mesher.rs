@@ -38,14 +38,20 @@ use merge::{
 use sink::{layer_index, MeshSink};
 use snapshot::{Cell, EXT};
 
+pub use sink::QuadSpan;
 pub use sink::SectionLayerMesh;
 
 /// One section's meshed geometry, split by render layer.
 pub struct SectionMesh {
     pub pos: SectionPos,
-    /// Vertices shared by all layers (section-local packed).
+    /// Vertices shared by all layers (empty in the quad format).
     pub vertices: Vec<PackedVertex>,
-    /// Layers in draw order; indices reference `vertices`.
+    /// Rect quad records (quad format only).
+    pub quads: Vec<crate::quad_format::PackedQuad>,
+    /// General quad records (quad format only): cross planes, tilted fluids
+    /// and split merged rectangles' fan triangles.
+    pub generals: Vec<crate::quad_format::PackedGeneral>,
+    /// Layers in draw order: indexed (vertex format) or spans (quad format).
     pub layers: Vec<sink::SectionLayerMesh>,
     /// Section-local AABB (min/max in blocks) for frustum culling.
     pub aabb: ([f32; 3], [f32; 3]),
@@ -53,7 +59,7 @@ pub struct SectionMesh {
     pub visibility: crate::occlusion::VisibilitySet,
     /// Set only by [`SectionMesh::removed`]: the chunk is gone, so the renderer frees the
     /// section. An ordinary mesh with no geometry (air, or solid stone with every face
-    /// hidden) is not a removal: it keeps its visibility entry for cave culling.
+    /// hidden) is not a removal: it keeps its visibility entry.
     pub removed: bool,
 }
 
@@ -64,6 +70,8 @@ impl SectionMesh {
         SectionMesh {
             pos,
             vertices: Vec::new(),
+            quads: Vec::new(),
+            generals: Vec::new(),
             layers: Vec::new(),
             aabb: ([0.0; 3], [0.0; 3]),
             visibility: crate::occlusion::VisibilitySet::none(),
@@ -75,16 +83,6 @@ impl SectionMesh {
     /// (a forgotten chunk).
     pub fn is_removal(&self) -> bool {
         self.removed
-    }
-
-    /// GPU bytes the vertices will occupy in an arena.
-    pub fn vertex_bytes(&self) -> u64 {
-        (self.vertices.len() as u64) * std::mem::size_of::<PackedVertex>() as u64
-    }
-
-    /// GPU bytes the indices will occupy in an arena.
-    pub fn index_bytes(&self) -> u64 {
-        self.layers.iter().map(|l| l.indices.len() as u64 * 4).sum()
     }
 }
 
@@ -491,11 +489,13 @@ pub fn mesh_section_with(
 
         // The section's final output: the sink concatenates its buckets into
         // per-layer index vectors (see `MeshSink::take_layers`).
-        let (vertices, layers) = sink.take_layers();
+        let (vertices, quads, generals, layers) = sink.take_layers();
 
         SectionMesh {
             pos,
             vertices,
+            quads,
+            generals,
             layers,
             aabb: (sink.min, sink.max),
             visibility: crate::occlusion::section_visibility(snapshot, baked, pos),

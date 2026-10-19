@@ -64,6 +64,29 @@ pub(crate) fn pose_rotation(pose: &PoseOverrides, id: PartId) -> Option<Vec3> {
     pose.rotation_of(id)
 }
 
+/// The pose armour draws with: the body pose's rotations and pivot offsets copied onto a
+/// fresh `PoseOverrides`, with none of its hidden parts. Vanilla's armour layers draw their
+/// own models (`HumanoidArmorLayer`'s armour model set), so parts the body model hides — a
+/// player's hidden skin layers, an armour stand's hidden arms — still draw their armour.
+/// Walks the body model's tree (the armour models' parts are a subset of its ids); fixed-size
+/// state, no per-frame allocation.
+pub(crate) fn pose_without_hidden(body: &CubeModel, pose: &PoseOverrides) -> PoseOverrides {
+    fn walk(part: &ModelPart, from: &PoseOverrides, to: &mut PoseOverrides) {
+        if let Some(r) = from.rotation_of(part.id) {
+            to.set_rotation(part.id, r);
+        }
+        if let Some(o) = from.offset_of(part.id) {
+            to.set_offset(part.id, o);
+        }
+        for child in &part.children {
+            walk(child, from, to);
+        }
+    }
+    let mut p = PoseOverrides::default();
+    walk(&body.root, pose, &mut p);
+    p
+}
+
 /// The accumulated model matrix of a named part, the same transform `emit_part` gives it
 /// (`parent * translate(pivot) * R(z) R(y) R(x)`, pose overrides added to the base rotation and
 /// pivot), so

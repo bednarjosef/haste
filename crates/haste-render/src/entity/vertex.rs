@@ -1,7 +1,32 @@
-//! Shared entity vertex plumbing: the vertex buffer helper, textured quads, shading, hurt
-//! colours, name-tag and shadow-light curves.
+//! Shared entity vertex plumbing: the vertex type, the vertex buffer helper, textured quads,
+//! shading, hurt colours, name-tag and shadow-light curves.
 
 use super::*;
+
+/// One posed entity vertex: position (camera-relative, like the terrain), the atlas uv and
+/// clamping rect, the tint colour (alpha included), and the light levels for the vanilla
+/// light texture: block, sky, unused, unused.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct EntityVertex {
+    pub pos: [f32; 3],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+    pub rect: [u16; 4],
+    /// Light levels for the vanilla light texture: block, sky, unused, unused.
+    pub light: [u16; 4],
+}
+
+impl EntityVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4, 4 => Uint16x4
+    ];
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<EntityVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &Self::ATTRIBUTES,
+    };
+}
 
 pub(super) fn make_vertex_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
@@ -52,6 +77,37 @@ pub(crate) fn push_world_quad(
             pos: p[i].to_array(),
             uv: uv[i],
             color,
+            rect: r16,
+            light: [light.0 as u16, light.1 as u16, 0, 0],
+        });
+    }
+}
+
+/// One unshaded textured quad (`uv` 0..1 over `rect`) through `m`: the geometry vanilla's
+/// text render types draw (maps and their decorations — no normal, so no entity directional
+/// lighting, only the lightmap). The four corners come in vanilla's own order,
+/// counter-clockwise seen from the visible side, so the two triangles are emitted as given.
+pub(crate) fn push_flat_quad(
+    out: &mut Vec<EntityVertex>,
+    m: Mat4,
+    p: [Vec3; 4],
+    uv: [[f32; 2]; 4],
+    light: (u8, u8),
+    rect: [u32; 4],
+) {
+    let p = p.map(|v| m.transform_point3(v));
+    let uv = uv.map(|t| {
+        [
+            rect[0] as f32 + t[0] * rect[2] as f32,
+            rect[1] as f32 + t[1] * rect[3] as f32,
+        ]
+    });
+    let r16 = rect.map(|v| v as u16);
+    for i in [0usize, 1, 2, 0, 2, 3] {
+        out.push(EntityVertex {
+            pos: p[i].to_array(),
+            uv: uv[i],
+            color: [1.0, 1.0, 1.0, 1.0],
             rect: r16,
             light: [light.0 as u16, light.1 as u16, 0, 0],
         });

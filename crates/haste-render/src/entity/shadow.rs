@@ -6,6 +6,37 @@ use super::*;
 use haste_core::view::CollisionShapes;
 use std::sync::OnceLock;
 
+/// Whether the entity is eligible for a shadow at all: invisible entities never cast
+/// (`extractShadow` skips them), and a landed falling block is hidden entirely
+/// (`FallingBlockRenderer.shouldRender` skips the whole entity, its shadow included).
+/// Everything else casts with its renderer's `shadowRadius` — the `radius <= 0` gate below
+/// then draws nothing for the radius-0 types (armour stands, item frames, paintings, the
+/// bolt), exactly vanilla's per-renderer `state.shadowRadius`.
+fn shadow_eligible(e: &EntityInstance) -> bool {
+    !e.invisible
+        && !matches!(
+            e.decoration,
+            Some(Decoration::FallingBlock(FallingBlockDecoration {
+                landed: true,
+                ..
+            }))
+        )
+}
+
+/// The vertex alpha that darkens the sRGB main target like vanilla's gamma-space blend
+/// darkens its plain UNORM target. Vanilla's `ENTITY_SHADOW` (`BlendFunction.TRANSLUCENT`)
+/// blends the target's sRGB bytes, so a piece alpha `a` removes exactly `a` of them; Haste's
+/// main pass target is an sRGB format, whose blend multiplies linear light instead — the
+/// stored bytes come out as `1 - (1 - a)^(1/2.2)` of darkening, roughly half of vanilla's.
+/// Pre-distorting `a -> 1 - (1 - a)^2.2` makes the linear blend land on vanilla's bytes
+/// (within the sRGB curve's small linear toe).
+///
+/// The srgb-translucent-blend task plans to move the main target to byte-space blending,
+/// which would make this pre-distortion unnecessary — remove it then.
+pub fn srgb_shadow_alpha(alpha: f32) -> f32 {
+    1.0 - (1.0 - alpha).powf(2.2)
+}
+
 impl EntityRenderer {
     /// Vanilla `EntityRenderer.extractShadow`: the round `misc/shadow.png` quads on the full
     /// top faces below each entity. For every entity the shadow is a `shadowRadius` (capped at
@@ -37,11 +68,7 @@ impl EntityRenderer {
         let shadow_id = SHADOW_TEXTURE.get_or_init(|| Identifier::minecraft("misc/shadow"));
         let rect = self.texture_rect(shadow_id, assets);
         for e in entities {
-            // Minecarts draw a shadow like any entity (`AbstractMinecartRenderer`'s 0.7
-            // radius); the other decorations (item frames, paintings, orbs) do not.
-            let shadowless =
-                matches!(&e.decoration, Some(d) if !matches!(d, Decoration::Minecart(_)));
-            if Some(e.id) == skip || e.invisible || shadowless {
+            if Some(e.id) == skip || !shadow_eligible(e) {
                 continue;
             }
             let radius = e.shadow_radius.min(32.0);
@@ -88,6 +115,8 @@ impl EntityRenderer {
                         if alpha <= 0.0 {
                             continue;
                         }
+                        // The sRGB-target blend compensation (see `srgb_shadow_alpha`).
+                        let alpha = srgb_shadow_alpha(alpha);
                         let r = 2.0 * radius as f64;
                         let bx = x as f64;
                         let bz = z as f64;
@@ -149,5 +178,101 @@ impl EntityRenderer {
     /// Number of shadow quads batched for the last frame (6 vertices each); tests/reporting.
     pub fn shadow_quad_count(&self) -> usize {
         self.shadow_vertices.len() / 6
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use haste_core::model::{ExperienceOrbDecoration, FallingBlockDecoration, PrimedTntDecoration};
+    use haste_core::BlockStateId;
+
+    fn instance(decoration: Option<Decoration>, invisible: bool) -> EntityInstance {
+        EntityInstance {
+            id: EntityId(1),
+            model: haste_entity::models::box_for(1.0, 1.0),
+            pos: glam::DVec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            head_yaw: 0.0,
+            scale: 1.0,
+            pose: PoseOverrides::default(),
+            body: BodyTransform::default(),
+            body_scale: Vec3::ONE,
+            skin: None,
+            nametag: None,
+            below_name: None,
+            shadow_radius: 0.5,
+            shadow_strength: 1.0,
+            invisible,
+            display_fire: false,
+            width: 0.98,
+            height: 0.98,
+            is_discrete: false,
+            name_tag_y: 1.0,
+            hurt: 0.0,
+            light: (15, 0),
+            overlays: Default::default(),
+            item: None,
+            decoration,
+            hands: [None, None],
+            equipment: Vec::new(),
+            head_item: None,
+        }
+    }
+
+    #[test]
+    fn the_disc_centre_darkens_like_vanillas_gamma_blend() {
+        // The hovering sand of the offscreen scene: the camera 5.48 blocks away gives
+        // `pow` 0.8826, half a block above the floor `powerAtDepth` 0.6326, full daylight.
+        let b = lightmap_brightness(0.0, 15);
+        let piece = shadow_piece_alpha(0.6326, b);
+        assert!((piece - 0.3163).abs() < 1e-3, "piece alpha {piece}");
+        // Vanilla's `ENTITY_SHADOW` blends that alpha on its plain UNORM target, so the
+        // stored bytes darken by exactly it. Haste's sRGB target blends linear light, so
+        // the vertex alpha is pre-distorted and the stored bytes come out the same.
+        let vertex = srgb_shadow_alpha(piece);
+        assert!((vertex - 0.5669).abs() < 1e-3, "vertex alpha {vertex}");
+        let darkening = 1.0 - (1.0 - vertex).powf(1.0 / 2.2);
+        assert!((darkening - 0.3163).abs() < 1e-3, "darkening {darkening}");
+    }
+
+    #[test]
+    fn every_entity_is_shadow_eligible_except_the_hidden_ones() {
+        // Every renderer's `shadowRadius` reaches the pass (boats 0.8, minecarts 0.7,
+        // falling blocks and TNT 0.5, items and orbs 0.15; the radius-0 kinds draw
+        // nothing through the `radius <= 0` gate, not an exclusion here).
+        assert!(shadow_eligible(&instance(None, false)));
+        assert!(shadow_eligible(&instance(
+            Some(Decoration::FallingBlock(FallingBlockDecoration {
+                block_state: BlockStateId::AIR,
+                landed: false,
+            })),
+            false
+        )));
+        assert!(shadow_eligible(&instance(
+            Some(Decoration::PrimedTnt(PrimedTntDecoration {
+                block_state: BlockStateId::AIR,
+                fuse: 80.0,
+            })),
+            false
+        )));
+        assert!(shadow_eligible(&instance(
+            Some(Decoration::ExperienceOrb(ExperienceOrbDecoration {
+                value: 1,
+                age: 0.0,
+            })),
+            false
+        )));
+        // A landed falling block is hidden entirely (`shouldRender`), shadow included.
+        assert!(!shadow_eligible(&instance(
+            Some(Decoration::FallingBlock(FallingBlockDecoration {
+                block_state: BlockStateId::AIR,
+                landed: true,
+            })),
+            false
+        )));
+        // `Entity.isInvisible()`: no shadow (`extractShadow` skips it).
+        assert!(!shadow_eligible(&instance(None, true)));
     }
 }

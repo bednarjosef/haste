@@ -1,9 +1,27 @@
 //! The walk and hand-swing animation states (`LivingEntity.walkAnimation` and
-//! `LivingEntity.swingState`), moved out of the store so the store keeps only storage.
+//! `LivingEntity.swingState`), moved out of the store so the store keeps only storage, with
+//! the angle helpers the interpolation reads.
 
 /// `Mth.lerp`.
 pub(crate) fn lerp(delta: f32, start: f32, end: f32) -> f32 {
     start + delta * (end - start)
+}
+
+/// `Mth.rotLerp`.
+pub(crate) fn rot_lerp(delta: f32, start: f32, end: f32) -> f32 {
+    start + delta * wrap_degrees(end - start)
+}
+
+/// `Mth.wrapDegrees`.
+pub(crate) fn wrap_degrees(mut v: f32) -> f32 {
+    v %= 360.0;
+    if v >= 180.0 {
+        v -= 360.0;
+    }
+    if v < -180.0 {
+        v += 360.0;
+    }
+    v
 }
 
 /// Vanilla `WalkAnimationState`: the smoothed horizontal speed and the position that accumulates
@@ -141,5 +159,31 @@ impl SwingState {
     /// The swing animation type (0 none, 1 whack, 2 stab).
     pub fn animation_type(&self) -> i32 {
         self.animation
+    }
+}
+
+/// `LivingEntity.tick`'s body-rotation step: follow the horizontal movement direction, then
+/// `tickHeadTurn` (0.3 lerp, 50 degree head/body split). Pure move from `store.rs`.
+pub(crate) fn update_body_yaw(e: &mut crate::store::Entity, d: haste_core::DVec3) {
+    let mut target = e.body_yaw;
+    let side_dist = (d.x * d.x + d.z * d.z) as f32;
+    if side_dist > 0.002_500_000_2 {
+        let walk_direction = (d.z.atan2(d.x) as f32).to_degrees() - 90.0;
+        let diff = (crate::store::wrap_degrees(e.yaw) - walk_direction).abs();
+        target = if 95.0 < diff && diff < 265.0 {
+            walk_direction - 180.0
+        } else {
+            walk_direction
+        };
+    }
+    if e.swing.progress() > 0.0 {
+        target = e.yaw;
+    }
+    let body_delta = crate::store::wrap_degrees(target - e.body_yaw);
+    e.body_yaw += body_delta * 0.3;
+    let head_diff = crate::store::wrap_degrees(e.yaw - e.body_yaw);
+    let max_head = 50.0;
+    if head_diff.abs() > max_head {
+        e.body_yaw += head_diff - head_diff.signum() * max_head;
     }
 }

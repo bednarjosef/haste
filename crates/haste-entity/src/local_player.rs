@@ -79,7 +79,7 @@ impl Entity {
         } else {
             self.walk.stop();
         }
-        crate::store::update_body_yaw(self, d);
+        crate::walk_swing::update_body_yaw(self, d);
         // `LivingEntity.updateSwimAmount` (smoothed 0.09 per tick).
         self.swim_amount_o = self.swim_amount;
         if self.pose == Pose::Swimming {

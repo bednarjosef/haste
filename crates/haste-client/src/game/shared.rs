@@ -176,6 +176,15 @@ pub struct Shared {
     /// [`Shared::packet_wake`] (the same wake a arriving packet uses); drained by the
     /// game thread before every packet drain.
     pub ui_sends: Mutex<Vec<(ServerboundPlay, Instant)>>,
+    /// The maps' data (`Session::maps`), replaced wholesale whenever a map's packets
+    /// changed it (the version gate is [`Shared::maps_version`]); the render thread
+    /// clones the `Arc` per frame.
+    pub maps: Mutex<Arc<std::collections::HashMap<i32, haste_render::MapData>>>,
+    /// The session's `maps_version` as of the last publish.
+    pub maps_version: AtomicU64,
+    /// The data component tables (`minecraft:data_component_type` names by id), for
+    /// decoding a stack's component patch off the packet path (the framed maps' ids).
+    pub component_tables: Arc<haste_protocol::packets::ProtocolTables>,
 }
 
 impl Shared {
@@ -223,7 +232,7 @@ impl Shared {
     pub fn new(
         data: Arc<GameData>,
         world: World,
-        entities: EntityStore,
+        mut entities: EntityStore,
         local: (haste_core::EntityId, uuid::Uuid),
         view_distance: i32,
         particles: haste_render::Particles,
@@ -232,7 +241,20 @@ impl Shared {
         biome_climates: Vec<haste_render::BiomeClimate>,
         options: haste_setup::options::Options,
     ) -> Self {
+        // The TNT block's default state, what a primed TNT without a synced
+        // `DATA_BLOCK_STATE_ID` renders as (`PrimedTnt.DEFAULT_BLOCK_STATE`); without the
+        // block tables it stays air (the TNT then draws nothing).
+        entities.set_default_tnt_state(
+            data.blocks
+                .default_state(&Identifier::minecraft("tnt"))
+                .unwrap_or(haste_core::BlockStateId::AIR),
+        );
         let has_sky = world.dimension().has_skylight;
+        let component_tables = Arc::new(
+            haste_protocol::packets::ProtocolTables::with_data_components(
+                data.registries.data_component_names(),
+            ),
+        );
         // The per-item arm-pose inputs (`AvatarRenderer.getArmPose`'s item questions),
         // resolved from the game data once; the render path reads the installed table.
         haste_entity::animation::set_item_uses(crate::game::item_uses::build(&data));
@@ -335,6 +357,9 @@ impl Shared {
             chunks_unloaded: AtomicU64::new(0),
             packet_wake: (Mutex::new(0), Condvar::new()),
             ui_sends: Mutex::new(Vec::new()),
+            maps: Mutex::new(Arc::new(std::collections::HashMap::new())),
+            maps_version: AtomicU64::new(0),
+            component_tables,
         }
     }
 

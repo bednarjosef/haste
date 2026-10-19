@@ -69,6 +69,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::mirror as *mut _,
             ),
             NativeMethod::from_raw_parts(
+                jni_str!("itemCooldown"),
+                jni_str!("(Ljava/lang/String;F)F"),
+                state::item_cooldown as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
                 jni_str!("debugText"),
                 jni_str!("()Ljava/lang/String;"),
                 state::debug_text as *mut _,
