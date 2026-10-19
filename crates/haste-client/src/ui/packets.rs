@@ -318,6 +318,12 @@ impl Ui {
                     s.day_time = c.time;
                 }
             }),
+            // The spectator menu reads the tab list and teams (vanilla
+            // `ClientPacketListener.getListedOnlinePlayers`, `Scoreboard.getPlayerTeams`);
+            // the packets still go to Java below, like every tier-3 packet.
+            P::PlayerInfoUpdate(p) => self.shared.spectator.lock().player_info_update(p),
+            P::PlayerInfoRemove(p) => self.shared.spectator.lock().player_info_remove(p),
+            P::SetPlayerTeam(p) => self.shared.spectator.lock().set_player_team(p),
             // Vanilla drops a chunk's block entities with the chunk (the server forgets it):
             // the Java-side store does the same through the forwarded packet; the states
             // recorded for its positions go with them, so the map does not grow without bound.

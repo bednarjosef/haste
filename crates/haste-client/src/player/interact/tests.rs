@@ -1933,12 +1933,12 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         "the teleport aborted the running break"
     );
     assert!(r.p.break_progress().is_none());
-    // The tick the teleport arrived in: the movement waits for the accept (nothing about
-    // the break; the held button restarts a fresh one on the new ground below).
+    // The tick the teleport arrived in: the accept goes out with it, and first (the server
+    // drops interactions while a teleport is unconfirmed), then the fresh break restarts.
     let out = r.tick(ATTACK);
+    assert!(matches!(out[0], ServerboundPlay::AcceptTeleportation(_)));
     assert_eq!(actions(&out), [(action::START_DESTROY, 2)]);
-    // The next tick opens with the accept and the movement reports the new position
-    // whatever the threshold (an unfiltered tick: Rig::tick drops the movement packets).
+    // The next tick reports nothing new (Rig::tick dropped the arrival tick's movement).
     r.p.set_interact(ATTACK);
     let mut unfiltered = Vec::new();
     let env = InteractEnv {
@@ -1967,7 +1967,7 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         })
         .filter(|n| *n != "tick_end" && *n != "other")
         .collect();
-    assert_eq!(names, ["abort", "accept", "pos"], "{names:?}");
+    assert_eq!(names, ["abort"], "{names:?}");
 }
 
 /// A screen open skips `Minecraft.handleKeybinds` entirely (`Minecraft.tick` runs it only

@@ -51,6 +51,7 @@ mod hud;
 mod input;
 mod packets;
 mod screens;
+pub(crate) mod spectator;
 #[cfg(test)]
 mod tests;
 
@@ -85,6 +86,8 @@ struct Shared {
     salt: AtomicU64,
     /// Packets the UI itself decided to send (immediate respawn).
     outbox: Mutex<Vec<ServerboundPlay>>,
+    /// The spectator menu's state (vanilla `SpectatorGui` and what it reads).
+    spectator: Mutex<spectator::SpectatorHud>,
     /// Where an input event's screen packets go at once (vanilla sends from the input
     /// handler, not at the next tick): set by the game thread
     /// ([`Ui::set_immediate_sender`]); `None` until it exists (menu mode, tests), and then
@@ -107,6 +110,7 @@ impl Ui {
                 hud_hidden: AtomicBool::new(false),
                 salt: AtomicU64::new(0x9e37_79b9_7f4a_7c15),
                 outbox: Mutex::new(Vec::new()),
+                spectator: Mutex::new(spectator::SpectatorHud::new()),
                 send_now: Mutex::new(None),
             }),
             frame: GuiFrame::default(),
@@ -124,9 +128,11 @@ impl Ui {
         self.host.jvm_memory().unwrap_or_default()
     }
 
-    /// The renderer's text metrics (`Renderer::text_metrics`): vanilla's `Font` measures with them.
+    /// The renderer's text metrics (`Renderer::text_metrics`): vanilla's `Font` measures with
+    /// them, and the spectator menu's action line centring does too.
     pub fn set_text_metrics(&self, m: Arc<dyn TextMetrics>) {
-        self.gui().set_text_metrics(m);
+        self.gui().set_text_metrics(m.clone());
+        self.shared.spectator.lock().set_metrics(m);
     }
 
     fn state<T>(&self, f: impl FnOnce(&mut GameState) -> T) -> T {
