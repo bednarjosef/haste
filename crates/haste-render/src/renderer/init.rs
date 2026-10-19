@@ -266,7 +266,7 @@ impl Renderer {
         let quad = super::quad_pipelines::make(
             &gpu.device,
             &shader,
-            surface_format,
+            main_format,
             &camera_bind_group_layout,
             &atlas_bind_group_layout,
             &lightmap_bind_group_layout,

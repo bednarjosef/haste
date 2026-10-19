@@ -23,7 +23,9 @@ pub(super) struct QuadPipelines {
 pub(super) fn make(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
-    surface_format: wgpu::TextureFormat,
+    // The main pass target (`Renderer::gui_format_for`), the same format the
+    // indexed terrain pipelines draw into.
+    target_format: wgpu::TextureFormat,
     camera_layout: &wgpu::BindGroupLayout,
     atlas_layout: &wgpu::BindGroupLayout,
     lightmap_layout: &wgpu::BindGroupLayout,
@@ -67,7 +69,7 @@ pub(super) fn make(
                 entry_point: Some(fragment),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
+                    format: target_format,
                     blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
