@@ -119,6 +119,7 @@ impl WalkJob {
             self.min_section * 16,
             h,
             r,
+            self.view_distance,
         );
         // Vanilla's walk passes through empty sections but only puts sections with
         // something to draw into its `sectionTree`; the draw list visits the order, so
