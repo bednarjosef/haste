@@ -2,6 +2,8 @@
 //! which dirty sections are handed to the renderer's mesher, and the per-frame entity and
 //! block-entity instances.
 
+mod promotion;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,18 +30,6 @@ const SCAN_PER_FRAME: usize = 4096;
 /// predicted): the scan rotates through `waiting`, so the whole list is covered over a
 /// few frames without a hitch.
 const PREMESH_SCAN_PER_FRAME: usize = 2048;
-/// The eight horizontal neighbour chunks of a section (the ring vanilla
-/// `SectionUpdateTracker.hasAllNeighbors` requires loaded for a first build).
-const NEIGHBOUR_CHUNKS: [(i32, i32); 8] = [
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-    (-1, 0),
-    (1, 0),
-    (-1, 1),
-    (0, 1),
-    (1, 1),
-];
 
 /// What the client knows about a section right now: gone (its chunk is not loaded),
 /// loaded and empty, or loaded with blocks.
@@ -123,6 +113,8 @@ pub struct WorldFeed {
     first_build_waits: HashSet<ChunkPos>,
     /// A column with waiting holds just loaded: promote `waiting` this frame.
     rescan_waiting: bool,
+    /// The rotating cursor of the waiting re-check sweep (see [`SWEEP_FRACTION`]).
+    sweep_cursor: usize,
     /// The rotating cursor of the pre-mesh scan through `waiting` (see
     /// [`PREMESH_SCAN_PER_FRAME`]).
     premesh_cursor: usize,
@@ -238,6 +230,7 @@ impl WorldFeed {
         renderer.set_work_budget(self.work_budget);
         self.collect(shared);
         self.promote_wanted(renderer);
+        self.sweep_wanted(renderer);
         if self.sort_needed {
             let d = |p: &SectionPos| {
                 let (dx, dy, dz) = (p.x - camera.x, p.y - camera.y, p.z - camera.z);
@@ -272,9 +265,13 @@ impl WorldFeed {
                 if !self.noted_columns.contains(&pos.chunk()) {
                     if let Some(chunk) = world.chunk(pos.chunk()) {
                         self.noted_columns.insert(pos.chunk());
-                        // A chunk just loaded: if any first-build hold waited on this
-                        // column, re-run the promotion this frame whatever the
-                        // visible-set version.
+                        // A chunk just loaded: the walk treated this column as
+                        // see-through-unloaded, so the sightline data changed — re-run
+                        // the walk, or the new chunk's sections stay out of the visible
+                        // mask until the camera crosses a section boundary.
+                        renderer.note_chunk_loaded();
+                        // If any first-build hold waited on this column, re-run the
+                        // promotion this frame whatever the visible-set version.
                         if self.first_build_waits.remove(&pos.chunk()) {
                             self.rescan_waiting = true;
                         }
@@ -327,13 +324,7 @@ impl WorldFeed {
                             self.queue.pop();
                             self.waiting.push(pos);
                             if first_build {
-                                // The hold waits on the section's neighbour chunks: note
-                                // their columns, so the promotion re-runs when one loads
-                                // (see [`Self::first_build_waits`]).
-                                for (nx, nz) in NEIGHBOUR_CHUNKS {
-                                    self.first_build_waits
-                                        .insert(ChunkPos::new(pos.x + nx, pos.z + nz));
-                                }
+                                self.note_first_build_hold(pos);
                             }
                             continue;
                         }
@@ -406,31 +397,6 @@ impl WorldFeed {
         renderer.update_world_from(&source, &batch, camera_chunk, view_distance);
         self.batch = batch;
         self.last_feed_ms = started.elapsed().as_secs_f32() * 1000.0;
-    }
-
-    /// Moves held-back sections that became wanted back into the queue (a new visible
-    /// set or a turned look both change what the renderer wants), or when a chunk a
-    /// first-build hold waited on has loaded ([`Self::rescan_waiting`]).
-    fn promote_wanted(&mut self, renderer: &Renderer) {
-        if renderer.want_version() == self.last_want_version && !self.rescan_waiting {
-            return;
-        }
-        self.rescan_waiting = false;
-        self.last_want_version = renderer.want_version();
-        if self.waiting.is_empty() {
-            return;
-        }
-        let mut i = 0;
-        while i < self.waiting.len() {
-            if renderer.wants_section(self.waiting[i]) {
-                let pos = self.waiting.swap_remove(i);
-                self.queue.push(pos);
-                self.sort_needed = true;
-                self.promoted = true;
-            } else {
-                i += 1;
-            }
-        }
     }
 
     /// Copies the interpolated entity instances, gives players their default skin and samples
