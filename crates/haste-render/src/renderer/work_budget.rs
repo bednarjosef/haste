@@ -105,11 +105,6 @@ impl WorkBudget {
         }
     }
 
-    /// The budget mode (`--work-budget`).
-    pub(super) fn mode(&self) -> WorkBudgetMode {
-        self.mode
-    }
-
     /// Sets the budget mode (the renderer's `set_work_budget`).
     pub(super) fn set_mode(&mut self, mode: WorkBudgetMode) {
         self.mode = mode;

@@ -163,6 +163,8 @@ struct BenchSummary {
     draw_calls: f32,
     /// Terrain indices drawn per frame (six per quad): the vertex-fetch load.
     indices_drawn: f32,
+    /// WorldFeed::feed time (dirty collection, promotion, submit, mesh upload).
+    feed_ms: f32,
     prepare_ms: f32,
     acquire_ms: f32,
     cull_ms: f32,
@@ -197,7 +199,7 @@ impl BenchSummary {
         format!(
             "bench: {} frames in {:.0} s\n\
              frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
-             breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
+             breakdown ms: feed {:.2} prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
              gpu main ms: sky {:.3} opaque {:.3} cutout {:.3} translucent {:.3} entities {:.3} particles {:.3} overlays {:.3}\n\
              sections drawn {}/{} avg, draw calls {:.0} avg, indices {:.0} avg (quads {:.0})\n\
              pop-in: {} episodes, {:.1} frames avg to mesh ({} worst), {} frames with unmeshed, {} visible-unmeshed section-frames\n\
@@ -209,6 +211,7 @@ impl BenchSummary {
             self.fps(),
             self.p99_ms,
             self.worst_ms,
+            self.feed_ms,
             self.prepare_ms,
             self.acquire_ms,
             self.cull_ms,
@@ -351,6 +354,7 @@ fn bench_summary(samples: &[BenchSample], premesh: (u32, u32, u32)) -> BenchSumm
         sections_total: sum(samples, n, |s| s.sections_total as f32),
         draw_calls: sum(samples, n, |s| s.draw_calls as f32),
         indices_drawn: sum(samples, n, |s| s.indices_drawn as f32),
+        feed_ms: sum(samples, n, |s| s.feed_ms),
         prepare_ms: t(|x| x.prepare_ms),
         acquire_ms: t(|x| x.acquire_ms),
         cull_ms: t(|x| x.cull_ms),
