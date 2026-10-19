@@ -16,6 +16,9 @@ from common import ROOT
 
 
 def deny(reason):
+    # Said every time: after a few refusals, models conclude that the whole shell is banned.
+    reason = ("Refused: only this form of command (plain commands such as `git status`, "
+              "`hx check` and `cargo test -p CRATE` still work). " + reason)
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "permissionDecision": "deny",
         "permissionDecisionReason": reason}}))
@@ -51,6 +54,9 @@ def pre(event):
              "expansion and heredocs. Spell paths and values out, run one command per item "
              "(several commands joined with ; or && in one call are fine), and create or edit "
              "files with the Write and Edit tools.")
+    if re.search(r"\bgit\s+-C\b", cmd):
+        deny("Your shell starts in the worktree root: run git there without -C (the allow-list "
+             "matches `git status`, `git add`, `git commit`, not `git -C PATH ...`).")
     bounded = re.search(r"\|\s*(head|tail|wc|sort -u|grep -c)\b|\s-[a-km-zA-Z]*[lc][a-zA-Z]*\b"
                         r"|\s-m\s*\d+|--(count|files-with-matches|max-count)", cmd)
     if re.search(r"\b(grep|rg)\b", cmd) and "cache/source" in cmd and not bounded:
@@ -82,7 +88,10 @@ def stop(event):
         f.write(str(count + 1))
     sys.stderr.write(
         "You are not done (`hx done`):\n" + "\n".join("- " + t for t in todo)
-        + "\nFinish these in the foreground, then give your final report. If one is truly "
+        + "\nThe shell is not banned: `git status`, `git add -A`, `git commit -m MSG`, `hx check` "
+        "and `cargo test -p CRATE` are allowed; only loops, $(...), $VARIABLES, heredocs and "
+        "`git -C` are refused.\nFinish these in the foreground, then give your final report. "
+        "If one is truly "
         "blocked, say why in the report and end your turn again"
         f" ({limit - count - 1} more stops will be held).\n")
     sys.exit(2)

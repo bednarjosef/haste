@@ -45,7 +45,10 @@ ALLOW = TOOLS[1:] + [f"Bash({p})" for p in (
     "timeout * target/*", "timeout * ./target/*", "timeout * scripts/*", "timeout -s INT * target/*",
     "nproc", "free *", "pgrep *", "ps *", "ss *")]
 NUDGE = ("You are running headless: no notification will ever arrive, and ending your turn ends "
-         "the session for good. Continue the task now from where you are, in the foreground, and "
+         "the session for good. The shell is not banned: plain commands run from the worktree "
+         "root (`git status`, `git add -A`, `git commit -m MSG`, `hx check`, `cargo test -p "
+         "CRATE`) are allowed; only loops, $(...), $VARIABLES, heredocs and `git -C` are refused. "
+         "Continue the task now from where you are, in the foreground, and "
          "do not end your turn until `hx done` passes or something is truly blocked. Then give "
          "your full report as your final message.")
 

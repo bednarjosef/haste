@@ -10,6 +10,8 @@ message is the task: do exactly that task, completely, alone. Nobody answers que
 - A Stop hook runs `hx done` when you try to finish: until your work is committed, the tree is
   clean and `hx check` has passed on it, you are sent back to work. If something is truly
   blocked, say why in your report.
+- Your shell starts in the worktree root: run git, cargo and hx there, without `-C`, `cd` or
+  absolute paths.
 - Shell commands are checked against an allow-list that refuses loops, `$(...)`, `$VARIABLE`
   expansion and heredocs: spell paths out, run one command per item (several joined with `;` or
   `&&` in one call are fine), and write files with the Write and Edit tools.
@@ -69,11 +71,17 @@ re-read a file you just edited.
   addresses in files.
 
 ## On-screen checks
-Build with `cargo build --release -p haste-client`, then run
-`timeout 120 target/release/haste --server 127.0.0.1:25691 --username <you> --script FILE`
+Build with `cargo build --release -p haste-client`, then run the client through `hx client`
+(it can run the client and RCON at once, which your shell cannot):
+`hx client --user <you> --script FILE --seconds 60` for a windowed run with screenshots
 (script commands: `wait_until joined`, `wait N`, `look YAW PITCH`, `screenshot NAME`; shots land
-in `target/shots/`). RCON: `scripts/vanilla-rcon.sh --port 25691 '<command>'`. Open at least
-one screenshot with Read and say what it shows; a check you did not look at is not a check.
+in `target/shots/`), or `hx client --user <you> --walk FILE --headless --seconds 60` for a
+movement walk (`crates/haste-client/walks/`: `hold`, `cmd`, `mark`, ...). `--before 'op <you>'`
+runs an RCON command first, `--at '5:tp <you> 30000 200 30000'` five seconds into the run. The
+client exits when its script ends (20 ticks a second), so make the script outlast `--at`, or put
+the command in a walk script (`cmd tp @s 30000 200 30000`, after `--before 'op <you>'`). It
+prints a digest of the log; the full log is in `target/hx-client-<you>.log`. Open at least one
+screenshot with Read and say what it shows; a check you did not look at is not a check.
 
 ## Report (your final message, under 300 words)
 Vanilla classes and methods followed; files changed; `hx check` result; the on-screen evidence

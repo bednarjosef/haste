@@ -130,6 +130,7 @@ class Guard(unittest.TestCase):
         self.assertEqual(self.decide("echo $(date)"), "deny")
         self.assertEqual(self.decide("C=crates; ls $C"), "deny")
         self.assertEqual(self.decide("cat > notes.txt <<'EOF'"), "deny")
+        self.assertEqual(self.decide("git -C ../x status"), "deny")
 
     def test_allowed(self):
         self.assertEqual(self.decide("grep -rln tick cache/source/26.3/client"), "allow")

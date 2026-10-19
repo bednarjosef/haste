@@ -12,6 +12,10 @@ small, capped answer instead of raw search output, so a worker's context stays s
   hx check [CRATE...] [--no-tests] [--filter NAME]
                                cargo fmt, file sizes, clippy -D warnings and tests of the crates
                                changed since the branch base (or those given), errors only
+  hx client --user NAME [--script FILE] [--walk FILE] [--seconds N] [--headless]
+            [--before 'RCON CMD']... [--at 'SECONDS:RCON CMD']...
+                               run target/release/haste against the test server, RCON before
+                               and during the run, print a digest of the log and new screenshots
   hx done                      what is still missing before a worker may finish
   hx context BRIEF             the orientation pack for a brief (the worker launcher adds it)
 """
@@ -21,6 +25,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import checks  # noqa: E402
+import client  # noqa: E402
 import context  # noqa: E402
 import guard  # noqa: E402
 import haste  # noqa: E402
@@ -67,6 +72,22 @@ def main(argv):
     elif cmd == "check":
         filt = opt("--filter")
         return 0 if checks.cmd_check(pos, skip_tests="--no-tests" in flags, filt=filt) else 1
+    elif cmd == "client":
+        def many(name):
+            vals = []
+            while name in args:
+                i = args.index(name)
+                vals.append(args[i + 1])
+                del args[i:i + 2]
+            return vals
+        before, at = many("--before"), many("--at")
+        user, script, walk = opt("--user"), opt("--script"), opt("--walk")
+        seconds = int(opt("--seconds") or 60)
+        if not user:
+            print("usage: hx client --user NAME [--script FILE] [--walk FILE] [--seconds N] ...")
+            return 2
+        return 0 if client.cmd_client(user, script, walk, seconds, "--headless" in flags,
+                                      before, at) else 1
     elif cmd == "done":
         return 0 if checks.cmd_done() else 1
     elif cmd == "context" and pos:

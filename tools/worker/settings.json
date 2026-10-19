@@ -1,10 +1,32 @@
 {
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
   "hooks": {
     "PreToolUse": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "hx hook pre", "timeout": 20}]}
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hx hook pre",
+            "timeout": 20
+          }
+        ]
+      }
     ],
     "Stop": [
-      {"hooks": [{"type": "command", "command": "hx hook stop", "timeout": 60}]}
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hx hook stop",
+            "timeout": 60
+          }
+        ]
+      }
     ]
   }
 }
