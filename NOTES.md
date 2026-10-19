@@ -339,3 +339,26 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   keep the chunks around it loaded, so `fill` and `setblock` near a spectator bot fail with "not
   loaded". Switch the bot to creative (or `forceload` the area) before building or cleaning up a
   test scene.
+- **2026-10-19 No terrain drawn from 07:45 to 15:00.** The quad-pulling split left `collect_draws`
+  dropping the draw list, so neither terrain format drew a section while the frame stats still
+  counted them (found by bisect: a screenshot's lower half scored as sky). Every renderer number
+  measured in that window is void: the quad format's GPU memory saving, the pre-mesh slack gate
+  and the adaptive budget entries above. A bench that reports thousands of FPS, a GPU main pass
+  under 0.5 ms or a handful of draw calls means terrain is missing; look at a screenshot before
+  trusting it. With the list restored the quad format still draws scattered garbage (opt-in, task
+  open). The bench player `perfmem` had lost its saved flight: a creative player teleported into a
+  chunk its client has not loaded sinks (vanilla) and lands, so stand it on the ground at the spot
+  first, double-tap jump (input script), then teleport it up.
+- **2026-10-19 Quiet-machine renderer A/B (after the fix).** Reference spot, 1408x828 window,
+  two interleaved runs each, average / p99 frame interval in ms.
+  Still camera: meshing every section (before mesh-visible-sections) rd 12 3.95 / 11.1,
+  rd 32 6.77 / 9.9, GPU memory 946 / 2750 MiB; visible-only rd 12 4.14 / 11.2, rd 32 9.89 / 28.1,
+  566 / 825 MiB; main now matches visible-only. At rd 32 visible-only draws the same 10.7M
+  indices but the GPU main pass takes 8.8 ms instead of 6.0 (85 multi-draws instead of 613, the
+  resident sections packed into fewer arenas), with p99 spikes at 28 ms: open question.
+  Turns path, rd 32: off 7.81 / 27.0, cone 7.87 / 28.1, predict 7.61 / 27.2, adaptive budget
+  7.37 / 19.0, cone + adaptive 7.63 / 19.1; visible-unmeshed section-frames 9359 off, about 3700
+  with cone (-60 %). rd 12: off 3.06 (runs 2.4 and 3.7), cone 3.72, predict 3.91, adaptive 4.14,
+  cone + adaptive 3.97; unmeshed 7929 off, 2848-3500 with cone or predict. Adaptive is the clear
+  rd 32 win (p99 -30 %); cone + adaptive keeps it and cuts pop-in by 60 % at rd 32; rd 12 is too
+  noisy to decide (more runs before changing defaults).
