@@ -26,12 +26,14 @@ mod frame_setup;
 mod gui_pass;
 mod init;
 mod mesh_gate;
+mod premesh;
 mod query;
 mod readback;
 mod render_world;
 mod surface;
 mod terrain_feed;
 
+pub use premesh::PremeshMode;
 pub use terrain_feed::SectionLoadState;
 #[cfg(test)]
 mod tests;
@@ -154,6 +156,9 @@ pub struct FrameStats {
     pub chunk_sections_drawn: u32,
     pub chunk_sections_total: u32,
     pub meshes_pending: u32,
+    /// Sections this frame's gate wants that have no mesh yet (pop-in; 0 unless the
+    /// bench turned tracking on with `set_popin_tracking`).
+    pub visible_unmeshed: u32,
     pub draw_calls: u32,
     /// Block entities drawn this frame (chests, shulker boxes; one batched draw with entities).
     pub block_entities_drawn: u32,
@@ -290,6 +295,10 @@ pub struct Renderer {
     /// The last frame's frustum planes and camera position, for the mesh gate
     /// (`wants_section`): written in `render`, read by the feed before the next one.
     want_frustum: Option<([glam::Vec4; 6], glam::DVec3)>,
+    /// Turn prediction for the mesh gate (`--premesh`): the mode, the smoothed camera
+    /// motion, the widened frustum of the current frame and the pop-in/pre-mesh metrics
+    /// (see `renderer/premesh.rs`).
+    premesh: premesh::Premesh,
     /// The camera entity is a spectator (`Camera.extractRenderState` reads it off the player),
     /// for the solid-block rule below.
     camera_spectator: bool,

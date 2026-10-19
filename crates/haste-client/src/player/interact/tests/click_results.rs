@@ -37,7 +37,7 @@ fn tick_looking(r: &mut Rig, pitch: f32, i: InteractInput) -> Vec<ServerboundPla
         ..Default::default()
     };
     r.p.tick_interact(&input, &r.w, &env, None, &mut out);
-    for (pos, s) in r.p.take_world_edits().collect::<Vec<_>>() {
+    for (pos, s) in r.p.take_world_edits() {
         r.w.set(pos.x, pos.y, pos.z, s);
     }
     out.retain(|p| {

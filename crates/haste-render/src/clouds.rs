@@ -1,12 +1,16 @@
-// The clouds (vanilla `CloudRenderer`): 12x12x4 boxes built from the `clouds.png`
-// cells around the camera (`mesh.rs`), drawn as one batched mesh with per-face shades
-// (0.7 bottom, 1.0 top, 0.8 north/south, 0.9 west/east). The mesh is
-// camera-cell-relative and is rebuilt only when the camera crosses a cell boundary,
-// moves between above, inside and below the cloud layer, or the cloud mode changes;
-// every other frame only the small uniform (the offset inside the cell) is uploaded.
-// The mode is vanilla's `Options.cloudStatus` (options.txt `renderClouds`): OFF draws
-// no pass at all, FAST the flat cells of `flat.rs`, FANCY (vanilla's default) these
-// extruded boxes.
+// The clouds (vanilla `CloudRenderer`): the 12x12x4 boxes of the `clouds.png` cells
+// around the camera, drawn like vanilla as one batched pass with per-face shades
+// (0.7 bottom, 1.0 top, 0.8 north/south, 0.9 west/east). Vanilla uploads one compact
+// 3-byte record per drawn face to a texel buffer and expands it to the quad in the
+// vertex shader (`clouds.vsh`); Haste does the same with one u32 record per face in
+// the instance buffer (`clouds.wgsl`), so a rebuild — when the camera crosses a cell
+// boundary, moves between above, inside and below the cloud layer, or the cloud mode
+// or range changes — re-uploads a few hundred KB at most instead of a full vertex
+// mesh. Every other frame only the small uniform (the offset inside the cell) is
+// uploaded. The mode is vanilla's `Options.cloudStatus` (options.txt `renderClouds`):
+// OFF draws no pass at all, FAST the flat cells of `flat.rs`, FANCY (vanilla's
+// default) these extruded boxes; the radius is `Options.cloudRange` (options.txt
+// `cloudRange`, 2..=128 chunks, default 128) via `set_range`.
 
 use std::sync::Arc;
 
@@ -17,8 +21,10 @@ mod flat;
 mod mesh;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_gpu;
 
-use mesh::build_mesh;
+use mesh::build_faces;
 pub use mesh::{CloudTexture, RelativeCameraPos};
 
 /// Vanilla `net.minecraft.client.CloudStatus` (options.txt `renderClouds`): OFF skips the
@@ -45,12 +51,21 @@ pub const CLOUD_HEIGHT: f32 = 192.33;
 /// The overworld `visual/cloud_color` attribute (`DimensionTypes` overworld: white at
 /// alpha 0.8); the day timeline and the weather layers modify it.
 pub const OVERWORLD_CLOUD_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.8];
+/// Vanilla's default cloud range (`Options.cloudRange`): 128 chunks.
+const DEFAULT_RANGE_CHUNKS: u32 = 128;
 
 /// The clouds' eastward drift this frame (blocks): vanilla `CloudRenderer.prepare` takes
 /// `(gameTime % (width * 400)) + partialTicks` and moves the grid by `0.03` blocks per
 /// tick of it — game time, so a frozen time of day still moves the clouds.
 pub fn cloud_drift(game_time: i64, partial_tick: f32) -> f32 {
     (game_time.rem_euclid(256 * 400) as f32 + partial_tick) * 0.030000001
+}
+
+/// The cloud mesh's radius in cells (vanilla `CloudRenderer.prepare`:
+/// `ceil(range * 16 / 12)`): the `cloudRange` option is in chunks of 16 blocks, the
+/// cells are 12 wide.
+pub fn radius_cells(range_chunks: u32) -> i32 {
+    ((range_chunks * 16) as f32 / CELL_SIZE).ceil() as i32
 }
 
 /// The frame's cloud colour (sRGB, alpha included): the overworld `visual/cloud_color`
@@ -99,15 +114,6 @@ pub fn cloud_color(time_of_day: i64, rain_level: f32, thunder_level: f32) -> [f3
     c
 }
 
-/// One mesh vertex: the camera-cell-relative position in blocks (the per-frame offset
-/// inside the cell is added in the shader) and the face shade.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct CloudVertex {
-    pos: [f32; 3],
-    shade: f32,
-}
-
 /// Uniforms for the clouds pass. The trailing padding rounds the struct to the WGSL
 /// uniform layout's size (the `vec3` members force 16-byte alignment).
 #[repr(C)]
@@ -125,10 +131,10 @@ struct CloudUniforms {
     _pad1: [f32; 7],
 }
 
-/// The clouds pass (vanilla `CloudRenderer`): the cell mesh around the camera, rebuilt
-/// only when the camera's cell, its position relative to the layer or the cloud mode
-/// changes. FANCY draws the extruded boxes, FAST the flat cells (`flat.rs`), OFF
-/// nothing.
+/// The clouds pass (vanilla `CloudRenderer`): the face records of the cells around the
+/// camera, rebuilt only when the camera's cell, its position relative to the layer, the
+/// mode or the range changes. FANCY draws the extruded boxes, FAST the flat cells
+/// (`flat.rs`), OFF nothing.
 pub struct CloudRenderer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -138,15 +144,18 @@ pub struct CloudRenderer {
     flat_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    vertex_buffer: wgpu::Buffer,
+    face_buffer: wgpu::Buffer,
     capacity: usize,
-    vertices: Vec<CloudVertex>,
-    vertex_count: u32,
+    faces: Vec<u32>,
+    face_count: u32,
     texture: Option<CloudTexture>,
-    /// The camera cell, position relative to the layer and mode the mesh was built for.
-    built_for: Option<(i32, i32, RelativeCameraPos, bool)>,
+    /// The camera cell, position relative to the layer, mode and radius the records were
+    /// built for.
+    built_for: Option<(i32, i32, RelativeCameraPos, bool, i32)>,
     /// The frame's cloud mode (vanilla `Options.cloudStatus`, via `set_status`).
     status: CloudStatus,
+    /// The cloud range in chunks (vanilla `Options.cloudRange`, via `set_range`).
+    range_chunks: u32,
     /// Whether the one-time diagnostics line was logged.
     logged: bool,
 }
@@ -195,11 +204,12 @@ impl CloudRenderer {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let attributes: [wgpu::VertexAttribute; 2] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32];
+        // One u32 face record per instance (vanilla's three bytes padded to the
+        // buffer's element size); the corner comes from the vertex index.
+        let attributes: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Uint32];
         let vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<CloudVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
+            array_stride: std::mem::size_of::<u32>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
             attributes: &attributes,
         };
         let pipeline = make_pipeline(
@@ -224,13 +234,14 @@ impl CloudRenderer {
         );
         let capacity = 4096;
         CloudRenderer {
-            vertex_buffer: make_buffer(&device, capacity),
+            face_buffer: make_buffer(&device, capacity),
             capacity,
-            vertices: Vec::with_capacity(capacity),
-            vertex_count: 0,
+            faces: Vec::with_capacity(capacity),
+            face_count: 0,
             texture,
             built_for: None,
             status: CloudStatus::default(),
+            range_chunks: DEFAULT_RANGE_CHUNKS,
             logged: false,
             device,
             queue,
@@ -242,24 +253,44 @@ impl CloudRenderer {
     }
 
     /// Vanilla `Options.cloudStatus` for the frames to come (the video setting; changed
-    /// from a vanilla options screen or the config). A mode change rebuilds the mesh once,
-    /// on the next `prepare` (vanilla's `prevCloudStatus` in the rebuild condition).
+    /// from a vanilla options screen or the config). A mode change rebuilds the records
+    /// once, on the next `prepare` (vanilla's `prevCloudStatus` in the rebuild
+    /// condition).
     pub fn set_status(&mut self, status: CloudStatus) {
         self.status = status;
     }
 
-    /// The vertices of the current mesh (tests).
+    /// Vanilla `Options.cloudRange` (options.txt `cloudRange`, 2..=128 chunks, default
+    /// 128) for the frames to come: the radius of the cloud mesh around the camera. A
+    /// range change rebuilds the records on the next `prepare`.
+    pub fn set_range(&mut self, range_chunks: u32) {
+        self.range_chunks = range_chunks;
+    }
+
+    /// The number of faces of the current mesh (tests).
     #[cfg(test)]
-    pub(super) fn vertex_count(&self) -> u32 {
-        self.vertex_count
+    pub(super) fn face_count(&self) -> u32 {
+        self.face_count
+    }
+
+    /// The current face records (tests).
+    #[cfg(test)]
+    pub(super) fn faces(&self) -> &[u32] {
+        &self.faces
+    }
+
+    /// The uniforms buffer (tests).
+    #[cfg(test)]
+    pub(super) fn uniforms(&self) -> &wgpu::Buffer {
+        &self.uniforms
     }
 
     /// Vanilla `CloudRenderer.prepare` under `LevelRenderer.renderClouds`: the OFF mode
     /// draws no pass at all (no mesh, no uniforms), so it returns before anything else;
     /// a dimension without clouds (not the overworld) skips the pass the same way.
-    /// Otherwise finds the camera's cell, rebuilds the mesh when the cell, the position
-    /// relative to the layer or the mode changed, and writes the per-frame uniforms
-    /// (the offset inside the cell, the colour, the fog end).
+    /// Otherwise finds the camera's cell, rebuilds the face records when the cell, the
+    /// position relative to the layer, the mode or the range changed, and writes the
+    /// per-frame uniforms (the offset inside the cell, the colour, the fog end).
     pub fn prepare(
         &mut self,
         camera: &Camera,
@@ -269,7 +300,7 @@ impl CloudRenderer {
         fog: &FogData,
         partial_tick: f32,
     ) {
-        self.vertex_count = 0;
+        self.face_count = 0;
         if self.status == CloudStatus::Off || kind != crate::sky::SkyKind::Overworld {
             self.built_for = None;
             return;
@@ -297,15 +328,16 @@ impl CloudRenderer {
         let x_in_cell = (cloud_x - cell_x as f64 * CELL_SIZE as f64) as f32;
         let z_in_cell = (cloud_z - cell_z as f64 * CELL_SIZE as f64) as f32;
 
-        // The mesh covers the cloud fog end (vanilla draws the cloud range option's
-        // distance; without the option wired, the fog end is where clouds fade out).
-        let radius_cells = (fog.cloud_end / CELL_SIZE).ceil() as i32;
+        // The mesh covers the cloud range option's distance (vanilla
+        // `CloudRenderer.prepare`: `radiusCells = ceil(range * 16 / 12)`), not the fog
+        // end — the fog stays where vanilla puts it.
+        let radius_cells = radius_cells(self.range_chunks);
         let fancy = self.status == CloudStatus::Fancy;
-        if self.built_for != Some((cell_x, cell_z, relative_pos, fancy)) {
-            self.built_for = Some((cell_x, cell_z, relative_pos, fancy));
-            self.vertices.clear();
-            build_mesh(
-                &mut self.vertices,
+        if self.built_for != Some((cell_x, cell_z, relative_pos, fancy, radius_cells)) {
+            self.built_for = Some((cell_x, cell_z, relative_pos, fancy, radius_cells));
+            self.faces.clear();
+            build_faces(
+                &mut self.faces,
                 texture,
                 cell_x,
                 cell_z,
@@ -313,22 +345,19 @@ impl CloudRenderer {
                 radius_cells,
                 fancy,
             );
-            self.vertex_count = self.vertices.len() as u32;
-            if self.vertices.len() > self.capacity {
-                self.capacity = self.vertices.len().next_power_of_two();
-                self.vertex_buffer = make_buffer(&self.device, self.capacity);
+            self.face_count = self.faces.len() as u32;
+            if self.faces.len() > self.capacity {
+                self.capacity = self.faces.len().next_power_of_two();
+                self.face_buffer = make_buffer(&self.device, self.capacity);
             }
-            if !self.vertices.is_empty() {
-                self.queue.write_buffer(
-                    &self.vertex_buffer,
-                    0,
-                    bytemuck::cast_slice(&self.vertices),
-                );
+            if !self.faces.is_empty() {
+                self.queue
+                    .write_buffer(&self.face_buffer, 0, bytemuck::cast_slice(&self.faces));
             }
         } else {
-            self.vertex_count = self.vertices.len() as u32;
+            self.face_count = self.faces.len() as u32;
         }
-        if self.vertex_count == 0 {
+        if self.face_count == 0 {
             return;
         }
         // One-time diagnostics: what the pass actually received, so an invisible cloud
@@ -337,8 +366,8 @@ impl CloudRenderer {
             self.logged = true;
             tracing::info!(
                 "clouds pass: cell ({cell_x}, {cell_z}), {radius_cells} cell radius, {} \
-                 vertices, offset ({x_in_cell:.2}, {:.2}, {z_in_cell:.2})",
-                self.vertex_count,
+                 faces, offset ({x_in_cell:.2}, {:.2}, {z_in_cell:.2})",
+                self.face_count,
                 cloud_height - camera.pos.y as f32,
             );
         }
@@ -355,11 +384,11 @@ impl CloudRenderer {
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
     }
 
-    /// Draws the cloud mesh into the main pass, after translucent terrain (where the sky
+    /// Draws the cloud faces into the main pass, after translucent terrain (where the sky
     /// overlays run). One draw call; the mode picks the pipeline (vanilla `render`:
     /// `FLAT_CLOUDS` for the FAST cells, `CLOUDS` for the extruded boxes).
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
-        if self.vertex_count == 0 {
+        if self.face_count == 0 {
             return 0;
         }
         pass.set_pipeline(if self.status == CloudStatus::Fancy {
@@ -368,16 +397,18 @@ impl CloudRenderer {
             &self.flat_pipeline
         });
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..self.vertex_count, 0..1);
+        pass.set_vertex_buffer(0, self.face_buffer.slice(..));
+        // Two triangles per face: the vertex index picks the quad corner, the instance
+        // the face record (vanilla's sequential quad index buffer).
+        pass.draw(0..6, 0..self.face_count);
         1
     }
 }
 
 fn make_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("clouds-vertices"),
-        size: (capacity * std::mem::size_of::<CloudVertex>()) as u64,
+        label: Some("clouds-faces"),
+        size: capacity as u64 * std::mem::size_of::<u32>() as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })

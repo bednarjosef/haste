@@ -28,6 +28,7 @@ mod block_entity_ticks;
 mod camera;
 mod hud;
 mod input;
+pub(crate) mod item_uses;
 mod level;
 mod particles;
 pub(crate) mod pickup;

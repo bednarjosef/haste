@@ -808,18 +808,18 @@ fn step_blocks_resolve_from_the_block_table_and_tags() {
         ]
         .map(|(t, e)| (haste_core::Identifier::minecraft(t), e)),
     );
-    let aabb = haste_physics::PlayerState::at(DVec3::new(0.5, 1.0, 0.5))
-        .aabb(&haste_physics::PlayerAttributes::default());
+    // The player's box at feet height `y` (the resolver probes just below it).
+    let attrs = haste_physics::PlayerAttributes::default();
+    let aabb_at = |y| haste_physics::PlayerState::at(DVec3::new(0.5, y, 0.5)).aabb(&attrs);
 
-    // On a full stone floor (feet at y = 1): supporting = effect = the stone, no
-    // primary.
+    // A full stone floor (feet at y = 0, its top): supporting = effect = stone.
     let floor = StepFloor {
         state: stone,
         above: None,
     };
     let (supporting, effect, primary) = resolve_step_blocks(
-        DVec3::new(0.5, 1.0, 0.5),
-        &aabb,
+        DVec3::new(0.5, 0.0, 0.5),
+        &aabb_at(0.0),
         true,
         &floor,
         &FullShapes,
@@ -839,7 +839,7 @@ fn step_blocks_resolve_from_the_block_table_and_tags() {
     };
     let (_, effect, primary) = resolve_step_blocks(
         DVec3::new(0.5, 0.125, 0.5),
-        &aabb,
+        &aabb_at(0.125),
         true,
         &floor,
         &FullShapes,
@@ -858,7 +858,7 @@ fn step_blocks_resolve_from_the_block_table_and_tags() {
     };
     let (_, effect, primary) = resolve_step_blocks(
         DVec3::new(0.5, 0.0625, 0.5),
-        &aabb,
+        &aabb_at(0.0625),
         true,
         &floor,
         &FullShapes,
@@ -876,8 +876,8 @@ fn step_blocks_resolve_from_the_block_table_and_tags() {
         above: None,
     };
     let (_, effect, _) = resolve_step_blocks(
-        DVec3::new(0.5, 1.0, 0.5),
-        &aabb,
+        DVec3::new(0.5, 0.0, 0.5),
+        &aabb_at(0.0),
         true,
         &floor,
         &FullShapes,

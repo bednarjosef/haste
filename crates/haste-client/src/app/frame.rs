@@ -5,19 +5,19 @@
 use super::*;
 
 mod hitch;
+mod render_options;
 use hitch::FramePhases;
 pub(crate) use hitch::HitchTrace;
+pub(crate) use render_options::{cloud_status, forced_premesh, parse_premesh, premesh_mode};
 
-/// The config's cloud option as the renderer's (vanilla `Options.cloudStatus` →
-/// `OptionsRenderState.cloudStatus`).
-pub(super) fn cloud_status(
-    status: haste_setup::options::CloudStatus,
-) -> haste_render::clouds::CloudStatus {
-    match status {
-        haste_setup::options::CloudStatus::Off => haste_render::clouds::CloudStatus::Off,
-        haste_setup::options::CloudStatus::Fast => haste_render::clouds::CloudStatus::Fast,
-        haste_setup::options::CloudStatus::Fancy => haste_render::clouds::CloudStatus::Fancy,
-    }
+/// Applies the config's cloud options to the renderer (vanilla `Options.cloudStatus`
+/// and `Options.cloudRange`).
+pub(super) fn apply_cloud_options(
+    renderer: &mut haste_render::Renderer,
+    options: &haste_setup::options::Options,
+) {
+    renderer.set_cloud_status(cloud_status(options.clouds));
+    renderer.set_cloud_range(options.cloud_range);
 }
 
 impl App {
@@ -145,7 +145,8 @@ impl App {
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
         // The windowed bench holds the camera still (the settle frame's view with the
-        // requested look), like the offscreen `--bench --bench-fixed`.
+        // requested look), like the offscreen `--bench --bench-fixed`; the `turns` path
+        // instead drives the look from the run clock (the pre-mesh benchmark).
         if let Some(bench) = &mut self.bench {
             if let Some(yaw) = bench.look.0 {
                 self.input.yaw = yaw - view.look_offset.0;
@@ -153,8 +154,22 @@ impl App {
             if let Some(pitch) = bench.look.1 {
                 self.input.pitch = (pitch - view.look_offset.1).clamp(-90.0, 90.0);
             }
+            if bench.path == BenchPath::Turns {
+                if let (Some(started), Some(base)) = (bench.started, bench.camera.as_ref()) {
+                    let turned =
+                        bench_camera_turns(started.elapsed().as_secs_f32(), base, bench.seconds);
+                    self.input.yaw = turned.yaw - view.look_offset.0;
+                    self.input.pitch = (turned.pitch - view.look_offset.1).clamp(-90.0, 90.0);
+                }
+            }
         }
         let renderer = self.renderer.as_mut().expect("checked above");
+        // The bench tracks pop-in (visible-but-unmeshed sections and pre-mesh verdicts);
+        // enabling it before the settle phase seeds the meshed set with everything the
+        // settle meshed, so the measured phase starts from zero.
+        if self.bench.is_some() {
+            renderer.set_popin_tracking(true);
+        }
         let (mut camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &session.shared,
             &view,
@@ -191,8 +206,17 @@ impl App {
                 bench.camera = Some(camera);
                 bench.view_distance = vd;
             }
-            if let Some(still) = bench.camera {
-                camera = still;
+            if let Some(base) = bench.camera {
+                // The still camera is held; the `turns` path replays the fixed turn and
+                // flight schedule from the run clock (same path every run).
+                camera = match bench.path {
+                    BenchPath::Still => base,
+                    BenchPath::Turns => bench_camera_turns(
+                        bench.started.map_or(0.0, |s| s.elapsed().as_secs_f32()),
+                        &base,
+                        bench.seconds,
+                    ),
+                };
             }
         }
         let feed_start = Instant::now();
@@ -320,7 +344,11 @@ impl App {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         renderer.set_view_scale(self.options.entity_distance_scaling);
-        renderer.set_cloud_status(cloud_status(self.options.clouds));
+        apply_cloud_options(renderer, &self.options);
+        renderer.set_premesh(
+            self.premesh_forced
+                .unwrap_or_else(|| premesh_mode(self.options.premesh)),
+        );
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();
@@ -347,6 +375,7 @@ impl App {
                     upload_bytes: stats.upload_bytes,
                     indices_drawn: stats.indices_drawn,
                     index: bench.samples.len() as u32,
+                    visible_unmeshed: stats.visible_unmeshed,
                 };
                 self.quitting |= bench.record(sample, session, renderer);
             } else if bench.camera.is_some() {

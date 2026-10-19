@@ -18,6 +18,9 @@ pub(crate) struct WindowBench {
     pub(crate) size: (u32, u32),
     /// The look the bench camera holds (`--yaw`/`--pitch`; `None` keeps the player's own).
     pub(crate) look: (Option<f32>, Option<f32>),
+    /// The camera path (`--bench-path`): the still settle camera, or the fixed turn and
+    /// flight schedule (`turns`) the pre-mesh benchmark replays every run.
+    pub(crate) path: BenchPath,
     /// `--pos`: the settle also waits until the server has teleported the player here.
     pub(crate) want_pos: Option<DVec3>,
     /// The wall time between one measured frame's end and the next one's: the whole frame
@@ -170,6 +173,14 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let options = session.options.clone();
+    let path = match args.bench_path.as_str() {
+        "turns" => BenchPath::Turns,
+        "still" => BenchPath::Still,
+        other => anyhow::bail!("--bench-path must be `still` or `turns`, got `{other}`"),
+    };
+    // `--premesh` overrides the saved option for the run (the comparisons run one
+    // binary with the mode switched).
+    let premesh_forced = crate::app::frame::forced_premesh(args)?;
     let mut app = App {
         username: args.username.clone(),
         render_distance: args.render_distance,
@@ -181,6 +192,7 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
         // pinned to the display rate (vanilla's comparison run had vsync off too).
         vsync: args.vsync.unwrap_or(false),
         vsync_forced: args.vsync.or(Some(false)),
+        premesh_forced,
         options,
         options_version: 0,
         perspective: game::Perspective::FirstPerson,
@@ -216,6 +228,7 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
             feed_ms: 0.0,
             size: (args.width, args.height),
             look: (args.yaw, args.pitch),
+            path,
             want_pos: args
                 .pos
                 .as_ref()
@@ -253,7 +266,12 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
             })
             .unwrap_or_default(),
     };
-    let summary = bench_summary(&bench.samples);
+    let summary = bench_summary(
+        &bench.samples,
+        app.renderer
+            .as_ref()
+            .map_or((0, 0, 0), |r| r.premesh_summary()),
+    );
     println!("windowed bench at {}, {}", meta.width, meta.height);
     println!("{}", summary.text(&meta));
     let [i_avg, i_p50, i_p90, i_p99, i_p999, i_worst] = interval_stats(&bench.intervals);
@@ -262,7 +280,7 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
         if i_avg > 0.0 { 1000.0 / i_avg } else { 0.0 }
     );
     if let Some(out) = &args.bench_out {
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "windowed": true,
             "frames": summary.frames,
             "seconds": meta.seconds,
@@ -296,6 +314,41 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "height": meta.height,
             "adapter": meta.adapter,
         });
+        // The pop-in, pre-mesh and memory numbers go in as separate keys: one giant
+        // `json!` invocation overflows the macro recursion limit.
+        let popin = summary.popin.stats();
+        json["bench_path"] = match bench.path {
+            BenchPath::Still => "still".into(),
+            BenchPath::Turns => "turns".into(),
+        };
+        json["premesh"] = app
+            .renderer
+            .as_ref()
+            .map_or("off", |r| match r.premesh_mode() {
+                haste_render::PremeshMode::Off => "off",
+                haste_render::PremeshMode::Cone => "cone",
+                haste_render::PremeshMode::Predict => "predict",
+            })
+            .into();
+        json["popin_episodes"] = popin.0.into();
+        json["popin_episode_frames_avg"] = popin.1.into();
+        json["popin_episode_frames_worst"] = popin.2.into();
+        json["popin_frames_with_unmeshed"] = summary.popin.frames_with_unmeshed.into();
+        json["visible_unmeshed_section_frames"] = summary.popin.unmeshed_section_frames.into();
+        json["premeshed"] = summary.premeshed.into();
+        json["premesh_hits"] = summary.premesh_hits.into();
+        json["premesh_waste"] = summary.premesh_waste.into();
+        json["arena_bytes"] = app
+            .renderer
+            .as_ref()
+            .map_or(0, |r| r.arena_memory().1)
+            .into();
+        json["resident_sections"] = app
+            .renderer
+            .as_ref()
+            .map_or(0, |r| r.arena_memory().3)
+            .into();
+        json["peak_rss_mib"] = memory::mib(memory::peak_rss_kib() * 1024).into();
         std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
         println!("bench summary written to {}", out.display());
     }
