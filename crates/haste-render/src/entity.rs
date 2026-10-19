@@ -20,6 +20,7 @@ use crate::gui::Shelf;
 
 mod atlas;
 mod block_entities;
+mod boat;
 mod cape;
 mod equipment;
 mod experience_orb;
@@ -363,6 +364,12 @@ pub struct EntityRenderer {
     /// or while scoping, else distance / 96), set per frame by the renderer.
     beam_radius_scale: f32,
     view_scale: f32,
+    /// The boats' water patches (vanilla `water_mask`): depth-only triangles that cull the
+    /// water inside a floating hull ([`boat`](self::boat)).
+    mask_vertices: Vec<crate::entity::boat::MaskVertex>,
+    mask_buffer: wgpu::Buffer,
+    mask_capacity: usize,
+    water_mask_pipeline: wgpu::RenderPipeline,
     /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
     pub beams: crate::blockentity::BeamPipelines,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
@@ -398,6 +405,7 @@ impl EntityRenderer {
     ) {
         let view_scale = self.view_scale;
         self.vertices.clear();
+        self.mask_vertices.clear();
         self.nametags.clear();
         self.drawn = 0;
         for e in entities {
@@ -499,6 +507,12 @@ impl EntityRenderer {
                 // Overlay layers: the same transform and pose, each with its own texture and
                 // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
                 for overlay in e.overlays.iter().flatten() {
+                    // The water patch is not a coloured layer: its triangles go to the
+                    // depth-only mask buffer (`BoatRenderer.submitTypeAdditions`).
+                    if boat::is_water_patch(&overlay.model) {
+                        self.emit_water_mask(&overlay.model, root);
+                        continue;
+                    }
                     let Some((oroot, hurt)) = self.overlay_root(e, &overlay.model, root, assets)
                     else {
                         continue;
@@ -549,6 +563,17 @@ impl EntityRenderer {
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         }
+        if self.mask_vertices.len() > self.mask_capacity {
+            self.mask_capacity = self.mask_vertices.len().next_power_of_two();
+            self.mask_buffer = boat::make_mask_buffer(&self.device, self.mask_capacity);
+        }
+        if !self.mask_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.mask_buffer,
+                0,
+                bytemuck::cast_slice(&self.mask_vertices),
+            );
+        }
     }
     /// Item registry names by protocol id (for the held item).
     pub fn set_item_names(&mut self, names: Vec<Identifier>) {
@@ -556,15 +581,20 @@ impl EntityRenderer {
         self.item_models.clear();
     }
 
-    /// Draws into the main pass; the camera bind group must be set at group 0.
+    /// Draws into the main pass (camera bind group at group 0); the boats' water masks ride
+    /// along after the models (vanilla submits the patch inside the boat's own submission).
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
-        if self.vertices.is_empty() {
+        if self.vertices.is_empty() && self.mask_vertices.is_empty() {
             return 0;
         }
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(1, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..self.vertices.len() as u32, 0..1);
-        1
+        let mut calls = 0;
+        if !self.vertices.is_empty() {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(1, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.draw(0..self.vertices.len() as u32, 0..1);
+            calls += 1;
+        }
+        calls + boat::draw_masks(self, pass)
     }
 }
