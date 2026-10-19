@@ -142,6 +142,11 @@ pub trait EntitySink {
     fn mark_attack(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::mark_hit`: entity event 32 (an armour stand was hit, starting its
+    /// wobble). Default no-op.
+    fn mark_hit(&mut self, id: EntityId) {
+        let _ = id;
+    }
     /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
@@ -303,6 +308,9 @@ impl EntitySink for EntityStore {
     }
     fn mark_attack(&mut self, id: EntityId) {
         EntityStore::mark_attack(self, id)
+    }
+    fn mark_hit(&mut self, id: EntityId) {
+        EntityStore::mark_hit(self, id)
     }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)

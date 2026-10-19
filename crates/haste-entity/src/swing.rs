@@ -1,3 +1,2 @@
-//! Superseded by main's `walk_swing.rs` (this branch's temporary home for `SwingState`,
-//! moved out of `store.rs` for the file-size limit before main gained the real module).
-//! Empty stub: delete this file when merging.
+//! Empty since the merge with main: `SwingState` lives in `walk_swing.rs` now. This file is
+//! no longer declared in `lib.rs` and compiles nowhere; delete it.

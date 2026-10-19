@@ -145,7 +145,7 @@ impl SwingState {
 }
 
 /// `LivingEntity.tick`'s body-rotation step: follow the horizontal movement direction, then
-/// `tickHeadTurn` (0.3 lerp, 50 degree head/body split).
+/// `tickHeadTurn` (0.3 lerp, 50 degree head/body split). Pure move from `store.rs`.
 pub(crate) fn update_body_yaw(e: &mut crate::store::Entity, d: haste_core::DVec3) {
     let mut target = e.body_yaw;
     let side_dist = (d.x * d.x + d.z * d.z) as f32;

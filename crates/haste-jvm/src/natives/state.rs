@@ -142,6 +142,25 @@ pub(crate) extern "system" fn resource_packs_changed<'l>(
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// The cooldown percent of an item's cooldown group (vanilla
+/// `GuiGraphicsExtractor.itemCooldown` reading `player.getCooldowns().getCooldownPercent`)
+/// from the snapshot the client publishes per tick; `group` is the stack's group as Java
+/// resolved it (`ItemCooldowns.getCooldownGroup`), `partial` the frame's partial tick.
+pub(crate) extern "system" fn item_cooldown<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    group: JString<'l>,
+    partial: f32,
+) -> f32 {
+    env.with_env(|env| -> jni::errors::Result<f32> {
+        let group = group.try_to_string(env)?;
+        Ok(crate::item_cooldowns::item_cooldown_percent(
+            &group, partial,
+        ))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Copies the primitive player/debug state into Java's mirror arrays (one call per frame and tick).
 pub(crate) extern "system" fn mirror<'l>(
     mut env: EnvUnowned<'l>,

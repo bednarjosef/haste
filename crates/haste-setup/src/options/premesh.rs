@@ -6,9 +6,12 @@ use serde::{Deserialize, Serialize};
 
 /// The pre-mesh mode: `off` is exactly vanilla's visible-only meshing; `cone` widens the
 /// mesh gate's frustum toward the camera's turn; `predict` drives that widening with an
-/// online predictor of the next half-second of yaw. Default `off`: the lead's A/B on the
-/// turns bench (2026-10-19, rd 12 and 32) showed `cone` cuts unmeshed section-frames by
-/// 20-55 % but makes frames 10-25 % slower; it becomes the default once that cost is gone.
+/// online predictor of the next half-second of yaw. Default `off`: the pre-mesh uploads
+/// now take only the frame's slack (the 1 ms slice after the visible sections' budget),
+/// and the turns bench at the screenshot spot showed cone inside run-to-run noise — but
+/// the lead's A/B at the 144.5 100 -191.5 reference spot did not confirm it (rd 12 pop-in
+/// far from near-zero, rd 32 +50 %), so the default stays `off` until interleaved runs at
+/// that spot back the switch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PremeshMode {
     #[default]

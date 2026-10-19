@@ -184,9 +184,9 @@ pub(crate) fn model_has_part(
 }
 
 /// The model an entity draws with, whether it has a head part (the head aim), and its overlay
-/// layers (vanilla's per-type renderer choice): players the humanoid, boats their dumped layer,
-/// minecarts the minecart model, variant and table-covered mobs their registry row, everything
-/// else a generic box from its dimensions.
+/// layers (vanilla's per-type renderer choice): players the humanoid, the armour stand its
+/// code-built pair, boats their dumped layer, minecarts the minecart model, variant and
+/// table-covered mobs their registry row, everything else a generic box from its dimensions.
 ///
 /// Players get the humanoid model (classic layout; skins arrive with renderer's texture work),
 /// known mob types the model the recorder dumped for their vanilla layer, everything else a
@@ -203,6 +203,16 @@ pub(crate) fn model_for_entity(
 ) {
     if e.is_player_type {
         return (humanoid(false), true, Default::default());
+    }
+    let type_name = crate::registry::entity_type_name(e.kind);
+    // The armour stand's own code-built pair, small per the synced flag
+    // (`ArmorStandRenderer.submit` picks `smallModel` over `bigModel`).
+    if type_name == Some("minecraft:armor_stand") {
+        return (
+            crate::armor_stand::body_model(crate::armor_stand::is_small(&e.metadata)),
+            true,
+            Default::default(),
+        );
     }
     // Registry table first (shared per type, head flag precomputed), then the box. Babies use
     // the row's baby layer, like vanilla's AgeableMobRenderer.submit. Variant mobs
@@ -225,7 +235,6 @@ pub(crate) fn model_for_entity(
     // its colour byte. Both are plain model swaps, and both must be gated on the entity's own
     // type: their metadata slots (17, 18) collide with other mobs' fields (e.g. a sheep's
     // wool byte sits where a shulker's colour byte would).
-    let type_name = crate::registry::entity_type_name(e.kind);
     let variant = variant.or_else(|| {
         if type_name == Some("minecraft:tropical_fish") {
             crate::variants::tropical_fish_model(&e.metadata)

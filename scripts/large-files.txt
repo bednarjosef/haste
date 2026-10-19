@@ -16,7 +16,7 @@ crates/haste-data/src/blocks.rs 635
 crates/haste-entity/src/animation.rs 714
 crates/haste-entity/src/registry.rs 1146
 crates/haste-entity/src/riding.rs 640
-crates/haste-entity/src/store.rs 1005
+crates/haste-entity/src/store.rs 836
 crates/haste-jvm/src/host.rs 622
 crates/haste-jvm/src/proxies.rs 630
 crates/haste-jvm/tests/jvm.rs 2750
@@ -30,7 +30,7 @@ crates/haste-protocol/src/packets/mod.rs 713
 crates/haste-protocol/src/packets/play/clientbound/tests.rs 1047
 crates/haste-render/src/animation.rs 631
 crates/haste-render/src/blockentity/tests.rs 1405
-crates/haste-render/src/entity/tests.rs 1025
+crates/haste-render/src/entity/tests.rs 1023
 crates/haste-render/src/lightmap.rs 789
 crates/haste-render/src/renderer/render_world.rs 773
 crates/haste-render/src/sky.rs 963

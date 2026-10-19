@@ -103,14 +103,6 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     let pz = f32(in.pos_packed.z);
     let local = vec3<f32>(px, py, pz) / 65535.0 * POS_RANGE - POS_BIAS;
 
-    let world = vec3<f32>(in.origin) + local;
-    let rel = world - camera.cam_pos.xyz;
-
-    var out: VertexOut;
-    out.clip = camera.view_proj * vec4<f32>(rel, 1.0);
-    out.sprite_uv = vec2<f32>(f32(in.uv_packed.x), f32(in.uv_packed.y)) / UV_FIXED_SCALE;
-    out.sprite = in.sprite_packed;
-
     // Light in vanilla smooth units (16 per level, 0..240): `light.x` = sky,
     // `tint_b.y` = block, `light.y` = ao occluder count (bits 0..2) | shade
     // index (bits 3..5).
@@ -119,15 +111,50 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     let ao_shade_packed = in.light.y;
     let ao_count = ao_shade_packed & 7u;
     let shade_index = (ao_shade_packed >> 3u) & 7u;
+
+    return finish_vertex(
+        local,
+        vec2<f32>(f32(in.uv_packed.x), f32(in.uv_packed.y)) / UV_FIXED_SCALE,
+        sky16,
+        block16,
+        ao_count,
+        shade_index,
+        // Per-vertex biome/block tint, kept as the raw sRGB-encoded bytes: vanilla
+        // multiplies the encoded texel by the encoded tint (see `shade`).
+        vec3<f32>(f32(in.light.z), f32(in.light.w), f32(in.tint_b.x)) / 255.0,
+        in.sprite_packed,
+        in.origin,
+    );
+}
+
+/// The vertex tail shared by both terrain formats: camera transform, lightmap
+/// sample with AO and face shade, tint and the two fog bands (all the math
+/// `vs_main` used to inline).
+fn finish_vertex(
+    local: vec3<f32>,
+    sprite_uv: vec2<f32>,
+    sky16: u32,
+    block16: u32,
+    ao_count: u32,
+    shade_index: u32,
+    tint: vec3<f32>,
+    sprite: u32,
+    origin: vec3<i32>,
+) -> VertexOut {
+    let world = vec3<f32>(origin) + local;
+    let rel = world - camera.cam_pos.xyz;
+
+    var out: VertexOut;
+    out.clip = camera.view_proj * vec4<f32>(rel, 1.0);
+    out.sprite_uv = sprite_uv;
+    out.sprite = sprite;
+
     // Vanilla's per-vertex AO brightness: the average of four shade samples
     // (two sides, the diagonal, the face cell), each 1.0 or 0.2 — i.e.
     // 1 - 0.2 * occluders.
     let ao = 1.0 - 0.2 * f32(ao_count);
     out.light = light_color16(sky16, block16) * ao * face_shade(shade_index);
-
-    // Per-vertex biome/block tint, kept as the raw sRGB-encoded bytes: vanilla multiplies
-    // the encoded texel by the encoded tint (see `shade`).
-    out.tint = vec3<f32>(f32(in.light.z), f32(in.light.w), f32(in.tint_b.x)) / 255.0;
+    out.tint = tint;
 
     // Fog: vanilla's two linear bands, both per-vertex like its vertex-shader varyings —
     // the environmental band on the spherical distance, the render distance band on the
@@ -141,6 +168,148 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     );
     return out;
 }
+
+// ---------------------------------------------------------------------------
+// Quad pulling (`--terrain-format quad`): the vertex shader reads one compact
+// record per quad (or per vertex for the shapes a record cannot express) from
+// the arena's storage buffers (group 3, bound once per arena) and expands the
+// corners itself from `vertex_index`; there is no index buffer. See
+// quad_format.rs for the record layouts.
+
+struct QuadIn {
+    // Instance-rate, one per draw: the section origin and the span kind
+    // (0 = rect records, 1 = four-vertex quads, 2 = triangle soups). The
+    // span's record base rides the draw's base_vertex: the static index
+    // pattern (0..3 per quad, or sequential for soups) plus base_vertex
+    // makes vertex_index the record index (quad formats: >> 2).
+    @location(0) origin: vec3<i32>,
+    @location(1) kind: u32,
+};
+
+@group(3) @binding(0) var<storage, read> quad_records: array<u32>;
+@group(3) @binding(1) var<storage, read> quad_vertices: array<u32>;
+
+/// A decoded corner, whichever format it came from.
+struct Decoded {
+    local: vec3<f32>,
+    sprite_uv: vec2<f32>,
+    sky16: u32,
+    block16: u32,
+    ao_count: u32,
+    shade_index: u32,
+    tint: vec3<f32>,
+    sprite: u32,
+};
+
+/// One `PackedVertex` (20 bytes, five u32 words) from the vertex arena,
+/// decoded to the same values `vs_main` gets from its vertex attributes.
+fn pull_vertex(index: u32) -> Decoded {
+    let w0 = quad_vertices[index * 5u];
+    let w1 = quad_vertices[index * 5u + 1u];
+    let w2 = quad_vertices[index * 5u + 2u];
+    let w3 = quad_vertices[index * 5u + 3u];
+    let w4 = quad_vertices[index * 5u + 4u];
+    return Decoded(
+        vec3<f32>(f32(w0 & 0xFFFFu), f32(w0 >> 16u), f32(w1 & 0xFFFFu))
+            / 65535.0 * POS_RANGE - POS_BIAS,
+        vec2<f32>(f32(w2 & 0xFFFFu), f32(w2 >> 16u)) / UV_FIXED_SCALE,
+        w3 & 0xFFu,
+        w4 >> 24u,
+        (w3 >> 8u) & 7u,
+        (w3 >> 11u) & 7u,
+        vec3<f32>(
+            f32((w3 >> 16u) & 0xFFu),
+            f32((w3 >> 24u) & 0xFFu),
+            f32((w4 >> 16u) & 0xFFu),
+        ) / 255.0,
+        w4 & 0xFFFFu,
+    );
+}
+
+/// One `PackedQuad` (32 bytes, eight u32 words) from the quad arena, expanded
+/// to corner `c` of quad `g`. Layout mirrors quad_format.rs: the header (top
+/// byte of word 7) carries the normal axis, the uv drivers and the corner
+/// ring; the light word pair packs 15 bits per corner plus the shade index at
+/// bit 60.
+fn pull_rect(base_word: u32, c: u32) -> Decoded {
+    let w0 = quad_records[base_word];
+    let w1 = quad_records[base_word + 1u];
+    let w2 = quad_records[base_word + 2u];
+    let w3 = quad_records[base_word + 3u];
+    let w4 = quad_records[base_word + 4u];
+    let w5 = quad_records[base_word + 5u];
+    let w6 = quad_records[base_word + 6u];
+    let w7 = quad_records[base_word + 7u];
+    let header = w7 >> 24u;
+    let n = header & 3u;
+    // The corner ring: grid corner of vertex 0 and the walk direction.
+    let start = (header >> 4u) & 3u;
+    let step = select(1u, 3u, ((header >> 6u) & 1u) == 1u);
+    let grid = (start + step * c) & 3u;
+    let sa = grid == 1u || grid == 2u;
+    let sb = grid == 2u || grid == 3u;
+    // Tangent bounds (a, b are the two non-normal axes in ascending order).
+    let u = select(w0 >> 16u, w1 & 0xFFFFu, sa);
+    let v = select(w1 >> 16u, w2 & 0xFFFFu, sb);
+    let plane = w0 & 0xFFFFu;
+    // The corner's (a, b, plane) mapped onto x/y/z by the normal axis.
+    var pos3 = vec3<f32>(f32(plane), f32(u), f32(v));
+    if (n == 1u) {
+        pos3 = vec3<f32>(f32(u), f32(plane), f32(v));
+    } else if (n == 2u) {
+        pos3 = vec3<f32>(f32(u), f32(v), f32(plane));
+    }
+    let local = pos3 / 65535.0 * POS_RANGE - POS_BIAS;
+    // UV: each component follows one corner sign (its driver), 0- or 1-bound.
+    let du = ((header >> 2u) & 1u) == 1u;
+    let dv = ((header >> 3u) & 1u) == 1u;
+    let uv = vec2<f32>(
+        f32(select(w2 >> 16u, w3 & 0xFFFFu, select(sa, sb, du))),
+        f32(select(w3 >> 16u, w4 & 0xFFFFu, select(sa, sb, dv))),
+    ) / UV_FIXED_SCALE;
+    // Light: corner `c`'s 15 bits out of the packed pair, shade at bit 60.
+    var bits = 0u;
+    if (c == 0u) {
+        bits = w5 & 0x7FFFu;
+    } else if (c == 1u) {
+        bits = w5 >> 15u;
+    } else if (c == 2u) {
+        bits = ((w5 >> 30u) | (w6 << 2u)) & 0x7FFFu;
+    } else {
+        bits = (w6 >> 13u) & 0x7FFFu;
+    }
+    return Decoded(
+        local,
+        uv,
+        (bits & 0x3Fu) * 4u,
+        ((bits >> 6u) & 0x3Fu) * 4u,
+        (bits >> 12u) & 7u,
+        (w6 >> 28u) & 7u,
+        vec3<f32>(f32(w7 & 0xFFu), f32((w7 >> 8u) & 0xFFu), f32((w7 >> 16u) & 0xFFu)) / 255.0,
+        w4 >> 16u,
+    );
+}
+
+@vertex
+fn vs_quad(in: QuadIn, @builtin(vertex_index) vi: u32) -> VertexOut {
+    var d: Decoded;
+    if (in.kind == 0u) {
+        // Rect records: the index pattern makes vi = 4 * record + corner.
+        d = pull_rect((vi >> 2u) * 8u, vi & 3u);
+    } else if (in.kind == 1u) {
+        // Four-vertex quads: vi = 4 * record + corner, record = vi >> 2.
+        d = pull_vertex(vi >> 2u);
+    } else {
+        // Triangle soups: sequential indices make vi the record.
+        d = pull_vertex(vi);
+    }
+    return finish_vertex(
+        d.local, d.sprite_uv, d.sky16, d.block16, d.ao_count, d.shade_index, d.tint, d.sprite,
+        in.origin,
+    );
+}
+
+
 
 @group(1) @binding(1) var atlas_texture: texture_2d<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;

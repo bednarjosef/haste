@@ -364,12 +364,12 @@ pub struct EntityOverlay {
     pub tint: [f32; 3],
 }
 
-/// The decorations: one module per concept (all the state the non-model renderers
-/// extract), re-exported so `haste_core::model::Decoration` keeps working.
-mod decoration;
-pub use decoration::{
-    ArrowDecoration, BlockDisplay, Decoration, ExperienceOrbDecoration, ItemFrameDecoration,
-    LightningDecoration, MinecartDecoration, PaintingDecoration, ThrownItemDecoration,
+/// The special-entity decorations (drawn by the renderer rather than a cube model) live in
+/// their own module; re-exported so the `haste_core::model::...` paths keep working.
+pub use crate::decoration::{
+    ArrowDecoration, BlockDisplay, Decoration, ExperienceOrbDecoration, FallingBlockDecoration,
+    ItemFrameDecoration, LightningDecoration, MinecartDecoration, PaintingDecoration,
+    PrimedTntDecoration, ThrownItemDecoration,
 };
 
 #[cfg(test)]

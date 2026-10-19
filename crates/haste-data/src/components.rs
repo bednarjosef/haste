@@ -69,6 +69,10 @@ pub struct ItemComponents {
     piercing_weapons: HashMap<Identifier, Option<String>>,
     /// `minecraft:minimum_attack_charge` by item (`Player.cannotAttackWithItem`).
     minimum_attack_charges: HashMap<Identifier, f32>,
+    /// The `cooldown_group` of the items whose default components carry a
+    /// `minecraft:use_cooldown` that names one (`ItemCooldowns.getCooldownGroup`); an item
+    /// without an entry groups under its own registry id.
+    use_cooldowns: HashMap<Identifier, Identifier>,
 }
 
 impl ItemComponents {
@@ -123,6 +127,20 @@ impl ItemComponents {
     /// if it has one.
     pub fn minimum_attack_charge(&self, item: &Identifier) -> Option<f32> {
         self.minimum_attack_charges.get(item).copied()
+    }
+
+    /// The item's `minecraft:use_cooldown` group (`ItemCooldowns.getCooldownGroup`): the
+    /// component's `cooldown_group`, or the item's own registry id when it names none (or has
+    /// no component at all — then `None`, the caller falls back to the id it resolved).
+    pub fn cooldown_group(&self, item: &Identifier) -> Option<&Identifier> {
+        self.use_cooldowns.get(item)
+    }
+
+    /// The names of the items whose default components carry a `minecraft:use_cooldown` that
+    /// names a group (tests).
+    #[cfg(test)]
+    pub fn use_cooldown_items(&self) -> impl Iterator<Item = &Identifier> {
+        self.use_cooldowns.keys()
     }
 
     /// Whether item's default components carry `minecraft:glider` (vanilla
@@ -206,6 +224,11 @@ impl ItemComponents {
         self.minimum_attack_charges.insert(item, charge);
     }
 
+    /// Sets an item's `minecraft:use_cooldown` group (tests).
+    pub fn insert_use_cooldown(&mut self, item: Identifier, group: Identifier) {
+        self.use_cooldowns.insert(item, group);
+    }
+
     /// How many items carry `minecraft:attribute_modifiers`.
     pub fn len(&self) -> usize {
         self.attributes.len()
@@ -230,6 +253,7 @@ impl ItemComponents {
         let mut use_effects: HashMap<Identifier, UseEffects> = HashMap::new();
         let mut piercing_weapons: HashMap<Identifier, Option<String>> = HashMap::new();
         let mut minimum_attack_charges: HashMap<Identifier, f32> = HashMap::new();
+        let mut use_cooldowns: HashMap<Identifier, Identifier> = HashMap::new();
         let Ok(entries) = std::fs::read_dir(components_dir) else {
             return ItemComponents {
                 dyed_color_type: dyed_color_type(registries),
@@ -299,6 +323,14 @@ impl ItemComponents {
             if let Some(e) = components.get("minecraft:use_effects") {
                 use_effects.insert(item.clone(), parse_use_effects(e));
             }
+            if let Some(group) = components
+                .get("minecraft:use_cooldown")
+                .and_then(|c| c.get("cooldown_group"))
+                .and_then(|g| g.as_str())
+                .and_then(|g| Identifier::parse(g).ok())
+            {
+                use_cooldowns.insert(item.clone(), group);
+            }
         }
         let len = registries.len("minecraft:item");
         let mut equippable = vec![None; len];
@@ -318,6 +350,7 @@ impl ItemComponents {
             use_effects,
             piercing_weapons,
             minimum_attack_charges,
+            use_cooldowns,
         }
     }
 

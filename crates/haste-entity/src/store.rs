@@ -7,9 +7,7 @@ use ahash::AHashMap;
 use haste_core::entity::{
     EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo, Pose,
 };
-use haste_core::ids::{EntityId, RegistryIndex};
-use haste_core::math::Vec3;
-use haste_core::model::EntityInstance;
+use haste_core::ids::{BlockStateId, EntityId, RegistryIndex};
 use haste_core::DVec3;
 use uuid::Uuid;
 
@@ -130,6 +128,10 @@ pub struct Entity {
     pub old_swell: i32,
     /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
     pub attack_ticks: i32,
+    /// The tick count when entity event 32 last arrived (`ArmorStand.handleEntityEvent` sets
+    /// `lastHit = gameTime`): the armour stand's hit wobble counts from it. A sentinel far in
+    /// the past means "never hit" (vanilla's `lastHit = 0` against a large game time).
+    pub last_hit: i64,
     /// A dropped item entity's stack (metadata index 8, `ItemEntity.DATA_ITEM`), if its metadata
     /// named one.
     pub item: Option<ItemStackData>,
@@ -149,6 +151,9 @@ pub struct Entity {
     /// Whether the type is a `LivingEntity` (its metadata index 8 is the living-flags
     /// byte; only such entities track a use).
     pub(crate) is_living: bool,
+    /// True for a `minecraft:tnt` entity: the client ticks its own fuse down
+    /// (`PrimedTnt.tick` runs on the client as well, between the server's syncs).
+    pub(crate) is_tnt: bool,
     /// An item use the server started (`useItem`/`useItemRemaining`; see `using_item`).
     pub using_item: crate::using_item::UsingItem,
     /// `AbstractArrow.shakeTime`: ticks of stuck-in-ground shake left, arrows only.
@@ -181,6 +186,7 @@ impl Entity {
         };
         // `ItemEntity`: simulated client-side; `set_metadata` confirms it at index 8.
         let is_item = type_name == Some("minecraft:item");
+        let is_tnt = type_name == Some("minecraft:tnt");
         // The `AbstractBoat` family (vanilla's or a mod's): the client ticks its paddle and
         // bubble-column state (`crate::boat`).
         let is_boat = type_name.is_some_and(crate::boat::is_boat_family);
@@ -228,6 +234,7 @@ impl Entity {
             swell: 0,
             old_swell: 0,
             attack_ticks: 0,
+            last_hit: -1000,
             item: None,
             is_item,
             is_boat,
@@ -235,6 +242,7 @@ impl Entity {
             age: 0,
             cloak: crate::avatar::Cloak::default(),
             is_living: living,
+            is_tnt,
             using_item: crate::using_item::UsingItem::default(),
             shake_time: 0,
             arrow_in_ground: false,
@@ -289,7 +297,7 @@ impl Entity {
 
 /// The `EntityInstance::item` entry for a tracked entity: the stack of a dropped item entity
 /// (count included; the renderer draws 1-5 copies from it), aged by the partial tick.
-fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
+pub(crate) fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
     let stack = e.item.as_ref()?;
     let item = stack.item?;
     Some(haste_core::model::DroppedItem {
@@ -302,28 +310,32 @@ fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedIt
 /// The hands, equipment layers and custom head item of an entity, resolved through the shared
 /// per-slot rules ([`crate::local_player::equipment_of`]).
 pub struct EntityStore {
-    slots: Vec<Option<Entity>>,
+    pub(crate) slots: Vec<Option<Entity>>,
     free: Vec<u32>,
     by_id: AHashMap<EntityId, u32>,
-    dims: EntityDimensions,
+    pub(crate) dims: EntityDimensions,
     players: AHashMap<Uuid, PlayerInfo>,
     /// Who rides whom (`set_passengers`).
-    riding: Riding,
+    pub(crate) riding: Riding,
     /// The synced `minecraft:painting_variant` registry (id -> size/asset), set at join from
     /// the server's `registry_data`; empty when the server sent none.
-    painting_variants: HashMap<u32, crate::decoration::PaintingVariant>,
+    pub(crate) painting_variants: HashMap<u32, crate::decoration::PaintingVariant>,
     /// The synced variant registries (cat/wolf/frog/pig/cow/chicken), set at join from the
     /// server's `registry_data`; empty when the server sent none.
-    mob_variants: crate::variants::MobVariants,
+    pub(crate) mob_variants: crate::variants::MobVariants,
     /// The world age of the last `set_time` (`NeutralMob.isAngry` compares anger end times
     /// against it); 0 before one arrives.
-    world_age: i64,
+    pub(crate) world_age: i64,
     /// Item default components (the `equippable` component armour reads), from the datagen
     /// report; empty when absent (armour then draws nothing).
-    item_components: haste_data::ItemComponents,
+    pub(crate) item_components: haste_data::ItemComponents,
+    /// The TNT block's default state: what a primed TNT without a synced
+    /// `DATA_BLOCK_STATE_ID` renders as. `AIR` until set (draws nothing), matching
+    /// `PrimedTnt.DEFAULT_BLOCK_STATE`.
+    pub(crate) default_tnt_state: BlockStateId,
     /// Each player's resolved skin (`PlayerInfo.getSkin`), by profile id; a player without one
     /// wears its default skin (`DefaultPlayerSkin.get`).
-    skins: AHashMap<Uuid, Arc<crate::skin::PlayerSkin>>,
+    pub(crate) skins: AHashMap<Uuid, Arc<crate::skin::PlayerSkin>>,
     /// The tick's use steps (`LivingEntity.updateUsingItem`), recorded per entity for the
     /// client's effects; reused, so a tick without a use allocates nothing.
     pub(crate) use_ticks: Vec<crate::using_item::UseTick>,
@@ -361,6 +373,7 @@ impl EntityStore {
             mob_variants: crate::variants::MobVariants::empty(),
             world_age: 0,
             item_components: haste_data::ItemComponents::default(),
+            default_tnt_state: BlockStateId::AIR,
             use_ticks: Vec::new(),
         }
     }
@@ -369,6 +382,12 @@ impl EntityStore {
     /// from the datagen report at startup.
     pub fn set_item_components(&mut self, components: haste_data::ItemComponents) {
         self.item_components = components;
+    }
+
+    /// Sets the TNT block's default state (what a primed TNT renders as without a synced
+    /// `DATA_BLOCK_STATE_ID`), resolved from the block tables at startup.
+    pub fn set_default_tnt_state(&mut self, state: BlockStateId) {
+        self.default_tnt_state = state;
     }
 
     /// Sets the synced `minecraft:painting_variant` table (id -> size/asset), from the server's
@@ -569,6 +588,16 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 32 (`ArmorStand.handleEntityEvent`): the armour stand was hit; its
+    /// render-side wobble counts from now (`lastHit = gameTime`).
+    pub fn mark_hit(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.last_hit = e.tick_count as i64;
+            }
+        }
+    }
+
     /// Entity event 70 (`MinecartTNT.handleEntityEvent` -> `primeFuse`): the TNT cart's fuse
     /// starts at 80 ticks and counts down client-side (`MinecartTNT.tick`).
     pub fn prime_tnt_minecart(&mut self, id: EntityId) {
@@ -732,6 +761,11 @@ impl EntityStore {
             if crate::arrow::is_arrow(slot.kind) {
                 crate::arrow::tick(slot, arrows, arrow_particles);
             }
+            // `PrimedTnt.tick` runs on the client too: the fuse counts down locally
+            // between the server's entity-data syncs (which overwrite it in lockstep).
+            if slot.is_tnt {
+                slot.metadata.tnt_fuse = slot.metadata.tnt_fuse.saturating_sub(1);
+            }
             // `AbstractBoat.tick`'s client-side state: the paddle sweeps and the
             // bubble-column rocking, from the synced flags and bubble time.
             if slot.is_boat {
@@ -826,166 +860,5 @@ impl EntityStore {
 
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
-    }
-
-    /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
-    /// layout; skins arrive with renderer's texture work), known mob types the model the recorder
-    /// dumped for their vanilla layer, everything else a generic box from its current dimensions;
-    /// a dropped item entity draws as the item itself. Each model's `setupAnim` (walk swing, head
-    /// aim, attack, pose) is applied by part name; models with no "head" part (the box) get no
-    /// overrides.
-    pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
-        for slot in self.slots.iter().flatten() {
-            // The decoration an entity draws through, if any (one renderer per vanilla
-            // concept; `decoration::resolve` names them).
-            let (decoration, non_hanging, is_minecart) =
-                crate::decoration::resolve(slot, partial_tick, &self.painting_variants);
-            let pos = if non_hanging {
-                slot.prev_pos.lerp(slot.pos, partial_tick as f64)
-            } else if decoration.is_some() {
-                crate::decoration::render_center(
-                    slot.kind,
-                    slot.data,
-                    slot.pos,
-                    &slot.metadata,
-                    &self.painting_variants,
-                )
-            } else {
-                slot.prev_pos.lerp(slot.pos, partial_tick as f64)
-            };
-            let (model, has_head, overlays) = crate::models::model_for_entity(
-                slot,
-                is_minecart,
-                &self.mob_variants,
-                self.world_age,
-            );
-            let is_passenger = self.riding.vehicle_of(slot.id).is_some();
-            // `AbstractBoatModel.setupAnim` for boats (the paddles); the generic `setupAnim`
-            // for everything else. A player-typed entity is never posed as a boat (its kind
-            // may be anything the server paired it with).
-            let is_boat = slot.is_boat && !slot.is_player_type;
-            let pose = if is_boat {
-                crate::boat::setup_anim(slot, &model, partial_tick)
-            } else {
-                crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger)
-            };
-            let texture = model.texture.path();
-            // `AbstractBoatRenderer.submit`'s rotations for boats; the generic
-            // `setupRotations` for everything else.
-            let body = if is_boat {
-                crate::boat::body_transform(slot, partial_tick)
-            } else {
-                crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"))
-            };
-            // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
-            let body_scale = if texture.contains("creeper") {
-                crate::animation::creeper_scale(slot, partial_tick)
-            } else {
-                Vec3::ONE
-            };
-            // Living models turn with their body yaw; a non-living box follows its yaw
-            // (`Entity.getYRot(partialTicks)`).
-            let yaw = if has_head {
-                slot.body_yaw_at(partial_tick)
-            } else {
-                slot.yaw_at(partial_tick)
-            };
-            let type_name = crate::registry::entity_type_name(slot.kind);
-            let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
-            // `LivingEntityRenderer.getShadowRadius`/`MobRenderer.getShadowRadius`: the
-            // renderer's base radius times the living/age scale (0.5 for babies). The player's
-            // `AvatarRenderer` uses 0.5.
-            let base_shadow = type_name
-                .map(crate::registry::shadow_radius_for_name)
-                .unwrap_or(0.0);
-            let shadow_scale = if is_baby { 0.5 } else { 1.0 };
-            let shadow_radius = if slot.is_player_type {
-                0.5
-            } else {
-                base_shadow * shadow_scale
-            };
-            let shadow_strength = type_name
-                .map(crate::registry::shadow_strength_for_name)
-                .unwrap_or(1.0);
-            let invisible = slot.metadata.shared.invisible;
-            // `EntityRenderer.extractNameTags`/`shouldShowName`: players always show their name
-            // (`Player.shouldShowName`), mobs only a visible custom name (`LivingEntity`), both
-            // hidden while invisible (`isVisibleToPlayer`).
-            let nametag = if invisible {
-                None
-            } else if slot.is_player_type {
-                slot.nametag.clone()
-            } else if slot.metadata.custom_name_visible() {
-                // The plain custom name is computed when the metadata changes (it allocates),
-                // never per frame.
-                slot.metadata
-                    .custom_name_plain()
-                    .map(str::to_owned)
-                    .or_else(|| slot.nametag.clone())
-            } else {
-                None
-            };
-            let name_tag_y = crate::registry::name_tag_offset_for_name(
-                type_name.unwrap_or(""),
-                slot.dimensions.1,
-            );
-            // Equipment layers (held items, armour) are only drawn on humanoid models
-            // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
-            let humanoid = has_head
-                && crate::models::model_has_part(&model.root, haste_core::parts::RIGHT_ARM);
-            let (hands, equipment, head_item) = if humanoid {
-                crate::local_player::equipment_of(slot, &self.item_components)
-            } else {
-                ([None, None], Vec::new(), None)
-            };
-            let mut inst = EntityInstance {
-                id: slot.id,
-                model,
-                pos,
-                yaw,
-                pitch: slot.pitch_at(partial_tick),
-                head_yaw: slot.head_yaw_at(partial_tick),
-                // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
-                scale: crate::variants::scale_for(slot.kind, &slot.metadata),
-                pose,
-                body,
-                body_scale,
-                skin: None,
-                nametag,
-                below_name: None,
-                shadow_radius,
-                shadow_strength,
-                invisible,
-                // `Entity.displayFireAnimation`: `isOnFire()` (the shared flag, never for a
-                // fire-immune type) and not a spectator (only players can be one; their game
-                // mode is not tracked for remote players yet).
-                display_fire: slot.metadata.shared.on_fire && !self.dims.fire_immune(slot.kind),
-                width: slot.dimensions.0,
-                height: slot.dimensions.1,
-                is_discrete: slot.metadata.shared.crouching,
-                name_tag_y,
-                hurt: hurt_strength(slot),
-                // Full sky until the client samples the world where it builds the frame's
-                // instances (`EntityInstance::sample_light`).
-                light: (15, 0),
-                // Overlay layers (sheep wool, horse markings, collars, the fish pattern):
-                // drawn with the same transform and pose after the base model.
-                overlays,
-                item: item_of(slot, partial_tick),
-                decoration,
-                hands,
-                equipment,
-                head_item,
-            };
-            if slot.is_player_type {
-                crate::avatar::dress_tracked(
-                    &self.player_skin(slot.uuid),
-                    slot,
-                    &mut inst,
-                    partial_tick,
-                );
-            }
-            out.push(inst);
-        }
     }
 }
