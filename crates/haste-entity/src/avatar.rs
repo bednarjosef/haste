@@ -11,6 +11,10 @@ use haste_core::model::{EntityInstance, EntityOverlay, PoseOverrides};
 
 use crate::skin::PlayerSkin;
 
+/// `Avatar.DATA_PLAYER_MAIN_HAND`'s metadata index (`Entity`'s 8 slots, `LivingEntity`'s 7,
+/// then this byte: 0 right, 1 left).
+pub const DATA_PLAYER_MAIN_HAND: u8 = 15;
+
 /// `Avatar.DATA_PLAYER_MODE_CUSTOMISATION`'s metadata index (`Entity`'s 8 slots, `LivingEntity`'s
 /// 7, then `Avatar`'s main arm at 15 and this byte at 16).
 pub const DATA_PLAYER_MODE_CUSTOMISATION: u8 = 16;

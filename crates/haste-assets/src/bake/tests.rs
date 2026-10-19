@@ -127,6 +127,7 @@ fn bake_cube() -> Vec<BakedQuad> {
         ground_display: None,
         firstperson_display: None,
         thirdperson_display: None,
+        thirdperson_left_display: None,
         head_display: None,
         on_shelf_display: None,
         fixed_display: None,

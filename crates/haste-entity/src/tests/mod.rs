@@ -14,6 +14,7 @@ use crate::store::{Entity, EntityStore};
 use haste_core::model::{CubeModel, ModelPart};
 
 mod animation;
+mod arm_pose;
 mod connectivity;
 mod hurt;
 mod item_entity;
