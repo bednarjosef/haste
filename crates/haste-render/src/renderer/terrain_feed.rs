@@ -297,6 +297,8 @@ impl Renderer {
     /// compiling); a bit appearing or disappearing marks the sightline data dirty so
     /// the walk re-runs, like vanilla's propagation from newly loaded sections.
     pub fn note_section_state(&mut self, pos: SectionPos, state: SectionLoadState) {
+        self.premesh
+            .note_column(pos.chunk(), state != SectionLoadState::Unloaded);
         let si = pos.y - self.min_section;
         if !(0..32).contains(&si) {
             return;

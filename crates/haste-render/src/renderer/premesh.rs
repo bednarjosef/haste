@@ -46,8 +46,8 @@ const MAX_PITCH_WIDEN: f32 = 45.0;
 const MIN_YAW_WIDEN: f32 = 2.0;
 const MIN_SPEED: f32 = 2.0;
 /// A pre-meshed section's verdict window: it became visible (a hit) within this many
-/// frames, else it was waste.
-const HIT_FRAMES: u32 = 150;
+/// seconds, else it was waste.
+const HIT_WINDOW: f32 = 2.0;
 /// The predictor's features are the angular velocity and acceleration scaled to O(1)
 /// (`yaw_vel / FEATURE_VEL_SCALE`, `accel / FEATURE_ACCEL_SCALE`), so one learning rate
 /// suits every turn speed; the weights' seed matches cone's rule
@@ -109,15 +109,18 @@ pub(super) struct Premesh {
     /// (`None`: the camera is still, nothing to pre-mesh).
     frustum: Option<([glam::Vec4; 6], glam::DVec3)>,
     /// Pop-in tracking (the bench turns it on): positions that were meshed (a mesh with
-    /// no vertices leaves no resident entry, and must not count as unmeshed forever).
+    /// no vertices leaves no resident entry, and must not count as unmeshed forever),
+    /// and the columns the feed has reported sections for (loaded chunks — the walk
+    /// enters the unloaded ring of its grid as see-through, and those sections can
+    /// never have a mesh, so they are not pop-in).
     tracking: bool,
     mesh_done: ahash::HashSet<SectionPos>,
-    /// Pre-meshed sections awaiting their verdict (position, frame pre-meshed), and the
+    noted: ahash::HashSet<haste_core::ChunkPos>,
+    /// Pre-meshed sections awaiting their verdict (position, when pre-meshed), and the
     /// counters behind `premesh_summary`. `keep` is the aging pass's spare list (both
     /// lists keep their capacity; no allocation per frame).
-    premeshed: Vec<(SectionPos, u32)>,
-    keep: Vec<(SectionPos, u32)>,
-    frame: u32,
+    premeshed: Vec<(SectionPos, Instant)>,
+    keep: Vec<(SectionPos, Instant)>,
     premeshed_total: u32,
     hits: u32,
     wasted: u32,
@@ -141,9 +144,9 @@ impl Premesh {
             frustum: None,
             tracking: false,
             mesh_done: ahash::HashSet::default(),
+            noted: ahash::HashSet::default(),
             premeshed: Vec::new(),
             keep: Vec::new(),
-            frame: 0,
             premeshed_total: 0,
             hits: 0,
             wasted: 0,
@@ -264,29 +267,42 @@ impl Premesh {
         }
     }
 
+    /// Records whether a column's chunk is loaded (the feed's section-state notes):
+    /// the pop-in count only counts sections that could have a mesh.
+    pub(super) fn note_column(&mut self, column: haste_core::ChunkPos, loaded: bool) {
+        if !self.tracking {
+            return;
+        }
+        if loaded {
+            self.noted.insert(column);
+        } else {
+            self.noted.remove(&column);
+        }
+    }
+
     /// The feed tells the renderer a section was submitted for pre-meshing (not because
-    /// it was visible): it now waits to become visible within [`HIT_FRAMES`] frames.
+    /// it was visible): it now waits to become visible within [`HIT_WINDOW`].
     pub(super) fn note_premeshed(&mut self, pos: SectionPos) {
-        self.premeshed.push((pos, self.frame));
+        self.premeshed.push((pos, Instant::now()));
         self.premeshed_total += 1;
     }
 
     /// Ages one batch of tracked pre-meshed sections against the visible gate: one the
-    /// gate can see is a hit, one older than [`HIT_FRAMES`] without ever becoming
+    /// gate can see is a hit, one older than [`HIT_WINDOW`] without ever becoming
     /// visible is waste; the survivors land in `keep` (both lists keep their capacity).
     /// A free function so the render thread can hand it a closure over the renderer.
     fn age_premeshed(
-        frame: u32,
+        now: Instant,
         visible: &dyn Fn(SectionPos) -> bool,
-        pending: &mut Vec<(SectionPos, u32)>,
-        keep: &mut Vec<(SectionPos, u32)>,
+        pending: &mut Vec<(SectionPos, Instant)>,
+        keep: &mut Vec<(SectionPos, Instant)>,
     ) -> (u32, u32) {
         let mut hits = 0;
         let mut wasted = 0;
         for (pos, at) in pending.drain(..) {
             if visible(pos) {
                 hits += 1;
-            } else if frame.saturating_sub(at) > HIT_FRAMES {
+            } else if now.saturating_duration_since(at).as_secs_f32() > HIT_WINDOW {
                 wasted += 1;
             } else {
                 keep.push((pos, at));
@@ -304,6 +320,7 @@ impl Premesh {
     /// stay): `Renderer::clear_world`.
     pub(super) fn world_cleared(&mut self) {
         self.mesh_done.clear();
+        self.noted.clear();
         self.premeshed.clear();
         self.frustum = None;
     }
@@ -416,8 +433,18 @@ impl Renderer {
         if self.premesh.tracking && self.cull_sections {
             if let Some((planes, cam)) = &self.want_frustum {
                 let tracking = &self.premesh;
+                // Empty sections (the walk's see-through data) sit in the mask but draw
+                // nothing — vanilla never compiles them either — so they are not pop-in.
+                let empty = self.known_empty.lock();
                 for (c, si) in self.visible_mask.ordered() {
+                    if !tracking.noted.contains(&c) {
+                        // The unloaded ring of the walk's grid: nothing could mesh.
+                        continue;
+                    }
                     let pos = SectionPos::new(c.x, si + self.min_section, c.z);
+                    if si < 32 && empty.get(&c).is_some_and(|bits| bits & (1u32 << si) != 0) {
+                        continue;
+                    }
                     if self.sections.get(pos).is_none() && !tracking.mesh_done.contains(&pos) {
                         let lo = [
                             ((pos.x << 4) as f64 - cam.x - 8.0) as f32,
@@ -442,17 +469,13 @@ impl Renderer {
         // are swapped back (no allocation per frame).
         let mut pending = std::mem::take(&mut self.premesh.premeshed);
         let mut keep = std::mem::take(&mut self.premesh.keep);
-        let (hits, wasted) = Premesh::age_premeshed(
-            self.premesh.frame,
-            &|pos| self.wants_section(pos),
-            &mut pending,
-            &mut keep,
-        );
+        let now = Instant::now();
+        let (hits, wasted) =
+            Premesh::age_premeshed(now, &|pos| self.wants_section(pos), &mut pending, &mut keep);
         self.premesh.hits += hits;
         self.premesh.wasted += wasted;
         self.premesh.premeshed = keep;
         self.premesh.keep = pending;
-        self.premesh.frame += 1;
-        self.premesh.update(camera, aspect, Instant::now());
+        self.premesh.update(camera, aspect, now);
     }
 }

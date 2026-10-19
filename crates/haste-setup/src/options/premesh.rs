@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 
 /// The pre-mesh mode: `off` is exactly vanilla's visible-only meshing; `cone` widens the
 /// mesh gate's frustum toward the camera's turn; `predict` drives that widening with an
-/// online predictor of the next half-second of yaw.
+/// online predictor of the next half-second of yaw. Default `cone` (measured: it removes
+/// nearly all turn pop-in at render distance 12 and 32; `--premesh off` restores the
+/// vanilla behaviour).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PremeshMode {
-    #[default]
     Off,
+    #[default]
     Cone,
     Predict,
 }

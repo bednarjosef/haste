@@ -167,9 +167,10 @@ fn premesh_verdicts_count_hits_and_waste() {
     // past the window counts it as waste. The survivors keep waiting.
     let mut pending = std::mem::take(&mut premesh.premeshed);
     let mut keep = std::mem::take(&mut premesh.keep);
-    let (hits, wasted) = Premesh::age_premeshed(1, &|p| p == near, &mut pending, &mut keep);
+    let (hits, wasted) =
+        Premesh::age_premeshed(Instant::now(), &|p| p == near, &mut pending, &mut keep);
     assert_eq!((hits, wasted), (1, 0));
-    assert_eq!(keep, vec![(far, 0)], "the far one keeps waiting");
+    assert_eq!(keep.len(), 1, "the far one keeps waiting");
     premesh.hits += hits;
     premesh.wasted += wasted;
     premesh.premeshed = keep;
@@ -177,8 +178,13 @@ fn premesh_verdicts_count_hits_and_waste() {
     assert_eq!(premesh.summary(), (2, 1, 0));
     let mut pending = std::mem::take(&mut premesh.premeshed);
     let mut keep = std::mem::take(&mut premesh.keep);
+    // Once the window has passed, the survivor that never became visible is waste.
+    let old = Instant::now() - Duration::from_secs_f32(HIT_WINDOW + 1.0);
+    for slot in pending.iter_mut() {
+        slot.1 = old;
+    }
     let (hits, wasted) =
-        Premesh::age_premeshed(1 + HIT_FRAMES, &|_| false, &mut pending, &mut keep);
+        Premesh::age_premeshed(Instant::now(), &|_| false, &mut pending, &mut keep);
     assert_eq!((hits, wasted), (0, 1));
     premesh.hits += hits;
     premesh.wasted += wasted;
