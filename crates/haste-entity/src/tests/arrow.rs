@@ -361,7 +361,9 @@ fn tipped_arrow_particles() {
         &mut particles,
     );
     assert_eq!(particles.len(), 2, "two colour particles per flight tick");
-    assert!(particles.iter().all(|p| p.color == Some(0x3F_FF_FF)));
+    assert!(particles
+        .iter()
+        .all(|p| p.kind == arrow::ArrowParticleKind::Color(0x3F_FF_FF)));
     // Stuck: one particle every fifth in-ground tick (inGroundTime % 5 == 0).
     e.arrow_in_ground = true;
     e.velocity = DVec3::ZERO;
@@ -383,5 +385,49 @@ fn tipped_arrow_particles() {
     particles.clear();
     assert!(arrow::potion_puff(&e, &mut particles));
     assert_eq!(particles.len(), 20);
-    assert!(particles.iter().all(|p| p.color == Some(0x3F_FF_FF)));
+    assert!(particles
+        .iter()
+        .all(|p| p.kind == arrow::ArrowParticleKind::Color(0x3F_FF_FF)));
+}
+
+/// `SpectralArrow.tick`: one white `effect` particle a tick while flying, at the arrow's
+/// exact position, none once stuck.
+#[test]
+#[ignore = "needs cache/datagen (registries.json; HASTE_CACHE overrides)"]
+fn spectral_arrow_breathes_white_particles() {
+    let Some(spectral) = kind_of("minecraft:spectral_arrow") else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    let mut e = arrow_entity(1, DVec3::new(0.0, 64.0, 0.0), DVec3::new(1.0, 0.0, 0.0));
+    e.kind = spectral;
+    e.spectral = true;
+    e.tick_count = 5;
+    let mut particles = Vec::new();
+    arrow::tick(
+        &mut e,
+        &TestWorld {
+            contains: false,
+            hit: None,
+            water: false,
+        },
+        &mut particles,
+    );
+    assert_eq!(particles.len(), 1);
+    assert_eq!(particles[0].kind, arrow::ArrowParticleKind::SpectralSwirl);
+    assert_eq!(particles[0].pos, e.pos, "at the ticked position");
+    // Stuck: nothing.
+    e.arrow_in_ground = true;
+    e.velocity = DVec3::ZERO;
+    particles.clear();
+    arrow::tick(
+        &mut e,
+        &TestWorld {
+            contains: true,
+            hit: None,
+            water: false,
+        },
+        &mut particles,
+    );
+    assert_eq!(particles.len(), 0);
 }

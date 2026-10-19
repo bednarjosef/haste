@@ -152,6 +152,9 @@ pub struct Entity {
     pub arrow_in_ground: bool,
     /// `AbstractArrow.inGroundTime`: ticks since the arrow stuck, arrows only.
     pub in_ground_time: u32,
+    /// The entity is a `minecraft:spectral_arrow` (its own per-tick particle,
+    /// `SpectralArrow.tick`).
+    pub spectral: bool,
 }
 
 impl Entity {
@@ -225,6 +228,7 @@ impl Entity {
             shake_time: 0,
             arrow_in_ground: false,
             in_ground_time: 0,
+            spectral: type_name == Some("minecraft:spectral_arrow"),
         }
     }
 

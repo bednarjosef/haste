@@ -37,10 +37,12 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
         }
         for r in &arrow_particles {
             // The tipped colour is an `entity_effect` `ColorParticleOption` (its colour rides
-            // the spawn request); a crit trail particle is a plain `crit` with the packet's
-            // speed (`addParticle(type, x, y, z, vx, vy, vz)`).
-            let (kind, color, speed) = match r.color {
-                Some(argb) => (
+            // the spawn request); the spectral swirl is a white `effect`; a crit trail
+            // particle is a plain `crit` with the packet's speed
+            // (`addParticle(type, x, y, z, vx, vy, vz)`).
+            use haste_entity::arrow::ArrowParticleKind;
+            let (kind, color, speed) = match r.kind {
+                ArrowParticleKind::Color(argb) => (
                     haste_core::Identifier::minecraft("entity_effect"),
                     Some([
                         ((argb >> 16) & 0xFF) as f32 / 255.0,
@@ -49,7 +51,12 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
                     ]),
                     [0.0; 3],
                 ),
-                None => (
+                ArrowParticleKind::SpectralSwirl => (
+                    haste_core::Identifier::minecraft("effect"),
+                    Some([1.0; 3]),
+                    [0.0; 3],
+                ),
+                ArrowParticleKind::Crit => (
                     haste_core::Identifier::minecraft("crit"),
                     None,
                     [r.vel.x as f32, r.vel.y as f32, r.vel.z as f32],

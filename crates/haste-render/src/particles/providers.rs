@@ -289,10 +289,12 @@ impl ParticleBehaviour {
                 color_fade: [1.0, 0.96, 0.9],
                 ..ParticleBehaviour::DEFAULT
             },
-            // SpellParticle.MobEffectProvider (entity_effect): friction 0.96, gravity -0.1,
-            // life (int)(8/(r*0.8+0.2)) = 8..=40, quad 0.75x, the option's colour (a tipped
-            // arrow's trail), no collision, the spell drift for velocity.
-            "entity_effect" => &ParticleBehaviour {
+            // SpellParticle.MobEffectProvider (entity_effect) and SpellParticle.Provider
+            // (effect, always white — the provider ignores the option's colour): friction
+            // 0.96, gravity -0.1, life (int)(8/(r*0.8+0.2)) = 8..=40, quad 0.75x, the option's
+            // colour on entity_effect (a tipped arrow's trail), no collision, the spell drift
+            // for velocity.
+            "entity_effect" | "effect" => &ParticleBehaviour {
                 source: "SpellParticle",
                 gravity: -0.1,
                 friction: 0.96,

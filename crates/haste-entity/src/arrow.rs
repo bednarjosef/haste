@@ -140,15 +140,27 @@ pub fn on_metadata(e: &mut Entity, entries: &[haste_core::entity::MetadataEntry]
 }
 
 /// A particle the arrow's tick asks for: vanilla `Arrow.makeParticle` (the tipped arrow's
-/// potion colour, `ColorParticleOption` over `minecraft:entity_effect`) and the critical
-/// arrow's trail (`AbstractArrow.tick`'s four `ParticleTypes.CRIT`).
+/// potion colour, `ColorParticleOption` over `minecraft:entity_effect`), the critical
+/// arrow's trail (`AbstractArrow.tick`'s four `ParticleTypes.CRIT`) and the spectral arrow's
+/// per-tick swirl (`SpectralArrow.tick`'s white `SpellParticleOption` over
+/// `minecraft:effect`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArrowParticle {
     pub pos: DVec3,
-    /// The particle's velocity (the crit trail's, zero for the potion colour).
+    /// The particle's velocity (the crit trail's, zero for the others).
     pub vel: DVec3,
-    /// `None` for a crit particle; `Some(argb)` for an `entity_effect` colour.
-    pub color: Option<i32>,
+    pub kind: ArrowParticleKind,
+}
+
+/// Which particle an [`ArrowParticle`] is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ArrowParticleKind {
+    /// `ParticleTypes.CRIT` with the packet's velocity.
+    Crit,
+    /// `entity_effect` tinted with a potion colour (ARGB).
+    Color(i32),
+    /// `effect` with `SpellParticleOption` white (`SpectralArrow.tick`).
+    SpectralSwirl,
 }
 
 /// The world `AbstractArrow.tick` reads on the client: the block it sticks into, the ray clip
@@ -223,7 +235,7 @@ pub(crate) fn tick(e: &mut Entity, world: &dyn ArrowWorld, particles: &mut Vec<A
             particles.push(ArrowParticle {
                 pos: random_in_box(e, 0),
                 vel: DVec3::ZERO,
-                color: Some(color),
+                kind: ArrowParticleKind::Color(color),
             });
         }
         return;
@@ -243,7 +255,7 @@ pub(crate) fn tick(e: &mut Entity, world: &dyn ArrowWorld, particles: &mut Vec<A
             particles.push(ArrowParticle {
                 pos: original + movement * f64::from(i) / 4.0,
                 vel: DVec3::new(-movement.x, -movement.y + 0.2, -movement.z),
-                color: None,
+                kind: ArrowParticleKind::Crit,
             });
         }
     }
@@ -252,12 +264,12 @@ pub(crate) fn tick(e: &mut Entity, world: &dyn ArrowWorld, particles: &mut Vec<A
         particles.push(ArrowParticle {
             pos: random_in_box(e, 0),
             vel: DVec3::ZERO,
-            color: Some(color),
+            kind: ArrowParticleKind::Color(color),
         });
         particles.push(ArrowParticle {
             pos: random_in_box(e, 1),
             vel: DVec3::ZERO,
-            color: Some(color),
+            kind: ArrowParticleKind::Color(color),
         });
     }
     // The rotation from the movement (`AbstractArrow.tick`; `Projectile.lerpRotation` blends
@@ -296,6 +308,15 @@ pub(crate) fn tick(e: &mut Entity, world: &dyn ArrowWorld, particles: &mut Vec<A
     // `applyGravity` (a no-gravity arrow's `getGravity()` is 0, so nothing applies).
     if physics && !e.arrow_in_ground && !no_gravity(&e.metadata) {
         e.velocity.y -= GRAVITY;
+    }
+    // `SpectralArrow.tick` runs after `super.tick()`: a flying spectral arrow breathes one
+    // white `effect` particle a tick, at its exact position (a freshly stuck arrow stops).
+    if e.spectral && !e.arrow_in_ground {
+        particles.push(ArrowParticle {
+            pos: e.pos,
+            vel: DVec3::ZERO,
+            kind: ArrowParticleKind::SpectralSwirl,
+        });
     }
 }
 
@@ -358,7 +379,7 @@ pub fn potion_puff(e: &Entity, out: &mut Vec<ArrowParticle>) -> bool {
         out.push(ArrowParticle {
             pos: random_box_point(e.pos, e.dimensions, e.id.0 as u32, 0, i),
             vel: DVec3::ZERO,
-            color: Some(color),
+            kind: ArrowParticleKind::Color(color),
         });
     }
     true
