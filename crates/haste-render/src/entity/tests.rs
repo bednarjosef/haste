@@ -702,16 +702,13 @@ fn the_arm_model_is_the_player_models_right_arm() {
 #[test]
 fn the_held_item_layer_transform_is_vanillas() {
     let deg = |d: f32| d.to_radians();
-    let right = held_item_layer_matrix(false);
-    let mut want = Mat4::from_rotation_x(deg(-90.0));
-    want *= Mat4::from_rotation_y(deg(180.0));
-    want *= Mat4::from_translation(Vec3::new(1.0, 2.0, -10.0));
-    assert!(close(right, want, 1e-6));
-    let left = held_item_layer_matrix(true);
-    let mut want_left = Mat4::from_rotation_x(deg(-90.0));
-    want_left *= Mat4::from_rotation_y(deg(180.0));
-    want_left *= Mat4::from_translation(Vec3::new(-1.0, 2.0, -10.0));
-    assert!(close(left, want_left, 1e-6));
+    let want = |x: f32| {
+        Mat4::from_rotation_x(deg(-90.0))
+            * Mat4::from_rotation_y(deg(180.0))
+            * Mat4::from_translation(Vec3::new(x, 2.0, -10.0))
+    };
+    assert!(close(held_item_layer_matrix(false), want(1.0), 1e-6));
+    assert!(close(held_item_layer_matrix(true), want(-1.0), 1e-6));
 }
 
 /// `ItemTransform.apply(true, ...)`: the left-hand item negates translation.x and

@@ -331,6 +331,9 @@ fn offscreen_renders_armor_stand_with_armour() {
     }
     let _ = renderer.render(&base_frame(camera, &gui, &bare)).unwrap();
     let bare_img = renderer.read_back().unwrap();
+    bare_img
+        .save("target/shots/offscreen-stands-bare.png")
+        .unwrap();
     let sword = with
         .pixels()
         .zip(bare_img.pixels())
