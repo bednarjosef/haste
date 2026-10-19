@@ -28,8 +28,12 @@ impl Session {
         self.tick += 1;
         // The player's own block sounds this tick (footsteps, mining, placing): played
         // through the same request channel the packets use, so the game thread's
-        // `Sounds::apply` picks them up; headless only counts them.
+        // `Sounds::apply` picks them up; headless only counts them. Each one is logged
+        // at debug, the in-game check's evidence (`RUST_LOG=haste=debug`).
         for request in self.player.take_own_sound_requests() {
+            if let crate::sound::SoundRequest::Play(ref p) = request {
+                tracing::debug!("own sound {:?} v{:.2} p{:.2}", p.sound, p.volume, p.pitch);
+            }
             self.counters.own_sounds += 1;
             self.sound_requests.push(request);
         }

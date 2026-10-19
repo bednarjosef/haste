@@ -54,6 +54,10 @@ impl Session {
                 self.pots.clear();
                 self.fireworks.clear();
                 self.attached_firework = None;
+                // The new dimension type's `audio/music_volume` (the music volume's
+                // constant dimension layer).
+                self.dimension_music_volume =
+                    crate::app::biomes::audio::dimension_music_volume(regs, &dim);
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding. A new level also starts
                 // with vanilla's default border until its initialize_border arrives.

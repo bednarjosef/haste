@@ -164,7 +164,12 @@ fn tick_once(
     // payloads, the anims' tick ends) is extracted here, off the render thread; the render
     // thread only folds the partial tick into the animatable fields. Runs after the view
     // update so the camera chunk, view radius and world age are this tick's.
-    extractor.extract(shared, feet, shared.view.lock().view_distance, s.world_age);
+    extractor.extract(
+        shared,
+        feet,
+        shared.view.lock().view_distance,
+        driver.session.world_age,
+    );
     Ok(())
 }
 

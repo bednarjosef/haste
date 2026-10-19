@@ -112,6 +112,9 @@ pub(super) fn tick_ui(driver: &mut NetDriver, shared: &Shared, ui_out: &mut Vec<
         // the server itself; `set_selected_slot` also marks it sent so the UI does not send it
         // a second time). The server's `set_held_slot` reaches both sides alike.
         ui.set_selected_slot(driver.session.player.held_slot);
+        // The spectator menu's head textures (the entity store's resolved skins), no-op
+        // while the menu is closed.
+        ui.refresh_spectator_skins(&shared.entities.read());
         // A use opened a screen (command block, writable book): the UI opens it, gated like
         // vanilla's `Player.canUseGameMasterBlocks` (creative + operator level >= 2) for the
         // command block.
