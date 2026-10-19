@@ -18,6 +18,7 @@ pub mod skin;
 pub mod store;
 pub mod using_item;
 pub mod variants;
+pub mod walk_swing;
 
 #[cfg(test)]
 mod skin_tests;
