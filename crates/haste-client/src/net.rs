@@ -41,6 +41,17 @@ pub struct Session {
     pub entity_id: EntityId,
     /// The current dimension (from `login`, then each `respawn`).
     pub dimension: DimensionInfo,
+    /// The synced biomes' audio attributes (index = biome id, set once at connect — the
+    /// registries are not resent), for the music volume the camera's biome lowers
+    /// (`biomes::audio` resolves the target each tick).
+    pub biome_audio: Vec<crate::app::biomes::audio::BiomeAudio>,
+    /// The dimension type's `audio/music_volume` (vanilla's constant dimension layer of
+    /// the environment attribute system): the base the camera's biome overrides each tick.
+    pub dimension_music_volume: f32,
+    /// The camera's `MUSIC_VOLUME` as of the last tick (vanilla
+    /// `Minecraft.getMusicVolume`): `dimension_music_volume` overridden by the camera's
+    /// biome, clamped to the attribute's unit range (`biomes::audio` resolves it).
+    pub music_volume: f32,
     /// Counters.
     pub counters: NetCounters,
     /// Profiles added by `player_info_update` since the game thread last took them, with their
@@ -197,6 +208,13 @@ pub struct Session {
     /// `ClientPacketListener.handleSetEntityPassengersPacket` shows the "mount.onboard"
     /// overlay message on exactly that transition): taken by the driver, which tells the UI.
     mounted_message: bool,
+    /// A remote entity's consume draws run through its own generator (vanilla's
+    /// `RandomSource` is one per entity), by entity id. Entries live as long as the
+    /// entity does (`remove_entities` drops them).
+    pub(crate) remote_use: HashMap<EntityId, crate::player::interact::ConsumeEffects>,
+    /// The remote uses' sound-request scratch (see `net::remote_use`): drawn in vanilla's
+    /// order with the particles, then dropped — the server's sound packets carry the sound.
+    remote_use_sounds: Vec<crate::sound::SoundRequest>,
 }
 
 impl Session {
@@ -218,6 +236,9 @@ impl Session {
             },
             entity_id,
             dimension,
+            biome_audio: Vec::new(),
+            dimension_music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
+            music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
             breaking: HashMap::new(),
             lids: HashMap::new(),
             lid_states: None,
@@ -276,6 +297,8 @@ impl Session {
             entity_attributes: HashMap::new(),
             attribute_names: None,
             mounted_message: false,
+            remote_use: HashMap::new(),
+            remote_use_sounds: Vec::new(),
         }
     }
 
@@ -404,6 +427,7 @@ impl Session {
                 entities.clear();
                 self.fireworks.clear();
                 self.attached_firework = None;
+                self.remote_use.clear();
                 self.dimension = dim;
                 self.world_border = crate::world_border::WorldBorder::default();
                 self.entity_id = EntityId(l.entity_id);
@@ -521,6 +545,7 @@ mod particles;
 pub mod pickup;
 mod player_state;
 mod registries;
+mod remote_use;
 mod session_tick;
 mod sinks;
 mod vehicle;

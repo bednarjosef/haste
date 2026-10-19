@@ -169,6 +169,12 @@ impl Renderer {
         self.clouds.set_status(status);
     }
 
+    /// Vanilla `Options.cloudRange` (options.txt `cloudRange`, 2..=128 chunks, default
+    /// 128): the radius of the cloud mesh around the camera.
+    pub fn set_cloud_range(&mut self, range_chunks: u32) {
+        self.clouds.set_range(range_chunks);
+    }
+
     /// Number of shadow quads batched for the last frame (tests/reporting).
     pub fn shadow_quad_count(&self) -> usize {
         self.entity.shadow_quad_count()

@@ -127,6 +127,7 @@ fn roundtrips_through_toml() {
         max_fps: 60,
         clouds: CloudStatus::Fast,
         premesh: PremeshMode::Predict,
+        cloud_range: 64,
         sound: SoundVolumes {
             master: 0.8,
             music: 0.0,
@@ -230,6 +231,26 @@ fn cloud_option_imports_and_applies_live() {
     assert_eq!(opts.clouds, CloudStatus::Fancy);
     assert!(opts.apply_one("renderClouds", "maybe"));
     assert_eq!(opts.clouds, CloudStatus::Fancy);
+}
+
+#[test]
+fn cloud_range_option_imports_clamps_and_applies_live() {
+    // Vanilla's default is 128 chunks.
+    assert_eq!(Options::default().cloud_range, 128);
+    // options.txt import.
+    let opts = Options::import_vanilla("cloudRange:32\n");
+    assert_eq!(opts.cloud_range, 32);
+    // The live bridge reports vanilla's own key; malformed values leave it untouched.
+    let mut opts = Options::import_vanilla("cloudRange:32\n");
+    assert!(opts.apply_one("cloudRange", "8"));
+    assert_eq!(opts.cloud_range, 8);
+    assert!(opts.apply_one("cloudRange", "maybe"));
+    assert_eq!(opts.cloud_range, 8);
+    // Out-of-range values clamp on sanitized() (vanilla's IntRange(2, 128)).
+    let opts = Options::import_vanilla("cloudRange:1\n").sanitized();
+    assert_eq!(opts.cloud_range, 2);
+    let opts = Options::import_vanilla("cloudRange:999\n").sanitized();
+    assert_eq!(opts.cloud_range, 128);
 }
 
 #[test]

@@ -47,6 +47,7 @@ use haste_physics::mining::{BlockTags, ToolTable};
 use super::LocalPlayer;
 
 mod attack;
+mod consumable;
 mod consume_effects;
 mod destroy;
 mod drop;
@@ -57,6 +58,7 @@ mod pick;
 mod place;
 mod step;
 mod use_item;
+pub(crate) use consume_effects::{should_emit, ConsumeEffects};
 use effects::EffectIds;
 pub(crate) use effects::{LightmapEffectIds, MovementEffectIds};
 pub use pick::Target;

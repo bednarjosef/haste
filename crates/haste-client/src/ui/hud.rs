@@ -42,7 +42,24 @@ impl Ui {
                 self.frame.commands.clear();
             }
         }
+        self.draw_spectator_menu();
         &self.frame
+    }
+
+    /// The spectator menu's drawing (`SpectatorGui.extractHotbar` + `extractAction`, over
+    /// the frame the vanilla `Hud` filled: it draws the item hotbar only outside spectator
+    /// mode, vanilla's own `Hud.extractHotbarAndDecorations` split, so the bar's place is
+    /// free). F1 hides it with the rest of the HUD (`Hud.isHidden`).
+    fn draw_spectator_menu(&mut self) {
+        let active = self.shared.spectator.lock().menu_active();
+        if !active {
+            return;
+        }
+        let (mode, in_world) = self.state(|s| (s.game_mode, s.in_world));
+        if mode != GameMode::Spectator || !in_world || self.hud_hidden() {
+            return;
+        }
+        self.shared.spectator.lock().extract(&mut self.frame);
     }
 
     /// [`Ui::frame`] moved out instead of borrowed: for callers that keep the frame for the
@@ -128,6 +145,12 @@ impl Ui {
     /// The F3 overlay's numbers (FPS, position, rotation, chunk and entity counts), every frame.
     pub fn set_debug(&self, d: haste_jvm::DebugInfo) {
         self.state(|s| s.debug = d);
+    }
+
+    /// The spectator menu's head textures, once per game tick while the menu is open (the
+    /// entity store's resolved skins, else the profiles' defaults).
+    pub fn refresh_spectator_skins(&self, store: &haste_entity::EntityStore) {
+        self.shared.spectator.lock().refresh_skins(store);
     }
 
     /// The player's eyes are in water (air bubbles and the water overlay), from physics.

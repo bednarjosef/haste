@@ -68,18 +68,18 @@ downloaded or derived from Mojang's files stays in `cache/` (or `$HASTE_CACHE`).
 
 ## Progress
 
-**51 of 63 done, 12 partly done, 0 not started** (about 90 %, counting partly done as
+**51 of 65 done, 12 partly done, 2 not started** (about 88 %, counting partly done as
 half). The list is what a player needs to play Haste like the original game without noticing
 a difference; Phase 2 (mods) is not counted.
 
-`███████████████████████████░░░` **90 %**
+`██████████████████████████░░░░` **88 %**
 
 | Area | Progress | ✅ | 🟡 | ⬜ |
 |---|---|---:|---:|---:|
 | Launching and setup | `█████████░` | 9 | 2 | 0 |
 | Connecting to servers | `████████░░` | 3 | 2 | 0 |
 | World | `██████████` | 5 | 0 | 0 |
-| Rendering | `█████████░` | 15 | 3 | 0 |
+| Rendering | `████████░░` | 13 | 5 | 2 |
 | HUD and screens | `██████████` | 12 | 0 | 0 |
 | Playing | `█████████░` | 6 | 2 | 0 |
 | Sound | `██████░░░░` | 1 | 3 | 0 |
@@ -128,7 +128,7 @@ a difference; Phase 2 (mods) is not counted.
 </details>
 
 <details>
-<summary><b>Rendering</b> — 15 of 18 done</summary>
+<summary><b>Rendering</b> — 13 of 20 done</summary>
 
 - ✅ Textured blocks and block models
 - ✅ Water and lava with flow direction and corner heights
@@ -141,13 +141,15 @@ a difference; Phase 2 (mods) is not counted.
 - ✅ Fog: vanilla's distance fog, colours, sky disc and sunrise, and the water, lava, powder snow, Nether, End, blindness and darkness fog
 - ✅ Screen effects: damage tilt, red flash on hit entities, vignette, underwater, fire, in-wall, pumpkin, powder snow, spyglass, portal and nausea
 - ✅ Entity animation: walking, head and body turning, attack swings, aggressive arms, death tilt, sleeping, swimming and mob-specific poses
-- ✅ Armour, held items, heads and elytra on mobs and players
+- 🟡 Armour, held items, heads and elytra on mobs and players; horse armour, wolf armour and saddles not yet
 - ✅ Mobs and players: vanilla's models for all 91 mob types with babies, variants, sizes and states, default skins, name tags and shadows
-- ✅ Particles: the server's and the client's own (breaking, mining cracks, sprinting, landing, torches, fire, lava, portals, drips) with vanilla's motion, size and lifetime
+- 🟡 Particles: the server's and the client's own (breaking, mining cracks, sprinting, landing, torches, fire, lava, portals, drips); 19 types move, size and fade like vanilla, the other ~110 use a default behaviour
 - ✅ Smooth lighting and ambient occlusion: ported from vanilla, shaded in vanilla's colour space; forest scenes match the vanilla reference shots within about 3/255 per channel
 - 🟡 Performance: in the same window and spot as vanilla (1408x828, render distance 12) about 1.3x its frame rate and 1.7x less memory (807 MB against 1.35 GB); not yet compared with Sodium
 - 🟡 Block entities drawn: chests, ender chests, shulker boxes, signs, banners, heads, lecterns, enchanting tables with their turning book, bells, decorated pots, conduits, campfire items, spawners, vaults, shelves, brushable blocks, beacon beams, end portals and gateways and moving pistons; the newest ones not yet checked on screen
 - 🟡 Player skins and capes: vanilla's default skins, skins and capes downloaded from the profile, slim and wide arms, the skin layers and the cape's swing; not yet checked on screen
+- ⬜ Boats, minecarts, armour stands, falling blocks, primed TNT, arrows, thrown items, the fishing bobber and firework rockets drawn as themselves (boxes today; being ported)
+- ⬜ Maps, held and in item frames
 
 </details>
 
@@ -171,7 +173,7 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 </details>
 
 <details>
-<summary><b>Playing</b> — 6 of 8 done</summary>
+<summary><b>Playing</b> — 8 of 8 done</summary>
 
 - ✅ Walking, sprinting, sneaking, jumping, swimming, creative flight and fall damage, accepted by the vanilla server without corrections
 - ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar (mouse wheel and 1-9)
@@ -179,8 +181,8 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - ✅ Game modes: survival, creative, spectator (through walls) and adventure
 - ✅ Screenshot key (F2): saves to the screenshots folder
 - ✅ Elytra flight: gliding started from the game, firework boost (the server sees a normal glide)
-- 🟡 Riding: vanilla seat positions; steering boats, horses, pigs (carrot on a stick) and striders (warped fungus on a stick) like vanilla, boats and pigs checked against the server; striders on lava, the horse jump bar and the mount's health not yet
-- 🟡 Climbing ladders, vines and scaffolding: vanilla's climbing physics is in; connecting it to the game is in progress
+- ✅ Riding: vanilla seat positions; steering boats, horses, pigs (carrot on a stick) and striders (warped fungus on a stick, walking on lava) like vanilla, with the mount's hearts and the horse jump bar
+- ✅ Climbing ladders, vines and scaffolding: vanilla's climbing physics, with the climbable blocks taken from the server's block tags
 
 </details>
 

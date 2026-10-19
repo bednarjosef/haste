@@ -6,7 +6,8 @@
 //! (resolved through `minecraft:data_component_type` in
 //! [`ProtocolTables`]). [`read_patch`] walks that slice once and decodes the
 //! components game logic asks about (how damaged a tool is, its durability,
-//! its enchantments, its custom name, what it mines); every other component
+//! its enchantments, its custom name, what it mines, how it is consumed);
+//! every other component
 //! goes through [`skip_component`] and is kept raw as
 //! [`ItemComponent::Other`], so unknown and mod-added components do not fail
 //! as long as their layout is known.
@@ -19,8 +20,8 @@
 use bytes::Bytes;
 use haste_core::Component;
 
-use super::slot::{component_name, skip_component};
-use super::{DecodeError, DecodeResult, IdSet, Reader, SoundEvent, Wire, MAX_LIST};
+use super::slot::{component_name, skip_component, skip_consume_effect};
+use super::{DecodeError, DecodeResult, IdOr, IdSet, Reader, SoundEvent, Wire, MAX_LIST};
 use crate::packets::ids::ProtocolTables;
 
 /// Components in one patch (the same cap `slot::skip_patch` enforces).
@@ -71,6 +72,7 @@ fn read_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<ItemComponent>
         "tool" => ItemComponent::Tool(read_tool(r)?),
         "minimum_attack_charge" => ItemComponent::MinimumAttackCharge(r.f32()?),
         "piercing_weapon" => ItemComponent::PiercingWeapon(read_piercing_weapon(r)?),
+        "consumable" => ItemComponent::Consumable(read_consumable(r)?),
         // Layout known, value not modelled: keep it as written.
         _ => {
             let start = r.peek_rest();
@@ -128,6 +130,26 @@ fn read_piercing_weapon(r: &mut Reader<'_>) -> DecodeResult<PiercingWeapon> {
         dismounts: r.bool()?,
         sound: r.option(SoundEvent::read)?,
         hit_sound: r.option(SoundEvent::read)?,
+    })
+}
+
+/// `consumable` (vanilla `Consumable.STREAM_CODEC`): the use duration, the
+/// animation played while it runs, and the sound and particles the use emits
+/// (`Item.getUseDuration`/`getUseAnimation`, `ItemStack.onUseTick`). The
+/// `on_consume_effects` run server-side only (vanilla `Consumable.onConsume`
+/// guards them with `!level.isClientSide`), so the list is consumed by its
+/// codec but not modelled.
+fn read_consumable(r: &mut Reader<'_>) -> DecodeResult<Consumable> {
+    let consume_seconds = r.f32()?;
+    let animation = r.var_int()?;
+    let sound = IdOr::<SoundEvent>::read(r)?;
+    let has_consume_particles = r.bool()?;
+    r.list(MAX_LIST, skip_consume_effect)?;
+    Ok(Consumable {
+        consume_seconds,
+        animation,
+        sound,
+        has_consume_particles,
     })
 }
 
@@ -247,6 +269,21 @@ impl ComponentPatch {
             _ => None,
         })
     }
+
+    /// `minecraft:consumable` the patch adds, if any (the stack's own component,
+    /// overriding the item's default).
+    pub fn consumable(&self) -> Option<&Consumable> {
+        self.added.iter().find_map(|c| match c {
+            ItemComponent::Consumable(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Whether the patch removes `minecraft:consumable` (the stack is not
+    /// consumable, whatever the item's default).
+    pub fn removes_consumable(&self) -> bool {
+        self.removed.iter().any(|n| n == "minecraft:consumable")
+    }
 }
 
 /// One added data component with its decoded value.
@@ -278,6 +315,8 @@ pub enum ItemComponent {
     MinimumAttackCharge(f32),
     /// `piercing_weapon`.
     PiercingWeapon(PiercingWeapon),
+    /// `consumable`: how the stack is used and what using it emits.
+    Consumable(Consumable),
     /// Any other component: its type name as a registry id and its data as
     /// written (skipped by `slot::skip_component`).
     Other {
@@ -334,6 +373,23 @@ pub struct PiercingWeapon {
     pub hit_sound: Option<SoundEvent>,
 }
 
+/// `consumable` (vanilla `Consumable`): how long a stack is used for and what
+/// using it emits — `consume_seconds`, the `ItemUseAnimation` id, the sound
+/// (a `minecraft:sound_event` registry id or an inline event) and the
+/// particle flag. `on_consume_effects` is not carried (server-side only).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Consumable {
+    /// `consume_seconds`: the use duration in seconds (`consume_ticks` is
+    /// `consume_seconds * 20`).
+    pub consume_seconds: f32,
+    /// `ItemUseAnimation` id (`eat` by default).
+    pub animation: i32,
+    /// The sound the use emits (`Holder<SoundEvent>`: registry id or inline).
+    pub sound: IdOr<SoundEvent>,
+    /// `has_consume_particles`: whether the use spawns item particles.
+    pub has_consume_particles: bool,
+}
+
 /// `rarity`: vanilla's four values; ids are the wire's VarInt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rarity {
@@ -362,261 +418,4 @@ impl Rarity {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::wire::Writer;
-
-    use super::*;
-    use haste_core::Identifier;
-
-    /// A patch body: the add/remove counts, the adds as (type id, data) and
-    /// the removes as type ids.
-    fn patch(components: &[(i32, &[u8])], removed: &[i32]) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.len_prefix(components.len());
-        w.len_prefix(removed.len());
-        for (ty, data) in components {
-            w.var_int(*ty);
-            w.bytes(data);
-        }
-        for ty in removed {
-            w.var_int(*ty);
-        }
-        w.into_inner()
-    }
-
-    /// The type ids used by these tests, with the names the tables resolve
-    /// them to.
-    fn tables() -> ProtocolTables {
-        ProtocolTables::for_tests(&[
-            (1, "minecraft:max_stack_size"),
-            (2, "minecraft:max_damage"),
-            (3, "minecraft:damage"),
-            (4, "minecraft:unbreakable"),
-            (5, "minecraft:repair_cost"),
-            (6, "minecraft:custom_name"),
-            (7, "minecraft:item_name"),
-            (8, "minecraft:enchantments"),
-            (9, "minecraft:stored_enchantments"),
-            (10, "minecraft:tool"),
-            (11, "minecraft:food"),
-            (12, "minecraft:rarity"),
-            (13, "minecraft:mystery"),
-            (14, "minecraft:minimum_attack_charge"),
-            (15, "minecraft:piercing_weapon"),
-        ])
-    }
-
-    fn text(w: &mut Writer, s: &str) {
-        w.component(&Component::text(s));
-    }
-
-    #[test]
-    fn every_typed_component_reads_its_value() {
-        let tables = tables();
-        let mut tool = Writer::new();
-        w_tool(&mut tool);
-        let mut name = Writer::new();
-        text(&mut name, "Killing Blow");
-        let mut item_name = Writer::new();
-        text(&mut item_name, "Iron Block");
-        let body = patch(
-            &[
-                (3, &[5]),
-                (2, &[0x99, 0x0C]),
-                (1, &[1]),
-                (4, &[]),
-                (5, &[3]),
-                (6, &name.buf),
-                (7, &item_name.buf),
-                (8, &[1, 8, 3]), // sharpness (id 8), level 3
-                // id 0 is a valid enchantment (the first in the registry)
-                (9, &[2, 0, 1, 39, 5]),
-                (10, &tool.buf),
-                (12, &[2]),
-            ],
-            &[],
-        );
-        let parsed = read_patch(&body, &tables).unwrap();
-        assert_eq!(parsed.damage(), Some(5));
-        assert_eq!(parsed.max_damage(), Some(1561));
-        assert_eq!(parsed.max_stack_size(), Some(1));
-        assert!(parsed.unbreakable());
-        assert_eq!(parsed.repair_cost(), Some(3));
-        assert_eq!(parsed.custom_name(), Some(&Component::text("Killing Blow")));
-        assert_eq!(parsed.item_name(), Some(&Component::text("Iron Block")));
-        assert_eq!(
-            parsed.enchantments(),
-            Some(&[EnchantmentLevel { id: 8, level: 3 }][..])
-        );
-        assert_eq!(
-            parsed.stored_enchantments(),
-            Some(
-                &[
-                    EnchantmentLevel { id: 0, level: 1 },
-                    EnchantmentLevel { id: 39, level: 5 }
-                ][..]
-            )
-        );
-        let rules = &parsed.tool().unwrap().rules;
-        assert_eq!(
-            rules[0].blocks,
-            IdSet::Tag(Identifier::minecraft("mineable/axe"))
-        );
-        assert_eq!(rules[0].speed, Some(12.0));
-        assert_eq!(rules[0].correct_for_drops, Some(true));
-        assert_eq!(rules[1].blocks, IdSet::Ids(vec![17, 18]));
-        assert_eq!(rules[1].speed, None);
-        assert_eq!(rules[1].correct_for_drops, None);
-        assert_eq!(parsed.tool().unwrap().default_mining_speed, 1.0);
-        assert_eq!(parsed.tool().unwrap().damage_per_block, 2);
-        assert!(parsed.tool().unwrap().can_destroy_blocks_in_creative);
-        assert_eq!(parsed.rarity(), Some(Rarity::Rare));
-    }
-
-    /// An axe: two rules, one with a speed and drop override, one bare.
-    fn w_tool(w: &mut Writer) {
-        w.var_int(2);
-        w.write(&IdSet::Tag(Identifier::minecraft("mineable/axe")));
-        w.option(&Some(12.0f32), |w, v| w.f32(*v));
-        w.option(&Some(true), |w, v| w.bool(*v));
-        w.write(&IdSet::Ids(vec![17, 18]));
-        w.bool(false);
-        w.bool(false);
-        w.f32(1.0);
-        w.var_int(2);
-        w.bool(true);
-    }
-
-    /// The spear's `piercing_weapon` (knockback, dismounts, an optional draw sound with no
-    /// fixed range, no hit sound) and `minimum_attack_charge`.
-    #[test]
-    fn spear_components_read_their_values() {
-        let tables = tables();
-        let mut spear = Writer::new();
-        spear.bool(true); // deals_knockback
-        spear.bool(false); // dismounts
-        let sound = SoundEvent {
-            name: Identifier::minecraft("item.spear.attack"),
-            fixed_range: None,
-        };
-        spear.option(&Some(sound), |w, v| {
-            w.identifier(&v.name);
-            w.option(&v.fixed_range, |w, r| w.f32(*r));
-        });
-        spear.option(&None::<SoundEvent>, |_, _| {});
-        let charge = 0.75f32;
-        let body = patch(
-            &[(15, &spear.buf), (14, charge.to_be_bytes().as_slice())],
-            &[],
-        );
-        let parsed = read_patch(&body, &tables).unwrap();
-        let weapon = parsed.piercing_weapon().unwrap();
-        assert!(weapon.deals_knockback);
-        assert!(!weapon.dismounts);
-        assert_eq!(
-            weapon.sound,
-            Some(SoundEvent {
-                name: Identifier::minecraft("item.spear.attack"),
-                fixed_range: None,
-            })
-        );
-        assert_eq!(weapon.hit_sound, None);
-        assert_eq!(parsed.minimum_attack_charge(), Some(0.75));
-    }
-
-    #[test]
-    fn other_components_keep_their_bytes() {
-        let tables = tables();
-        let food = [4u8, 0, 0, 32, 64, 0]; // nutrition 4, saturation 2.5, always edible
-        let body = patch(&[(11, &food)], &[]);
-        let parsed = read_patch(&body, &tables).unwrap();
-        assert_eq!(
-            parsed.added,
-            vec![ItemComponent::Other {
-                name: "minecraft:food".to_string(),
-                raw: Bytes::copy_from_slice(&food),
-            }]
-        );
-        assert_eq!(parsed.damage(), None);
-        assert_eq!(parsed.tool(), None);
-        assert_eq!(parsed.enchantments(), None);
-    }
-
-    #[test]
-    fn removals_name_the_removed_types() {
-        let tables = tables();
-        let body = patch(&[(3, &[7])], &[4, 12]);
-        let parsed = read_patch(&body, &tables).unwrap();
-        assert_eq!(parsed.damage(), Some(7));
-        assert_eq!(
-            parsed.removed,
-            vec!["minecraft:unbreakable", "minecraft:rarity"]
-        );
-    }
-
-    #[test]
-    fn empty_patch_is_empty_and_exact() {
-        let tables = tables();
-        let parsed = read_patch(&[0, 0], &tables).unwrap();
-        assert_eq!(parsed, ComponentPatch::default());
-        assert!(parsed.added.is_empty() && parsed.removed.is_empty());
-    }
-
-    /// Every typed variant consumes exactly its bytes and no more.
-    #[test]
-    fn typed_components_consume_exactly_their_bytes() {
-        let tables = tables();
-        let mut tool = Writer::new();
-        w_tool(&mut tool);
-        let mut name = Writer::new();
-        text(&mut name, "n");
-        let mut enchantments = Writer::new();
-        enchantments.var_int(1);
-        enchantments.var_int(9);
-        enchantments.var_int(3);
-        let samples: &[(&str, &[u8])] = &[
-            ("minecraft:max_stack_size", &[16]),
-            ("minecraft:max_damage", &[0x99, 0x0C]),
-            ("minecraft:damage", &[5]),
-            ("minecraft:unbreakable", &[]),
-            ("minecraft:repair_cost", &[3]),
-            ("minecraft:rarity", &[3]),
-            ("minecraft:custom_name", &name.buf),
-            ("minecraft:item_name", &name.buf),
-            ("minecraft:enchantments", &enchantments.buf),
-            ("minecraft:stored_enchantments", &enchantments.buf),
-            ("minecraft:tool", &tool.buf),
-            // Not modelled, but a known layout: kept raw.
-            ("minecraft:food", &[4, 0, 0, 32, 64, 0]),
-        ];
-        for (name, bytes) in samples {
-            let mut wire = bytes.to_vec();
-            wire.push(0xAB);
-            let mut r = Reader::new(&wire).with_tables(&tables);
-            read_component(&mut r, name).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_eq!(
-                r.peek_rest(),
-                &[0xAB],
-                "{name} did not consume exactly its bytes"
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_layouts_and_ids_fail() {
-        let tables = tables();
-        // A component whose layout is unknown cannot be kept raw.
-        let body = patch(&[(13, &[1])], &[]);
-        assert!(read_patch(&body, &tables).is_err());
-        // A type id the tables do not know.
-        let body = patch(&[(99, &[])], &[]);
-        assert!(read_patch(&body, &tables).is_err());
-        // Trailing bytes after the patch are a layout mismatch.
-        let mut body = patch(&[(3, &[1])], &[]);
-        body.push(0);
-        assert!(read_patch(&body, &tables).is_err());
-        // A truncated enchantment list (count 2, one entry).
-        let body = patch(&[(8, &[2, 0, 3])], &[]);
-        assert!(read_patch(&body, &tables).is_err());
-    }
-}
+mod tests;

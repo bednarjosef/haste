@@ -16,6 +16,7 @@ pub mod registry;
 pub mod riding;
 pub mod skin;
 pub mod store;
+pub mod using_item;
 pub mod variants;
 
 #[cfg(test)]
