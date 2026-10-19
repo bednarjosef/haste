@@ -85,7 +85,7 @@ impl Session {
         if let Some(impulse) = p.player_knockback {
             if let Some(velocity) = pushed_velocity(self.player.state.velocity, impulse) {
                 self.player.state.velocity = velocity;
-                tracing::debug!(
+                tracing::info!(
                     "explosion knockback ({:.3}, {:.3}, {:.3}), velocity now ({:.3}, {:.3}, {:.3})",
                     impulse.x,
                     impulse.y,
