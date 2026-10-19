@@ -312,6 +312,54 @@ fn offscreen_renders_armor_stand_with_armour() {
         changed > 1000,
         "the stands changed only {changed} of 76800 pixels; nothing drew"
     );
+
+    // The frame-path cost of a stand-heavy scene: the armoured instance cloned into a
+    // 5x10 grid in front of the camera (50 stands, all in full armour with a sword — the
+    // worst case), timed over warm frames against the same scene without them.
+    let mut crowd = Vec::with_capacity(50);
+    for i in 0..50u32 {
+        let mut inst = instances[0].clone();
+        inst.id = haste_core::EntityId((100 + i) as i32);
+        inst.pos = glam::DVec3::new(5.5 + f64::from(i % 5), 1.0, 3.0 + f64::from(i / 5));
+        crowd.push(inst);
+    }
+    let _ = renderer.render(&base_frame(camera, &gui, &crowd)).unwrap();
+    let start = std::time::Instant::now();
+    let frames = 100;
+    for _ in 0..frames {
+        renderer.render(&base_frame(camera, &gui, &crowd)).unwrap();
+    }
+    let with_ms = start.elapsed().as_secs_f32() * 1000.0 / frames as f32;
+    let start = std::time::Instant::now();
+    for _ in 0..frames {
+        renderer.render(&base_frame(camera, &gui, &[])).unwrap();
+    }
+    let without_ms = start.elapsed().as_secs_f32() * 1000.0 / frames as f32;
+    // ...and the same crowd as the generic boxes unknown types drew before the stand had
+    // its own model, for the before/after pair.
+    let boxes: Vec<_> = crowd
+        .iter()
+        .map(|inst| {
+            let mut b = inst.clone();
+            b.model = haste_entity::models::box_for(0.5, 1.975);
+            b.equipment.clear();
+            b.hands = [None, None];
+            b
+        })
+        .collect();
+    let _ = renderer.render(&base_frame(camera, &gui, &boxes)).unwrap();
+    let start = std::time::Instant::now();
+    for _ in 0..frames {
+        renderer.render(&base_frame(camera, &gui, &boxes)).unwrap();
+    }
+    let boxes_ms = start.elapsed().as_secs_f32() * 1000.0 / frames as f32;
+    eprintln!(
+        "offscreen frame with 50 armoured stands: {with_ms:.2} ms, as the old boxes: \
+         {boxes_ms:.2} ms, without: {without_ms:.2} ms (+{:.2} ms for the stands, \
+         +{:.2} ms for the boxes)",
+        with_ms - without_ms,
+        boxes_ms - without_ms
+    );
 }
 
 // Readback unpacking: 256-byte row padding and BGRA swap, no GPU needed.
