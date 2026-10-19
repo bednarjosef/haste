@@ -148,7 +148,7 @@ a difference; Phase 2 (mods) is not counted.
 - 🟡 Performance: in the same window and spot as vanilla (1408x828, render distance 12) about 1.3x its frame rate and 1.7x less memory (807 MB against 1.35 GB); not yet compared with Sodium
 - 🟡 Block entities drawn: chests, ender chests, shulker boxes, signs, banners, heads, lecterns, enchanting tables with their turning book, bells, decorated pots, conduits, campfire items, spawners, vaults, shelves, brushable blocks, beacon beams, end portals and gateways and moving pistons; the newest ones not yet checked on screen
 - 🟡 Player skins and capes: vanilla's default skins, skins and capes downloaded from the profile, slim and wide arms, the skin layers and the cape's swing; not yet checked on screen
-- 🟡 Non-mob entities drawn as themselves: minecarts (all kinds) done; boats, armour stands, falling blocks, primed TNT, arrows, thrown items, the fishing bobber and firework rockets still boxes (being ported)
+- 🟡 Non-mob entities drawn as themselves: minecarts, boats, chest boats, rafts and thrown items (snowballs, eggs, pearls, potions, fireballs) done; armour stands, falling blocks, primed TNT, arrows, the fishing bobber and firework rockets still boxes (being ported)
 - ⬜ Maps, held and in item frames
 
 </details>
