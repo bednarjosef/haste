@@ -946,85 +946,15 @@ impl EntityStore {
             } else {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             };
+            // One name lookup per entity per frame; the branches below all read it.
+            let type_name = crate::registry::entity_type_name(slot.kind);
+            let is_armor_stand = type_name == Some("minecraft:armor_stand");
             let (model, has_head, overlays) = if slot.is_player_type {
                 (crate::models::humanoid(false), true, Default::default())
-            } else if crate::registry::entity_type_name(slot.kind)
-                == Some("minecraft:armor_stand")
-            {
-                // The armour stand's own code-built pair, small per the synced flag
-                // (`ArmorStandRenderer.submit` picks `smallModel` over `bigModel`).
-                (
-                    crate::armor_stand::body_model(crate::armor_stand::is_small(&slot.metadata)),
-                    true,
-                    Default::default(),
-                )
             } else {
-                // Registry table first (shared per type, head flag precomputed), then the box.
-                // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
-                // Variant mobs (cat/wolf/frog/pig/cow/chicken) instead resolve their look from
-                // the synced variant registry through the entity's metadata, falling back to
-                // the table's default row when the variant is unknown or absent.
-                let baby = crate::registry::is_baby(&slot.metadata);
-                let variant =
-                    crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby)
-                        .or_else(|| {
-                            // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/
-                            // parrot/fox/bee/strider/mooshroom): the same layer, the variant's
-                            // texture.
-                            crate::variants::metadata_model_for(
-                                slot.kind,
-                                &slot.metadata,
-                                baby,
-                                slot.metadata.custom_name_plain(),
-                                self.world_age,
-                            )
-                        });
-                // The tropical fish's shape follows its packed pattern; the shulker's base
-                // texture follows its colour byte. Both are plain model swaps, and both
-                // must be gated on the entity's own type: their metadata slots (17, 18)
-                // collide with other mobs' fields (e.g. a sheep's wool byte sits where a
-                // shulker's colour byte would).
-                let type_name = crate::registry::entity_type_name(slot.kind);
-                let variant = variant.or_else(|| {
-                    if type_name == Some("minecraft:tropical_fish") {
-                        crate::variants::tropical_fish_model(&slot.metadata)
-                    } else {
-                        None
-                    }
-                });
-                let variant = match type_name {
-                    Some("minecraft:shulker") => {
-                        match crate::variants::shulker_texture(&slot.metadata) {
-                            // The colour texture swap is cached per texture (the model is cloned
-                            // once per colour, never per frame).
-                            Some(texture) => crate::variants::shulker_model_for(&texture),
-                            None => variant,
-                        }
-                    }
-                    _ => variant,
-                };
-                let entry = crate::registry::model_entry(slot.kind);
-                let overlays = crate::variants::overlays_for(slot.kind, &slot.metadata, baby);
-                match (variant, entry) {
-                    // A variant model (already the baby's when `baby`); all six variant mobs
-                    // have a head part, so the head aim stays on.
-                    (Some(v), _) => (v, true, overlays),
-                    (None, Some((head, m))) => {
-                        let baby_model = type_name
-                            .filter(|_| baby)
-                            .and_then(crate::registry::baby_model_for_name);
-                        (baby_model.unwrap_or(m), head, overlays)
-                    }
-                    (None, None) => (
-                        crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
-                        false,
-                        overlays,
-                    ),
-                }
+                crate::models::choose(slot, type_name, &self.mob_variants, self.world_age)
             };
             let is_passenger = self.riding.vehicle_of(slot.id).is_some();
-            let is_armor_stand = crate::registry::entity_type_name(slot.kind)
-                == Some("minecraft:armor_stand");
             // The armour stand's pose comes from its synced data and replaces the walk
             // animation and head aim entirely (vanilla `ArmorStandArmorModel.setupAnim`
             // overwrites what `HumanoidModel.setupAnim` set); its setupRotations is only the
@@ -1039,11 +969,7 @@ impl EntityStore {
             let body = if is_armor_stand {
                 crate::armor_stand::body_transform(slot, partial_tick)
             } else {
-                crate::animation::body_transform(
-                    slot,
-                    partial_tick,
-                    texture.contains("iron_golem"),
-                )
+                crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"))
             };
             // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
             let body_scale = if texture.contains("creeper") {
@@ -1058,11 +984,9 @@ impl EntityStore {
             } else {
                 slot.yaw_at(partial_tick)
             };
-            let type_name = crate::registry::entity_type_name(slot.kind);
-            let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
-            // `LivingEntityRenderer.getShadowRadius`/`MobRenderer.getShadowRadius`: the
-            // renderer's base radius times the living/age scale (0.5 for babies). The player's
-            // `AvatarRenderer` uses 0.5.
+            let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata); // `LivingEntityRenderer.getShadowRadius`/`MobRenderer.getShadowRadius`: the
+                                                                                            // renderer's base radius times the living/age scale (0.5 for babies). The player's
+                                                                                            // `AvatarRenderer` uses 0.5.
             let base_shadow = type_name
                 .map(crate::registry::shadow_radius_for_name)
                 .unwrap_or(0.0);

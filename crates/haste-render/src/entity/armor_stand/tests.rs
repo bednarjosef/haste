@@ -58,7 +58,10 @@ fn armour_shapes_match_the_vanilla_layers() {
     let legs = armor_for(EquipmentSlot::Legs, false);
     assert_eq!(legs.root.children.len(), 3);
     assert_eq!(part_of(&legs, "body").cubes[0].inflate, 0.5);
-    assert_eq!(part_of(&legs, "right_leg").pivot, Vec3::new(-1.9, -13.0, 0.0));
+    assert_eq!(
+        part_of(&legs, "right_leg").pivot,
+        Vec3::new(-1.9, -13.0, 0.0)
+    );
     assert_eq!(part_of(&legs, "left_leg").cubes[0].inflate, 0.4);
     // Feet: legs only, at the outer deformation less 0.1.
     let feet = armor_for(EquipmentSlot::Feet, false);
@@ -75,7 +78,10 @@ fn small_armour_is_the_baby_transform() {
     // Heads scale 3/4 (vanilla pivot (0, 17, 0) * 0.75 = (0, 12.75, 0) -> Haste -11.25);
     // body parts 1/2 around the ground (arms' vanilla (±5, 26, 0) * 0.5 = (±2.5, 13, 0)).
     assert_eq!(part_of(&small, "body").pivot, Vec3::new(0.0, -12.0, 0.0));
-    assert_eq!(part_of(&small, "right_arm").pivot, Vec3::new(-2.5, -11.0, 0.0));
+    assert_eq!(
+        part_of(&small, "right_arm").pivot,
+        Vec3::new(-2.5, -11.0, 0.0)
+    );
     // The leg pivots (vanilla (±1.9, 11, 0) + 24, halved) land half a unit under the body's.
     let small_legs = armor_for(EquipmentSlot::Legs, true);
     assert_eq!(
@@ -121,12 +127,9 @@ fn armor_stand_texture_exists_in_the_jar() {
         eprintln!("ignored: needs the client jar in the cache");
         return;
     }
-    let mut assets = haste_assets::Assets::open(
-        &jar,
-        &haste_core::paths::cache_dir().join("assets"),
-        "26.3",
-    )
-    .unwrap();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3")
+            .unwrap();
     assets
         .texture_any(&Identifier::minecraft("entity/armorstand/armorstand"))
         .unwrap_or_else(|e| panic!("armor stand texture: {e:#}"));

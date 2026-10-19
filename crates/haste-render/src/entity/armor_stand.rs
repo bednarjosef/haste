@@ -12,8 +12,8 @@
 //! the small layer halves the base plate's pivot height.
 use std::sync::{Arc, OnceLock};
 
-use haste_core::model::{Cube, CubeModel, EquipmentSlot, ModelPart};
 use haste_core::math::Vec3;
+use haste_core::model::{Cube, CubeModel, EquipmentSlot, ModelPart};
 use haste_core::parts;
 use haste_core::Identifier;
 

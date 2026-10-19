@@ -99,10 +99,7 @@ fn small_body_model_is_the_baby_transform() {
         haste_core::Vec3::new(1.5, 5.25, 1.5)
     );
     assert_eq!(
-        find_part(&small.root, "shoulder_stick")
-            .unwrap()
-            .cubes[0]
-            .size,
+        find_part(&small.root, "shoulder_stick").unwrap().cubes[0].size,
         haste_core::Vec3::new(4.0, 1.0, 1.0)
     );
     // Texture and layout are shared.
@@ -192,14 +189,15 @@ fn hit_wobble_is_sin_over_one_and_a_half_pi_times_three_degrees() {
     // `wiggle = gameTime - lastHit + partial`: sin(wiggle / 1.5 * PI) * 3 degrees of yaw
     // while under 5. Sample the wobble across the first ticks and partials.
     let expected = |wiggle: f32| (wiggle / 1.5 * std::f32::consts::PI).sin() * 3.0f32.to_radians();
-    let wobble_at = |s: &EntityStore, partial: f32| {
-        match crate::armor_stand::body_transform(s.get(EntityId(1)).unwrap(), partial)
-            .ops
-            .first()
-        {
-            Some(BodyOp::RotateY(a)) => *a,
-            other => panic!("no wobble rotation, got {other:?}"),
-        }
+    let wobble_at = |s: &EntityStore, partial: f32| match crate::armor_stand::body_transform(
+        s.get(EntityId(1)).unwrap(),
+        partial,
+    )
+    .ops
+    .first()
+    {
+        Some(BodyOp::RotateY(a)) => *a,
+        other => panic!("no wobble rotation, got {other:?}"),
     };
     assert!((wobble_at(&s, 0.0) - expected(0.0)).abs() < 1e-6);
     assert!((wobble_at(&s, 0.5) - expected(0.5)).abs() < 1e-6);
