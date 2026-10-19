@@ -1,0 +1,27 @@
+# Windowed frame-time reference over the pre-mesh turn schedule: the same camera motion
+# as `haste --bench-window --bench-path turns` (2 s hold, 1 s 180-degree turns alternating
+# direction every 4 s for 60% of a 30 s run, then a straight flight leg at 10 blocks/s,
+# 20 blocks up), so vanilla's frame times over the turns compare with Haste's
+# `--premesh off` / `cone` / `predict` runs at the same spot (scripts/bench-vs-vanilla.sh
+# substitutes its own spot into the tp line).
+cmd time set 6000
+cmd gamemode spectator
+cmd tp @s 144.5 100 -191.5 180 15
+wait 40
+wait_world
+wait 100
+wait_world
+frametimes_start
+wait 40
+turn 180 20
+wait 60
+turn -180 20
+wait 60
+turn 180 20
+wait 60
+turn -180 20
+wait 60
+cmd tp @s ~ 20 ~
+fly 0.5 0 240
+frametimes_end vanilla_turns
+quit

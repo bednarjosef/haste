@@ -334,7 +334,7 @@ impl Renderer {
         // reused draw list.
         let planes = Self::frustum_planes(&rot_view_proj);
         let cam = frame.camera.pos;
-        self.update_mesh_gate(planes, cam, frame.camera.yaw, frame.camera.pitch);
+        self.update_mesh_gate(planes, &frame.camera, aspect);
         self.update_occlusion_walk(cam);
         // Emit draws in the occlusion walk's visit (BFS) order — vanilla draws
         // its sections in `SectionOcclusionGraph`'s node order
@@ -768,16 +768,6 @@ impl Renderer {
         self.timings.present_ms = lap(&mut mark);
 
         self.draw_list = draws;
-        Ok(FrameStats {
-            frame_ms: started.elapsed().as_secs_f32() * 1000.0,
-            chunk_sections_drawn: drawn,
-            chunk_sections_total: sections_total,
-            meshes_pending: self.meshes_pending() as u32,
-            uploads: self.last_uploads.0,
-            upload_bytes: self.last_uploads.1,
-            indices_drawn,
-            draw_calls,
-            block_entities_drawn: self.block_entities_drawn,
-        })
+        Ok(self.frame_stats(started, drawn, sections_total, indices_drawn, draw_calls))
     }
 }

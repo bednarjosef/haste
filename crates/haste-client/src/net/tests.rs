@@ -547,7 +547,11 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         None,
         &mut r.out,
     );
-    assert_eq!(r.names(), ["client_tick_end"]);
+    // An in-play teleport is accepted in the arrival tick, ahead of the tick's packets.
+    assert_eq!(
+        r.names(),
+        ["accept_teleportation", "move_player_pos", "client_tick_end"]
+    );
     r.session.end_tick(
         &InputState::default(),
         &mut r.world,
@@ -555,11 +559,7 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         None,
         &mut r.out,
     );
-    // The relative teleport moved the player: the accept, then the new position.
-    assert_eq!(
-        r.names(),
-        ["accept_teleportation", "move_player_pos", "client_tick_end"]
-    );
+    assert_eq!(r.names(), ["client_tick_end"]);
 }
 
 #[test]

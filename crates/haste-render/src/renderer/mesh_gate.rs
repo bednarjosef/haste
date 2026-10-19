@@ -5,17 +5,17 @@
 
 use haste_core::{ChunkPos, SectionPos};
 
-use super::Renderer;
+use super::{Camera, Renderer};
 
 impl Renderer {
     /// Records this frame's frustum for the mesh gate and bumps `want_version` when the look
-    /// crosses a 2-degree step.
+    /// crosses a 2-degree step, then feeds the pre-mesh turn prediction (`update_premesh`)
+    /// with the same camera.
     pub(super) fn update_mesh_gate(
         &mut self,
         planes: [glam::Vec4; 6],
-        cam: glam::DVec3,
-        yaw: f32,
-        pitch: f32,
+        camera: &Camera,
+        aspect: f32,
     ) {
         // The mesh gate's frustum (`wants_section` reads it before the next frame's
         // feed): the section cubes are tested expanded by the camera cube, like
@@ -23,12 +23,16 @@ impl Renderer {
         // `SectionOcclusionGraph.addSectionsInFrustum`. A look crossing a 2-degree step
         // bumps `want_version` (vanilla rebuilds `visibleSections` then: the mesh gate's
         // held-back sections are re-checked).
-        self.want_frustum = Some((planes, cam));
-        let look_step = ((yaw / 2.0).floor() as i32, (pitch / 2.0).floor() as i32);
+        self.want_frustum = Some((planes, camera.pos));
+        let look_step = (
+            (camera.yaw / 2.0).floor() as i32,
+            (camera.pitch / 2.0).floor() as i32,
+        );
         if Some(look_step) != self.want_look {
             self.want_look = Some(look_step);
             self.want_version += 1;
         }
+        self.update_premesh(camera, aspect);
     }
 
     /// Whether a dirty section may be submitted for meshing this frame: vanilla's

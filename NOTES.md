@@ -219,3 +219,52 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
 - **2026-10-18 Container clicks are sent inside the input event.** Vanilla's
   `MultiPlayerGameMode.handleContainerInput` sends at once; queuing to the next tick added
   50-100 ms before the crafting result appeared.
+- **2026-10-18 Visible-only meshing: the trade the lead accepted.** Meshing only the sections in
+  `visibleSections` (vanilla `LevelExtractor`), windowed bench at the reference spot, two runs
+  each: rd 32 average frame 6.47/6.80 -> 6.20/6.26 ms, p99 9.5/13.0 -> 9.1/9.6 ms, but p99.9 and
+  worst frames 12.7-26 -> 25-30 ms; GPU 2.6-2.8 GB -> 0.82 GB, RSS -50 to -110 MB. rd 12 average
+  2.06/2.14 -> 2.19/2.24 ms, p99 6.1/7.8 -> 7.9/9.9 ms, GPU 0.82-0.95 -> 0.56 GB. The worst
+  frames are the pop-in catch-up when sections become visible; turn prediction and spreading
+  background work across frames are meant to win them back.
+- **2026-10-18 Validate oracle values on an exact state.** `validate-dumps.py`'s `find` returns
+  the first matching state, and for slabs and stairs that is the waterlogged one (light
+  dampening 1, not 0). Pin every property that matters, `waterlogged` included.
+- **2026-10-18 Item particle sprites for every item.** The sprite table for `minecraft:item`
+  particles was built from the items whose default components are consumable, so a stack made
+  consumable by its component patch, and every server item particle of a non-food item
+  (snowball and egg hits, tool breaks), drew the missing sprite. It now covers the whole item
+  registry: +35 ms once at join, same 1024x1024 atlas page.
+- **2026-10-18 Another entity eating: particles yes, sound no.** The watcher's client runs
+  `LivingEntity.updateUsingItem` for other entities from the synced living flags and spawns the
+  crumbs itself, but `ClientLevel.playSeededSound` only plays for our own player: the eating
+  sound of others arrives as the server's broadcast sound packet. The 16-particle finish burst
+  (entity event 9) is sent only to the eater's own client.
+- **2026-10-19 Answer in-play teleports at once.** The vanilla server drops `use_item_on` while a
+  teleport is unconfirmed (`ServerGamePacketListenerImpl.handleUseItemOn`,
+  `awaitingPositionFromClient`). Haste sent `accept_teleportation` one tick late, so a click right
+  after any teleport or position correction vanished. In-play teleports are now accepted in their
+  arrival tick, ahead of that tick's uses; only the join teleport keeps the one-tick wait
+  (`player/teleport_accept.rs`).
+- **2026-10-19 Turn pre-meshing is off by default.** Lead A/B on `--bench-path turns` at the
+  reference spot: `--premesh cone` cut visible-but-unmeshed section-frames by 20-55 % but made
+  frames 10-25 % slower (rd 32 avg 9.1/10.0 -> 9.9/11.4 ms, rd 12 2.3/2.0 -> 2.7/2.5 ms). The
+  bigger finding: even with it off, a section entering the view at rd 12 waits ~1 s for its mesh,
+  so meshing throughput, not prediction, is the pop-in cause (task frame-work-budget).
+- **2026-10-19 Clouds use vanilla's per-face records.** Like `CloudRenderer.encodeFace`, one
+  packed record per drawn face, expanded in the vertex shader and drawn instanced: a cloud cell
+  crossing uploads 143 KB instead of 3.4 MB, rebuild 2.0 -> 1.3 ms, pixel-identical (GPU test).
+  `Options.cloudRange` sets the radius (`ceil(range * 16 / 12)` cells, default 128 chunks).
+- **2026-10-19 T-junction cracks in merged quads.** Greedy-merged rectangles' edges ran past
+  neighbouring quads' corners and rasterized sky-coloured pixel cracks. Edges now split only where
+  a neighbouring quad has a corner on them, and at every block along section borders (both sides
+  agree). Splitting every edge at every block cost ~7 % frame time; the precise split costs +2 %
+  terrain memory on a real world.
+- **2026-10-19 Held items are in block units.** After the arm's model transform (pixel scale,
+  `/16`), vanilla's `ItemInHandLayer` transforms and the item geometry are in blocks; Haste drew
+  them 16x too small. 26.3 has no EAT/DRINK arm pose (eating shows ITEM), and 26.3's summon NBT
+  for equipment is `equipment:{mainhand:{id:...}}` (the old `HandItems` is silently ignored).
+- **2026-10-19 Side-by-side with the real client.** `scripts/vanilla-client.sh 127.0.0.1:25691
+  <scenario>` with a scenario `wait_world / wait 100 / hud off / wait 20 / screenshot NAME / quit`,
+  RCON `gamemode spectator HasteRef` + `tp HasteRef x y z yaw pitch` once it joined, and a Haste
+  bot holding or doing the thing in front of it, gives a vanilla reference of any entity visual
+  in a minute. Use it before calling a visual done.

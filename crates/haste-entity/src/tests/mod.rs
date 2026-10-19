@@ -19,6 +19,7 @@ mod connectivity;
 mod hurt;
 mod item_entity;
 mod local_player;
+mod minecart;
 mod mob_animation;
 mod model_dump;
 mod models;

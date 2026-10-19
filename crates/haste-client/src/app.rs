@@ -55,7 +55,7 @@ mod frame;
 mod menu_background;
 mod world_feed;
 pub use bench::{bench, bench_window};
-use bench::{BenchSample, WindowBench};
+use bench::{bench_camera_turns, BenchPath, BenchSample, WindowBench};
 use frame::{FpsCounter, HitchTrace};
 pub(crate) use world_feed::WorldFeed;
 
@@ -533,23 +533,23 @@ impl Session {
                         .cloned()
                 })
                 .collect();
-        // The items whose default components carry `minecraft:consumable`: their model
-        // sprites are packed for the item particles a use emits.
-        let consumable_items: Vec<(haste_core::RegistryIndex, haste_core::Identifier)> = data
-            .item_components
-            .consumable_items()
-            .filter_map(|name| {
-                data.registries
-                    .index("minecraft:item", name)
-                    .map(|i| (i, name.clone()))
-            })
-            .collect();
+        // Every item in the registry: their model sprites are packed for the item particles
+        // (a consumable use's crumbs — the stack may be consumable only through its patch —
+        // and the server's `minecraft:item` particles; no model draws the missing sprite).
+        let item_sprites: Vec<(haste_core::RegistryIndex, haste_core::Identifier)> =
+            (0..data.registries.len("minecraft:item") as u32)
+                .filter_map(|i| {
+                    data.registries
+                        .name("minecraft:item", haste_core::RegistryIndex(i))
+                        .map(|n| (haste_core::RegistryIndex(i), n.clone()))
+                })
+                .collect();
         let particle_types = std::sync::Arc::new(
             haste_render::ParticleTypes::build(
                 &mut open_assets_with(&server_packs)?,
                 &particle_ids,
                 Some(&data.blocks),
-                &consumable_items,
+                &item_sprites,
             )
             .context("building the particle atlas")?,
         );
@@ -1366,10 +1366,7 @@ fn hotbar_key(code: KeyCode) -> Option<u8> {
     })
 }
 
-fn camera_section(c: &Camera) -> SectionPos {
-    let p = c.pos.floor().as_ivec3();
-    SectionPos::new(p.x >> 4, p.y >> 4, p.z >> 4)
-}
+use world_feed::camera_section;
 
 /// The input half of the client: everything between winit (or a script) and the game. The
 /// windowed client's `App` and the offscreen script runner both drive one `InputRouter`, so
@@ -1578,19 +1575,17 @@ impl InputRouter {
     ) -> bool {
         self.mouse = (x, y);
         // Vanilla `MouseHandler.onScroll`: an open screen takes the wheel first; then, for a
-        // spectator, it is the flying speed — before the UI's own no-screen hotbar handling.
+        // spectator, the wheel is the spectator menu's when open and the flying speed's when
+        // not — before the UI's own no-screen hotbar handling.
         let screen_open = ui.is_some_and(|ui| ui.screen_open());
         if !screen_open && shared.view.lock().spectator {
-            if !self.grabbed {
-                return false;
-            }
-            self.scroll += dy;
-            let steps = self.scroll.trunc() as i32;
-            if steps != 0 {
-                self.scroll -= steps as f64;
-                shared.input.lock().spectator_scroll += steps as f32;
-            }
-            return true;
+            return crate::ui::spectator::mouse_scroll(
+                ui,
+                shared,
+                dy,
+                &mut self.scroll,
+                self.grabbed,
+            );
         }
         if let Some(ui) = ui {
             if ui.scroll(x, y, dx, dy) {
@@ -2126,7 +2121,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
-        renderer.set_cloud_status(frame::cloud_status(session.options.clouds));
+        frame::apply_cloud_options(&mut renderer, &session.options);
         {
             let snapshot = shared
                 .particle_snapshots
@@ -2892,7 +2887,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
         renderer.set_view_scale(options.entity_distance_scaling);
-        renderer.set_cloud_status(frame::cloud_status(options.clouds));
+        frame::apply_cloud_options(&mut renderer, &options);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);
@@ -3029,6 +3024,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         // change in the options screen applies live, like vanilla's Vsync option).
         vsync: args.vsync.unwrap_or(options.vsync),
         vsync_forced: args.vsync,
+        premesh_forced: frame::forced_premesh(args)?,
         options,
         options_version: 0,
         perspective: game::Perspective::default(),
@@ -3094,6 +3090,8 @@ struct App {
     vsync: bool,
     /// `--vsync` forced the mode: a change in the options screen must not override it.
     vsync_forced: Option<bool>,
+    /// `--premesh` forced the pre-mesh mode (None: the saved option decides).
+    premesh_forced: Option<haste_render::PremeshMode>,
     /// The options the game is running with: refreshed from [`Shared::live_options`] whenever
     /// its version changes (not every frame), so a change in a vanilla options screen takes
     /// effect immediately (FOV, GUI scale, mouse sensitivity, fullscreen, vsync).

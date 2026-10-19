@@ -198,3 +198,101 @@ fn item_table_resolves_real_sprites() {
     let sprite = particles.pool[0].block_sprite.unwrap();
     assert_eq!(sprite.rect, bread);
 }
+
+/// Every `minecraft:item` registry entry, in protocol id order — the list `app.rs` builds
+/// the item sprite table over (registry-driven, not the consumable defaults: a stack can
+/// be consumable only through its component patch, and the server's `minecraft:item`
+/// particles name any item).
+fn registry_items() -> Vec<(RegistryIndex, Identifier)> {
+    let report = haste_core::paths::datagen_reports().join("registries.json");
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let mut items: Vec<(RegistryIndex, Identifier)> = raw["minecraft:item"]["entries"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter_map(|(name, e)| {
+            let id = e["protocol_id"].as_i64()? as u32;
+            Some((RegistryIndex(id), Identifier::parse(name).ok()?))
+        })
+        .collect();
+    items.sort_by_key(|(i, _)| i.0);
+    items
+}
+
+/// The items whose default components carry `minecraft:consumable` (the report's
+/// `minecraft/components/item/*.json`) — the list the table was built from before it
+/// covered the whole registry.
+fn consumable_default_items() -> Vec<(RegistryIndex, Identifier)> {
+    let dir = haste_core::paths::datagen_reports()
+        .join("minecraft")
+        .join("components")
+        .join("item");
+    let items = registry_items();
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let stem = entry.path().file_stem()?.to_str()?.to_owned();
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
+            json.get("components")?.get("minecraft:consumable")?;
+            items.iter().find(|(_, n)| n.path() == stem).cloned()
+        })
+        .collect()
+}
+
+/// The item table over the whole registry (as `app.rs` builds it): an item with no default
+/// consumable (the stick) still gets its model's sprite — a stack can be consumable only
+/// through its component patch — while an item with a special renderer (the chest) keeps
+/// the missing sprite. Also prints the table's cost: the build time and atlas size for the
+/// old consumable-defaults list against the full registry.
+#[test]
+#[ignore = "needs the client jar and the registry report in the cache"]
+fn every_registry_item_gets_a_sprite() {
+    let jar = haste_core::paths::client_jar();
+    if !jar.exists() {
+        eprintln!("ignored: needs the client jar in the cache");
+        return;
+    }
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3")
+            .unwrap();
+    let old = consumable_default_items();
+    let before = std::time::Instant::now();
+    let old_types = ParticleTypes::build(&mut assets, &[], None, &old).unwrap();
+    let old_build = before.elapsed();
+    let items = registry_items();
+    let after = std::time::Instant::now();
+    let types = ParticleTypes::build(&mut assets, &[], None, &items).unwrap();
+    let build = after.elapsed();
+    let (_, old_size) = old_types.atlas();
+    let (pixels, size) = types.atlas();
+    let missing = types.items.sprites(RegistryIndex(u32::MAX))[0];
+    eprintln!(
+        "item sprite table: {} consumable defaults built in {old_build:?}, atlas {old_size}x{old_size} ({} MiB); \
+         {} registry items built in {build:?}, {} with sprites, atlas {size}x{size} ({} MiB)",
+        old.len(),
+        old_size as u64 * old_size as u64 * 4 / (1024 * 1024),
+        items.len(),
+        items
+            .iter()
+            .filter(|(i, _)| types.items.sprites(*i)[0] != missing)
+            .count(),
+        pixels.len() as u64 / (1024 * 1024),
+    );
+    // The stick has no default consumable but a real sprite from its generated model.
+    let stick = items
+        .iter()
+        .find(|(_, n)| n.path() == "stick")
+        .expect("the stick is in the registry");
+    let stick_sprites = types.items.sprites(stick.0);
+    assert!(!stick_sprites.is_empty(), "the stick's model layers");
+    assert_ne!(stick_sprites[0], missing, "a real sprite, not missingno");
+    // A special renderer (the chest) has no model layers: the missing sprite stays.
+    let chest = items
+        .iter()
+        .find(|(_, n)| n.path() == "chest")
+        .expect("the chest is in the registry");
+    assert_eq!(types.items.sprites(chest.0), std::slice::from_ref(&missing));
+}

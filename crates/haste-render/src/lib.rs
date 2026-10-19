@@ -51,7 +51,9 @@ pub use particles::{
 };
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use renderer::SectionLoadState;
-pub use renderer::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState, ViewBob};
+pub use renderer::{
+    Camera, FrameInput, FrameStats, LightmapFrame, PremeshMode, Renderer, SkyState, ViewBob,
+};
 pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;
 pub use tint::{BiomeClimate, BiomeColors, BiomeSource, Colormaps, GrassModifier};
