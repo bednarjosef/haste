@@ -442,6 +442,8 @@ fn walker_passes_through_known_empty_sections() {
             );
         }
     }
+    // The empty sections were walked through but are not in the draw order.
+    assert_eq!(mask.ordered().count(), 0);
 }
 
 /// The render thread must never run the walk: `schedule` (a channel send)
