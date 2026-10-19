@@ -41,6 +41,15 @@ impl Face {
         }
     }
 
+    /// The face's axis: 0 x (west/east), 1 y (down/up), 2 z (north/south).
+    pub fn axis(self) -> usize {
+        match self {
+            Face::Down | Face::Up => 1,
+            Face::North | Face::South => 2,
+            Face::West | Face::East => 0,
+        }
+    }
+
     pub fn opposite(self) -> Face {
         match self {
             Face::Down => Face::Up,
@@ -207,6 +216,10 @@ pub fn compute_visibility(opaque: impl Fn(usize, usize, usize) -> bool) -> Visib
     })
 }
 
+/// A cached ray march: whether it was blocked, and the unvisited section that
+/// blocked it.
+type RayVerdict = (bool, (i32, i32, i32));
+
 /// Vanilla advanced-culling thresholds (Pomme's constants).
 const ADV_CULL_SECTION_DIST: i32 = 3;
 const CEILED_SECTION_DIAGONAL: f64 = 28.0;
@@ -304,7 +317,11 @@ impl Grid {
 /// builder in `walk`); sections the caller reports as opaque block the walk
 /// like vanilla's `CompiledSectionMesh.UNCOMPILED` does. Frustum culling is
 /// applied separately. Flat arrays instead of hash maps: a full walk at render
-/// distance 12 visits ~15k nodes.
+/// distance 12 visits ~15k nodes. `render_distance` is the grid's radius in
+/// columns; `view_distance` bounds the walk like vanilla's
+/// `SectionOcclusionGraph.getRelativeFrom`: a neighbour is entered only inside
+/// the view circle (`ChunkTrackingView.isInViewDistance`) and within
+/// `view_distance` sections of the camera vertically.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_visible_mask(
     section_vis: impl Fn(ChunkPos, i32) -> VisibilitySet,
@@ -314,6 +331,7 @@ pub fn compute_visible_mask(
     min_y: i32,
     section_count: i32,
     render_distance: i32,
+    view_distance: i32,
 ) -> VisibleMask {
     let r = render_distance.max(0);
     let w = 2 * r + 1;
@@ -357,11 +375,13 @@ pub fn compute_visible_mask(
         let distant = (x - cam_col.x).abs() > ADV_CULL_SECTION_DIST
             || (si - cam_si).abs() > ADV_CULL_SECTION_DIST
             || (z - cam_col.z).abs() > ADV_CULL_SECTION_DIST;
-        // The ray march depends only on this section, not on the face; compute it
-        // once per pop. Visits only accumulate during the pop, so a cached
-        // "blocked at section q" stays blocked while q is unvisited, and a
-        // cached "clear" stays clear; if q was reached in between, re-march.
-        let mut ray: Option<(bool, (i32, i32, i32))> = None;
+        // The ray march depends on this section and the face's axis (vanilla picks
+        // the start corner per direction: near the camera along the face's axis,
+        // away from it along the other two), so at most three marches per pop. Visits
+        // only accumulate during the pop, so a cached "blocked at section q" stays
+        // blocked while q is unvisited, and a cached "clear" stays clear; if q was
+        // reached in between, re-march.
+        let mut ray: [Option<RayVerdict>; 3] = [None; 3];
         for face in Face::ALL {
             // Don't walk back the way we came (limits the search to a cone).
             if cone & face.opposite().bit() != 0 {
@@ -377,36 +397,39 @@ pub fn compute_visible_mask(
             let Some(ni) = grid.index(nx, nsi, nz) else {
                 continue;
             };
+            if !in_view_distance(cam_col, nx, nz, view_distance)
+                || (nsi - cam_si).abs() > view_distance
+            {
+                continue;
+            }
             // Distant sections also get a coarse ray-march back to the camera.
             if distant {
-                let blocked = match ray {
+                let axis = face.axis();
+                let march = || {
+                    let (b, q) = ray_occluded(
+                        &grid,
+                        eye,
+                        cam_center,
+                        (x, si, z),
+                        axis,
+                        min_y_f,
+                        world_min_y,
+                        world_max_y,
+                    );
+                    (b, q.unwrap_or((0, 0, 0)))
+                };
+                let blocked = match ray[axis] {
                     None => {
-                        let (b, q) = ray_occluded(
-                            &grid,
-                            eye,
-                            cam_center,
-                            (x, si, z),
-                            min_y_f,
-                            world_min_y,
-                            world_max_y,
-                        );
-                        ray = Some((b, q.unwrap_or((0, 0, 0))));
-                        b
+                        let r = march();
+                        ray[axis] = Some(r);
+                        r.0
                     }
                     Some((false, _)) => false,
                     Some((true, q)) => {
                         if grid.visited(q.0, q.1, q.2) {
-                            let (b, q) = ray_occluded(
-                                &grid,
-                                eye,
-                                cam_center,
-                                (x, si, z),
-                                min_y_f,
-                                world_min_y,
-                                world_max_y,
-                            );
-                            ray = Some((b, q.unwrap_or((0, 0, 0))));
-                            b
+                            let r = march();
+                            ray[axis] = Some(r);
+                            r.0
                         } else {
                             true
                         }
@@ -437,15 +460,41 @@ pub fn compute_visible_mask(
     }
 }
 
-/// Step from the distant section's corner facing the camera toward the camera
-/// by one section diagonal at a time; if a step lands in a section the walk
-/// hasn't reached, the line of sight is blocked. Returns whether the sightline
-/// is blocked and the first unvisited section along it (`None` when clear).
+/// One coordinate of the ray's start corner (`SectionOcclusionGraph.runUpdates`'s
+/// `maxX`/`maxY`/`maxZ`): along the face's axis the high side when the camera
+/// section's centre is past the origin, along the other axes when it is before it.
+fn start_corner(cam: f64, origin: f64, face_axis: bool) -> f64 {
+    let high = if face_axis {
+        cam > origin
+    } else {
+        cam < origin
+    };
+    origin + if high { 16.0 } else { 0.0 }
+}
+
+/// Vanilla `ChunkTrackingView.isInViewDistance` (`isWithinDistance` without the
+/// neighbour buffer): the column's distance from the camera column, less one on
+/// each axis, inside the view distance circle.
+pub(crate) fn in_view_distance(cam: ChunkPos, x: i32, z: i32, view_distance: i32) -> bool {
+    let dx = ((x - cam.x).abs() - 1).max(0) as i64;
+    let dz = ((z - cam.z).abs() - 1).max(0) as i64;
+    dx * dx + dz * dz < view_distance as i64 * view_distance as i64
+}
+
+/// Step from the distant section's start corner toward the camera by one
+/// section diagonal at a time; if a step lands in a section the walk hasn't
+/// reached, the line of sight is blocked. The corner is vanilla's for a face on
+/// `axis` (0 x, 1 y, 2 z): the high side where the camera section's centre is
+/// past the origin along that axis, and where it is before the origin along the
+/// other two. Returns whether the sightline is blocked and the first unvisited
+/// section along it (`None` when clear).
+#[allow(clippy::too_many_arguments)]
 fn ray_occluded(
     grid: &Grid,
     eye: DVec3,
     cam_center: DVec3,
     (sx, ssi, sz): (i32, i32, i32),
+    axis: usize,
     min_y_f: f64,
     world_min_y: f64,
     world_max_y: f64,
@@ -453,11 +502,10 @@ fn ray_occluded(
     let ox = (sx * 16) as f64;
     let oy = min_y_f + (ssi * 16) as f64;
     let oz = (sz * 16) as f64;
-    let corner = |c: f64, o: f64| o + if c > o { 16.0 } else { 0.0 };
     let mut check = DVec3::new(
-        corner(cam_center.x, ox),
-        corner(cam_center.y, oy),
-        corner(cam_center.z, oz),
+        start_corner(cam_center.x, ox, axis == 0),
+        start_corner(cam_center.y, oy, axis == 1),
+        start_corner(cam_center.z, oz, axis == 2),
     );
     let step = (eye - check).normalize() * CEILED_SECTION_DIAGONAL;
     while check.distance_squared(eye) > ADV_CULL_MIN_DIST_SQ {
