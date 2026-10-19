@@ -118,6 +118,202 @@ fn offscreen_render_flat_world() {
     );
 }
 
+/// The armour stand renders end to end: a tracked stand (full iron armour, ShowArms, a
+/// custom pose and a held sword) drawn offscreen through the real jar texture and equipment
+/// assets changes the frame against the same world without it (`ArmorStandRenderer`
+/// through the store, the batched entity pass and the armour layers).
+#[test]
+#[ignore = "needs the client jar, datagen reports, and a Vulkan driver (source scripts/env.sh)"]
+fn offscreen_renders_armor_stand_with_armour() {
+    let jar = haste_core::paths::client_jar();
+    if !jar.exists() {
+        eprintln!("ignored: needs the client jar in the cache");
+        return;
+    }
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3")
+            .unwrap();
+    let states = haste_assets::BlocksJsonStates::load(
+        &haste_core::paths::datagen_reports().join("blocks.json"),
+    )
+    .unwrap();
+    let mut renderer = Renderer::new_offscreen(320, 240, &mut assets, &states).unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let registries = &data.registries;
+    renderer.set_item_registry(registries);
+
+    // A flat stone world at y=0 (the world the other offscreen test uses).
+    struct Flat;
+    impl haste_core::view::BlockView for Flat {
+        fn block_state(&self, p: haste_core::BlockPos) -> haste_core::BlockStateId {
+            if p.y == 0 {
+                haste_core::BlockStateId(1)
+            } else {
+                haste_core::BlockStateId::AIR
+            }
+        }
+        fn is_chunk_loaded(&self, _: haste_core::ChunkPos) -> bool {
+            true
+        }
+        fn sky_light(&self, p: haste_core::BlockPos) -> u8 {
+            if p.y <= 0 {
+                0
+            } else {
+                15
+            }
+        }
+        fn block_light(&self, _: haste_core::BlockPos) -> u8 {
+            0
+        }
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn height(&self) -> i32 {
+            384
+        }
+    }
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+        .collect();
+    renderer.update_world(&Flat, &dirty, ChunkPos::new(0, 0), 4);
+    for _ in 0..200 {
+        renderer.update_world(&Flat, &[], ChunkPos::new(0, 0), 4);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    // The stand: full iron armour, a sword, ShowArms and a saluting pose, tracked through
+    // the store like the client tracks any entity.
+    let mut store = haste_entity::EntityStore::new(haste_entity::EntityDimensions::default());
+    store.set_item_components(data.item_components.clone());
+    let kind = *haste_entity::registry::entity_type_names()
+        .and_then(|names| {
+            names
+                .iter()
+                .find(|(_, name)| **name == "minecraft:armor_stand")
+                .map(|(k, _)| k)
+        })
+        .expect("armor stand in the entity registry");
+    let mut spawn = haste_core::entity::EntitySpawn {
+        id: haste_core::EntityId(1),
+        uuid: uuid::Uuid::new_v4(),
+        kind,
+        pos: glam::DVec3::new(8.0, 1.0, 8.0),
+        yaw: 200.0,
+        pitch: 0.0,
+        head_yaw: 200.0,
+        data: 0,
+        velocity: glam::DVec3::ZERO,
+    };
+    store.spawn(&spawn);
+    spawn.id = haste_core::EntityId(2);
+    spawn.pos = glam::DVec3::new(6.5, 1.0, 8.0);
+    store.spawn(&spawn); // a second, bare stand next to it
+                         // Client flags (index 15): ShowArms (0x04).
+    store.set_metadata(
+        haste_core::EntityId(1),
+        &[haste_core::entity::MetadataEntry {
+            index: 15,
+            value: haste_core::entity::MetadataValue::Byte(0x04),
+        }],
+    );
+    // A pose: the right arm raised to greet (`Pose.RightArm` -> index 19).
+    store.set_metadata(
+        haste_core::EntityId(1),
+        &[haste_core::entity::MetadataEntry {
+            index: 19,
+            value: haste_core::entity::MetadataValue::Rotations([-170.0, 0.0, 10.0]),
+        }],
+    );
+    let item = |name: &str| haste_core::entity::ItemStackData {
+        count: 1,
+        item: registries.index("minecraft:item", &haste_core::Identifier::minecraft(name)),
+        components_raw: Default::default(),
+    };
+    // Wire slots: 0 mainhand, 2 feet, 3 legs, 4 chest, 5 head.
+    for (wire, name) in [
+        (0u8, "iron_sword"),
+        (2, "iron_boots"),
+        (3, "iron_leggings"),
+        (4, "iron_chestplate"),
+        (5, "iron_helmet"),
+    ] {
+        store.set_equipment(haste_core::EntityId(1), wire, item(name));
+    }
+    let mut instances = Vec::new();
+    store.render_instances(0.5, &mut instances);
+    assert_eq!(instances.len(), 2);
+    assert_eq!(
+        instances[0].equipment.len(),
+        4,
+        "the four armour pieces resolved through the equippable component"
+    );
+    assert!(instances[0].hands[0].is_some(), "the held sword");
+
+    let camera = Camera {
+        pos: glam::DVec3::new(7.5, 3.6, 11.0),
+        yaw: 180.0,
+        pitch: 12.0,
+        fov_deg: 70.0,
+        hand_fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: ViewBob::default(),
+    };
+    let gui = haste_core::gui::GuiFrame::default();
+    fn base_frame<'a>(
+        camera: Camera,
+        gui: &'a haste_core::gui::GuiFrame,
+        entities: &'a [haste_core::model::EntityInstance],
+    ) -> FrameInput<'a> {
+        FrameInput {
+            camera,
+            entities,
+            block_entities: &[],
+            gui,
+            sky: SkyState {
+                time_of_day: 6000,
+                rain: 0.0,
+                dimension_has_sky: true,
+                fog_start: 100.0,
+                fog_end: 200.0,
+                ..Default::default()
+            },
+            partial_tick: 0.5,
+            block_target: None,
+            breaking: &[],
+            camera_entity: None,
+            spin: None,
+            weather: None,
+        }
+    }
+    // The section visibility walk lands a frame later; keep rendering until it has.
+    let mut stats = renderer.render(&base_frame(camera, &gui, &[])).unwrap();
+    for _ in 0..200 {
+        if stats.chunk_sections_drawn > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        stats = renderer.render(&base_frame(camera, &gui, &[])).unwrap();
+    }
+    assert!(stats.chunk_sections_drawn > 0, "no sections drawn");
+    let without = renderer.read_back().unwrap();
+    let _ = renderer
+        .render(&base_frame(camera, &gui, &instances))
+        .unwrap();
+    let with = renderer.read_back().unwrap();
+    let mut changed = 0;
+    for (a, b) in without.pixels().zip(with.pixels()) {
+        if a != b {
+            changed += 1;
+        }
+    }
+    // The two stands with their armour and sword cover a solid share of the frame at three
+    // and a half blocks; a missing model, texture or layer would change nothing.
+    assert!(
+        changed > 1000,
+        "the stands changed only {changed} of 76800 pixels; nothing drew"
+    );
+}
+
 // Readback unpacking: 256-byte row padding and BGRA swap, no GPU needed.
 #[test]
 fn texel_rows_unpads_rows() {
