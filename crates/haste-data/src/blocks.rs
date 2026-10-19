@@ -87,7 +87,7 @@ pub struct BlockStates {
 }
 
 impl BlockStates {
-    pub(crate) fn parse(json: &str, registries: Option<&Registries>) -> anyhow::Result<Self> {
+    pub fn parse(json: &str, registries: Option<&Registries>) -> anyhow::Result<Self> {
         let raw: BTreeMap<&str, RawBlock> =
             serde_json::from_str(json).map_err(|e| anyhow::anyhow!("blocks.json: {e}"))?;
 

@@ -17,6 +17,7 @@ use crate::dims::EntityDimensions;
 use crate::lerp::{LerpState, LerpTarget};
 use crate::metadata::Metadata;
 use crate::riding::Riding;
+use crate::walk_swing::{SwingState, WalkAnimationState};
 
 /// Hurt flash duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TICKS: u32 = 10;
@@ -54,144 +55,6 @@ pub(crate) fn wrap_degrees(mut v: f32) -> f32 {
         v += 360.0;
     }
     v
-}
-
-/// Vanilla `WalkAnimationState`: the smoothed horizontal speed and the position that accumulates
-/// it, which drive the limb swing. `LivingEntity.calculateEntityAnimation` feeds it the per-tick
-/// horizontal distance x 4 (capped at 1) with a 0.4 smoothing factor
-/// (`LivingEntity.updateWalkAnimation`); the renderer reads `position`/`speed` with the partial
-/// tick.
-#[derive(Clone, Copy, Debug)]
-pub struct WalkAnimationState {
-    speed_old: f32,
-    speed: f32,
-    position: f32,
-    position_scale: f32,
-}
-
-impl Default for WalkAnimationState {
-    fn default() -> Self {
-        WalkAnimationState {
-            speed_old: 0.0,
-            speed: 0.0,
-            position: 0.0,
-            position_scale: 1.0,
-        }
-    }
-}
-
-impl WalkAnimationState {
-    /// `WalkAnimationState.update`.
-    pub fn update(&mut self, target_speed: f32, factor: f32, position_scale: f32) {
-        self.speed_old = self.speed;
-        self.speed += (target_speed - self.speed) * factor;
-        self.position += self.speed;
-        self.position_scale = position_scale;
-    }
-
-    /// `WalkAnimationState.stop`.
-    pub fn stop(&mut self) {
-        self.speed_old = 0.0;
-        self.speed = 0.0;
-        self.position = 0.0;
-    }
-
-    /// `WalkAnimationState.speed(partialTicks)`.
-    pub fn speed(&self, partial: f32) -> f32 {
-        lerp(partial, self.speed_old, self.speed).min(1.0)
-    }
-
-    /// `WalkAnimationState.position(partialTicks)`.
-    pub fn position(&self, partial: f32) -> f32 {
-        (self.position - self.speed * (1.0 - partial)) * self.position_scale
-    }
-
-    /// `WalkAnimationState.isMoving`.
-    pub fn is_moving(&self) -> bool {
-        self.speed > 1.0e-5
-    }
-}
-
-/// `LivingEntity.SwingState`: which hand swings, with which animation type and duration, and how
-/// far the swing has progressed. `swing_animation` packets start it
-/// (`ClientPacketListener.handleSwingAnimation` -> `LivingEntity.swing`).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SwingState {
-    pub(crate) active: bool,
-    pub(crate) hand: i32,
-    pub(crate) animation: i32,
-    pub(crate) duration: i32,
-    pub(crate) ticks: i32,
-    pub(crate) progress: f32,
-    pub(crate) old_progress: f32,
-}
-
-impl SwingState {
-    /// `LivingEntity.swing` -> `SwingState.startIfAble`.
-    pub fn start(&mut self, hand: i32, animation: i32, duration: i32) {
-        if self.active && self.ticks > 0 && self.ticks <= self.duration / 2 {
-            return;
-        }
-        if !self.active
-            || self.hand != hand
-            || self.animation != animation
-            || self.duration != duration
-        {
-            self.old_progress = 0.0;
-            self.progress = 0.0;
-        }
-        self.hand = hand;
-        self.animation = animation;
-        self.duration = duration;
-        self.active = true;
-        self.ticks = 0;
-    }
-
-    /// `SwingState.tick`.
-    pub fn tick(&mut self) {
-        self.old_progress = self.progress;
-        if self.active {
-            if self.duration > 0 {
-                self.progress = (self.ticks as f32 / self.duration as f32).min(1.0);
-            }
-            if self.ticks > self.duration {
-                self.active = false;
-                self.progress = 0.0;
-            } else {
-                self.ticks += 1;
-            }
-        } else {
-            self.progress = 0.0;
-        }
-    }
-
-    /// `LivingEntity.getSwingAnimation` -> `SwingState.getAnimation`.
-    pub fn animation(&self, partial: f32) -> f32 {
-        if self.progress >= self.old_progress {
-            lerp(partial, self.old_progress, self.progress)
-        } else {
-            lerp(partial, self.old_progress, self.progress + 1.0)
-        }
-    }
-
-    pub fn is_swinging(&self) -> bool {
-        self.active
-    }
-
-    /// `SwingState.animation` (the raw progress, used by `LivingEntity.tick`'s body yaw).
-    pub fn progress(&self) -> f32 {
-        self.progress
-    }
-
-    /// The swinging hand (0 main, 1 off).
-    pub fn hand(&self) -> i32 {
-        self.hand
-    }
-
-    /// The swing animation type (0 none, 1 whack, 2 stab).
-    pub fn animation_type(&self) -> i32 {
-        self.animation
-    }
 }
 
 /// One tracked entity.
@@ -702,6 +565,16 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 70 (`MinecartTNT.handleEntityEvent` -> `primeFuse`): the TNT cart's fuse
+    /// starts at 80 ticks and counts down client-side (`MinecartTNT.tick`).
+    pub fn prime_tnt_minecart(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                crate::minecart::prime(&mut e.metadata);
+            }
+        }
+    }
+
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
         let Some(e) = &mut self.slots[i as usize] else {
@@ -870,6 +743,9 @@ impl EntityStore {
             slot.swell = (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
             // `IronGolem.tick`: the attack animation tick counts down.
             slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
+            // `AbstractMinecart.tick`'s countdowns (hurt time, damage, the TNT cart's fuse);
+            // read only by minecarts, harmless elsewhere.
+            crate::minecart::tick(&mut slot.metadata);
             // `LivingEntity.tick`: fallFlyTicks counts while the fall-flying flag is set.
             if slot.metadata.shared.elytra_flying {
                 slot.fall_flying_ticks = slot.fall_flying_ticks.saturating_add(1);
@@ -911,16 +787,27 @@ impl EntityStore {
         for slot in self.slots.iter().flatten() {
             // Hanging entities (item frames, paintings) are drawn specially, and the client
             // moved them to the bounding-box centre vanilla's `recalculateBoundingBox` computes
-            // (the spawn packet carries the block position, not the render origin).
-            let decoration = crate::decoration::build(
-                slot.kind,
-                slot.data,
-                &slot.metadata,
-                &self.painting_variants,
-                slot.id.0,
-                slot.tick_count as f32 + partial_tick,
-            );
-            let pos = if decoration.is_some() {
+            // (the spawn packet carries the block position, not the render origin). Minecarts
+            // draw through their own renderer as well (`AbstractMinecartRenderer`), but keep
+            // the entity's own interpolated position.
+            let minecart_variant = crate::minecart::variant_for_kind(slot.kind);
+            let minecart = minecart_variant
+                .map(|v| crate::minecart::decoration(&slot.metadata, v, partial_tick));
+            let decoration = minecart
+                .map(haste_core::model::Decoration::Minecart)
+                .or_else(|| {
+                    crate::decoration::build(
+                        slot.kind,
+                        slot.data,
+                        &slot.metadata,
+                        &self.painting_variants,
+                        slot.id.0,
+                        slot.tick_count as f32 + partial_tick,
+                    )
+                });
+            let pos = if minecart_variant.is_some() {
+                slot.prev_pos.lerp(slot.pos, partial_tick as f64)
+            } else if decoration.is_some() {
                 crate::decoration::render_center(
                     slot.kind,
                     slot.data,
@@ -981,6 +868,12 @@ impl EntityStore {
                 let entry = crate::registry::model_entry(slot.kind);
                 let overlays = crate::variants::overlays_for(slot.kind, &slot.metadata, baby);
                 match (variant, entry) {
+                    // Minecarts draw through `AbstractMinecartRenderer` with the one
+                    // `MinecartModel` layer every minecart type bakes (`MinecartModel
+                    // .createBodyLayer`); cargo and track pose come from the decoration.
+                    _ if minecart_variant.is_some() => {
+                        (crate::minecart::model(), false, Default::default())
+                    }
                     // A variant model (already the baby's when `baby`); all six variant mobs
                     // have a head part, so the head aim stays on.
                     (Some(v), _) => (v, true, overlays),

@@ -205,6 +205,12 @@ fn chest_models() -> &'static [CubeModel; 3] {
     })
 }
 
+/// The single-half chest model, for renderers that draw a chest as a display block (the
+/// minecart's cargo): vanilla's `BlockModelSet` renders the same model for a chest state.
+pub(crate) fn single_chest_model() -> &'static CubeModel {
+    &chest_models()[0]
+}
+
 /// Vanilla `ChestRenderer.createModelTransformation`: rotate by `-toYRot(facing)` about the
 /// block's centre column (0.5, 0, 0.5), then the model's 1/16 units to blocks. No y flip: the
 /// chest is an object model (y up, see the module doc).
