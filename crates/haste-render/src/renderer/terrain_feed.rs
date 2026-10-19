@@ -216,12 +216,20 @@ impl Renderer {
             }
         }
         // The pre-mesh (held-back) uploads: whatever budget remains after the visible
-        // sections, oldest first. A wrong pre-mesh guess only meshes a section early;
-        // the hold keeps FIFO so nothing starves behind newer guesses.
-        while elapsed_ms() < budget_ms {
+        // sections. A held mesh the gate wants again (the turn arrived where the cone
+        // pointed) is visible and goes first; the rest rotate to the back, keeping their
+        // order, so nothing starves behind newer guesses. A wrong pre-mesh guess only
+        // meshed a section early.
+        let mut examined = 0;
+        while elapsed_ms() < budget_ms && examined < self.premesh_hold.len() {
             let Some(mesh) = self.premesh_hold.pop_front() else {
                 break;
             };
+            examined += 1;
+            if !self.wants_section(mesh.pos) {
+                self.premesh_hold.push_back(mesh);
+                continue;
+            }
             bytes += mesh.vertex_bytes() + mesh.index_bytes();
             let encoder = encoder.get_or_insert_with(|| {
                 self.gpu
