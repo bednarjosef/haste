@@ -19,9 +19,13 @@ screenshot ccraft-setup
 wait_until hotbar_item
 # Open the table: look at it and use (the runner placed it at (125, 71, 5), on the
 # plain's ground so its north face is visible from the camera; from the eye at (125.5,
-# 72.62, 2.5), pitch 20 aims at the face at y ~71.7).
+# 72.62, 2.5), pitch 20 aims at the face at y ~71.7). The look is re-aimed right before
+# the use: the busy shared server sends correction teleports after the RCON tp, and one
+# landing between the aim and the click re-faces us with its (stale) rotation, so the
+# click would miss — a player re-aims before clicking.
 look 0 20
 wait 5
+look 0 20
 mouse_down right
 wait 2
 mouse_up right
@@ -47,6 +51,7 @@ key E
 wait 20
 screenshot ccraft-esc
 wait_until screen_closed
+look 0 20
 mouse_down right
 wait 2
 mouse_up right

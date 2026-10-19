@@ -1578,19 +1578,17 @@ impl InputRouter {
     ) -> bool {
         self.mouse = (x, y);
         // Vanilla `MouseHandler.onScroll`: an open screen takes the wheel first; then, for a
-        // spectator, it is the flying speed — before the UI's own no-screen hotbar handling.
+        // spectator, the wheel is the spectator menu's when open and the flying speed's when
+        // not — before the UI's own no-screen hotbar handling.
         let screen_open = ui.is_some_and(|ui| ui.screen_open());
         if !screen_open && shared.view.lock().spectator {
-            if !self.grabbed {
-                return false;
-            }
-            self.scroll += dy;
-            let steps = self.scroll.trunc() as i32;
-            if steps != 0 {
-                self.scroll -= steps as f64;
-                shared.input.lock().spectator_scroll += steps as f32;
-            }
-            return true;
+            return crate::ui::spectator::mouse_scroll(
+                ui,
+                shared,
+                dy,
+                &mut self.scroll,
+                self.grabbed,
+            );
         }
         if let Some(ui) = ui {
             if ui.scroll(x, y, dx, dy) {
@@ -2126,7 +2124,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
-        renderer.set_cloud_status(frame::cloud_status(session.options.clouds));
+        frame::apply_cloud_options(&mut renderer, &session.options);
         {
             let snapshot = shared
                 .particle_snapshots
@@ -2892,7 +2890,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
         renderer.set_view_scale(options.entity_distance_scaling);
-        renderer.set_cloud_status(frame::cloud_status(options.clouds));
+        frame::apply_cloud_options(&mut renderer, &options);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);

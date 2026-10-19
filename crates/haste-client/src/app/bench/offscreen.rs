@@ -81,6 +81,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_cloud_status(crate::app::frame::cloud_status(session.options.clouds));
+        renderer.set_cloud_range(session.options.cloud_range);
         {
             let snapshot = shared
                 .particle_snapshots
@@ -261,6 +262,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_cloud_status(crate::app::frame::cloud_status(session.options.clouds));
+        renderer.set_cloud_range(session.options.cloud_range);
         {
             let snapshot = shared
                 .particle_snapshots

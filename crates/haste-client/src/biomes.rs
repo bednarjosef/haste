@@ -5,7 +5,9 @@
 //! string as in the data pack JSON) and `grass_color_modifier` (`none`, `dark_forest`, `swamp`).
 
 // `biomes.rs` is included through a `#[path]` module, so its submodules resolve next to it
-// in `src/`, not in `src/biomes/` — point zoom at its file explicitly.
+// in `src/`, not in `src/biomes/` — point them at their files explicitly.
+#[path = "biomes/audio.rs"]
+pub mod audio;
 #[path = "biomes/zoom.rs"]
 pub mod zoom;
 

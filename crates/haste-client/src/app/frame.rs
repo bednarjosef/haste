@@ -20,6 +20,16 @@ pub(super) fn cloud_status(
     }
 }
 
+/// Applies the config's cloud options to the renderer (vanilla `Options.cloudStatus`
+/// and `Options.cloudRange`).
+pub(super) fn apply_cloud_options(
+    renderer: &mut haste_render::Renderer,
+    options: &haste_setup::options::Options,
+) {
+    renderer.set_cloud_status(cloud_status(options.clouds));
+    renderer.set_cloud_range(options.cloud_range);
+}
+
 impl App {
     /// Menu mode's frame: the open screen over the title panorama (see `menu_background`).
     fn draw_menu(&mut self) {
@@ -320,7 +330,7 @@ impl App {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         renderer.set_view_scale(self.options.entity_distance_scaling);
-        renderer.set_cloud_status(cloud_status(self.options.clouds));
+        apply_cloud_options(renderer, &self.options);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();
