@@ -38,7 +38,8 @@ public final class FrameTimes {
     }
 
     /** Stops recording and writes the summary; returns the log line. */
-    static String finish(String name, int renderDistance, int width, int height) throws IOException {
+    static String finish(String name, int renderDistance, int width, int height, int visibleSections)
+        throws IOException {
         active = false;
         long[] ns = Arrays.copyOf(intervals, count);
         Arrays.sort(ns);
@@ -60,13 +61,16 @@ public final class FrameTimes {
         o.addProperty("render_distance", renderDistance);
         o.addProperty("width", width);
         o.addProperty("height", height);
+        // LevelRenderer.visibleSections at the end of the run: the non-empty sections in the
+        // frustum the frame drew, to compare with Haste's drawn section count.
+        o.addProperty("visible_sections", visibleSections);
         Path out = RecorderIO.benchDir().resolve(name + ".json");
         Files.createDirectories(out.getParent());
         Files.writeString(out, new GsonBuilder().setPrettyPrinting().create().toJson(o), StandardCharsets.UTF_8);
         return String.format(java.util.Locale.ROOT,
-            "frametimes %s: %d frames, avg %.3f ms (%.0f FPS), p99 %.3f ms, worst %.3f ms -> %s",
+            "frametimes %s: %d frames, avg %.3f ms (%.0f FPS), p99 %.3f ms, worst %.3f ms, %d visible sections -> %s",
             name, count, avgMs, avgMs == 0 ? 0 : 1000.0 / avgMs, pct(ns, 0.99),
-            count == 0 ? 0 : ns[count - 1] / 1e6, out);
+            count == 0 ? 0 : ns[count - 1] / 1e6, visibleSections, out);
     }
 
     private static double pct(long[] sorted, double p) {
