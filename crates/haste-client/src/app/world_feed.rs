@@ -410,6 +410,9 @@ impl WorldFeed {
             for inst in &mut self.instances {
                 inst.sample_light(&*world);
             }
+            // The minecarts' rail snapping reads the level (`OldMinecartBehavior.getPos`),
+            // so it happens here too, per frame.
+            haste_entity::minecart::snap_rails(&mut self.instances, &*world, &shared.data.blocks);
         }
         (&self.instances, &self.be_instances)
     }

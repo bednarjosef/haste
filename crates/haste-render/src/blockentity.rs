@@ -60,6 +60,7 @@ pub use bell::{bell_shake_rotation, bell_texture};
 pub use book::{book_openness, book_texture};
 #[cfg(test)]
 use chest::local_month_day;
+pub(crate) use chest::single_chest_model;
 pub use chest::{chest_open_curve, chest_texture, xmas_textures, ChestHalf, ChestMaterial};
 pub use conduit::{
     conduit_bob, conduit_cage_texture, conduit_eye_texture, conduit_shell_texture, conduit_spin,
@@ -80,8 +81,9 @@ pub use items::{
     SpawnerDisplay, VaultDisplay, CAMPFIRE_ITEM_SIZE, SHELF_ALIGN_OFFSET, SHELF_ITEM_SIZE,
     SPAWNER_SCALE,
 };
+pub(crate) use object::emit_object_part;
 pub(crate) use object::ObjectPose;
-use object::{emit_object_part, part, pose_of};
+use object::{part, pose_of};
 pub(crate) use piston::{piston_drawn_states, piston_extended_progress, piston_quads, PistonQuad};
 pub use piston::{piston_progress, PistonData};
 use shulker::shulker_color;
