@@ -41,6 +41,14 @@ impl EntityRenderer {
             self.vertices = out;
         }
         // Armour, in vanilla's order (`HumanoidArmorLayer.submit`: chest, legs, feet, head).
+        // The armour draws with its own model — the humanoid shapes for players and mobs,
+        // the armour stand's (`ArmorStandArmorModel`) for stands, small or big like their
+        // body model — and with the body pose's rotations and pivot offsets but none of its
+        // hidden parts: vanilla's armour models are separate, so parts the body model hides
+        // (a player's hidden skin layers, a stand's hidden arms) still draw their armour
+        // (the stand's floating chestplate shoulders are vanilla behaviour).
+        let armor_pose = armor_pose_of(&e.model, &e.pose);
+        let stand_small = armor_stand::small_of(&e.model);
         for slot in [
             haste_core::model::EquipmentSlot::Chest,
             haste_core::model::EquipmentSlot::Legs,
@@ -61,7 +69,10 @@ impl EntityRenderer {
             } else {
                 "humanoid"
             };
-            let model = humanoid_armor(slot);
+            let model = match stand_small {
+                Some(small) => armor_stand::armor_for(slot, small),
+                None => humanoid_armor(slot),
+            };
             let mut out = std::mem::take(&mut self.vertices);
             for layer in info.layers_of(layer_type) {
                 // `EquipmentLayerRenderer.getColorForLayer`: the stack's dye, else the layer's
@@ -76,7 +87,7 @@ impl EntityRenderer {
                     &mut out,
                     &model,
                     &model.root,
-                    &e.pose,
+                    &armor_pose,
                     root,
                     rect,
                     light,
@@ -153,4 +164,27 @@ impl EntityRenderer {
         self.equipment_infos.insert(asset.clone(), info.clone());
         info
     }
+}
+
+/// The pose armour draws with: the body pose's rotations and pivot offsets copied onto a
+/// fresh `PoseOverrides`, with none of its hidden parts. Vanilla's armour layers draw their
+/// own models (`HumanoidArmorLayer`'s armour model set), so parts the body model hides — a
+/// player's hidden skin layers, an armour stand's hidden arms — still draw their armour.
+/// Walks the body model's tree (the armour models' parts are a subset of its ids); fixed-size
+/// state, no per-frame allocation.
+fn armor_pose_of(body: &CubeModel, pose: &PoseOverrides) -> PoseOverrides {
+    fn walk(part: &ModelPart, from: &PoseOverrides, to: &mut PoseOverrides) {
+        if let Some(r) = from.rotation_of(part.id) {
+            to.set_rotation(part.id, r);
+        }
+        if let Some(o) = from.offset_of(part.id) {
+            to.set_offset(part.id, o);
+        }
+        for child in &part.children {
+            walk(child, from, to);
+        }
+    }
+    let mut p = PoseOverrides::default();
+    walk(&body.root, pose, &mut p);
+    p
 }

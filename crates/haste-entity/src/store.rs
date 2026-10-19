@@ -266,6 +266,10 @@ pub struct Entity {
     pub old_swell: i32,
     /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
     pub attack_ticks: i32,
+    /// The tick count when entity event 32 last arrived (`ArmorStand.handleEntityEvent` sets
+    /// `lastHit = gameTime`): the armour stand's hit wobble counts from it. A sentinel far in
+    /// the past means "never hit" (vanilla's `lastHit = 0` against a large game time).
+    pub last_hit: i64,
     /// A dropped item entity's stack (metadata index 8, `ItemEntity.DATA_ITEM`), if its metadata
     /// named one.
     pub item: Option<ItemStackData>,
@@ -345,6 +349,7 @@ impl Entity {
             swell: 0,
             old_swell: 0,
             attack_ticks: 0,
+            last_hit: -1000,
             item: None,
             is_item,
             age: 0,
@@ -702,6 +707,16 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 32 (`ArmorStand.handleEntityEvent`): the armour stand was hit; its
+    /// render-side wobble counts from now (`lastHit = gameTime`).
+    pub fn mark_hit(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.last_hit = e.tick_count as i64;
+            }
+        }
+    }
+
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
         let Some(e) = &mut self.slots[i as usize] else {
@@ -933,6 +948,16 @@ impl EntityStore {
             };
             let (model, has_head, overlays) = if slot.is_player_type {
                 (crate::models::humanoid(false), true, Default::default())
+            } else if crate::registry::entity_type_name(slot.kind)
+                == Some("minecraft:armor_stand")
+            {
+                // The armour stand's own code-built pair, small per the synced flag
+                // (`ArmorStandRenderer.submit` picks `smallModel` over `bigModel`).
+                (
+                    crate::armor_stand::body_model(crate::armor_stand::is_small(&slot.metadata)),
+                    true,
+                    Default::default(),
+                )
             } else {
                 // Registry table first (shared per type, head flag precomputed), then the box.
                 // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
@@ -998,14 +1023,28 @@ impl EntityStore {
                 }
             };
             let is_passenger = self.riding.vehicle_of(slot.id).is_some();
-            let pose =
-                crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger);
+            let is_armor_stand = crate::registry::entity_type_name(slot.kind)
+                == Some("minecraft:armor_stand");
+            // The armour stand's pose comes from its synced data and replaces the walk
+            // animation and head aim entirely (vanilla `ArmorStandArmorModel.setupAnim`
+            // overwrites what `HumanoidModel.setupAnim` set); its setupRotations is only the
+            // hit wobble (`ArmorStandRenderer.setupRotations` does not call super, so no
+            // death tilt or sleeping rotations either).
+            let pose = if is_armor_stand {
+                crate::armor_stand::pose(slot, slot.yaw_at(partial_tick))
+            } else {
+                crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger)
+            };
             let texture = model.texture.path();
-            let body = crate::animation::body_transform(
-                slot,
-                partial_tick,
-                texture.contains("iron_golem"),
-            );
+            let body = if is_armor_stand {
+                crate::armor_stand::body_transform(slot, partial_tick)
+            } else {
+                crate::animation::body_transform(
+                    slot,
+                    partial_tick,
+                    texture.contains("iron_golem"),
+                )
+            };
             // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
             let body_scale = if texture.contains("creeper") {
                 crate::animation::creeper_scale(slot, partial_tick)

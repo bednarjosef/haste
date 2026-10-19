@@ -34,6 +34,7 @@ mod sign;
 #[cfg(test)]
 mod tests;
 
+mod armor_stand;
 mod hand;
 mod humanoid;
 mod item_display;
