@@ -203,7 +203,7 @@ impl Renderer {
                     self.premesh_hold.push_back(mesh);
                     continue;
                 }
-                bytes += mesh.vertex_bytes() + mesh.index_bytes();
+                bytes += mesh.vertex_bytes() + mesh.index_bytes() + mesh.quad_bytes();
                 let encoder = encoder.get_or_insert_with(|| {
                     self.gpu
                         .device
@@ -230,7 +230,7 @@ impl Renderer {
                 self.premesh_hold.push_back(mesh);
                 continue;
             }
-            bytes += mesh.vertex_bytes() + mesh.index_bytes();
+            bytes += mesh.vertex_bytes() + mesh.index_bytes() + mesh.quad_bytes();
             let encoder = encoder.get_or_insert_with(|| {
                 self.gpu
                     .device
@@ -318,6 +318,8 @@ impl Renderer {
             arena: s.arena,
             base_vertex: s.base_vertex,
             vertex_count: s.vertex_count,
+            base_quad: s.base_quad,
+            quad_count: s.quad_count,
             index_start: s.index_start,
             index_total: s.index_total,
             layers: Vec::new(),
@@ -335,6 +337,16 @@ impl Renderer {
         }
         self.bonus_list.clear();
         self.bonus_dirty = false;
+    }
+
+    /// A chunk column the walk has not seen just loaded (the feed's first encounter):
+    /// the walk treated the column as see-through-unloaded, so its sightline data
+    /// changed and the next walk must re-run — otherwise sections of the new chunk
+    /// stay out of the visible mask (and unmeshed) until the camera crosses a section
+    /// boundary and a walk happens anyway. Vanilla's `SectionOcclusionGraph` learns
+    /// of loaded sections the same way (its empty-section update runs per load).
+    pub fn note_chunk_loaded(&mut self) {
+        self.vis_dirty = true;
     }
 
     /// Records what the client knows about a section (`SectionLoadState`). The empty

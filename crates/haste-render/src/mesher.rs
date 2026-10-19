@@ -38,14 +38,19 @@ use merge::{
 use sink::{layer_index, MeshSink};
 use snapshot::{Cell, EXT};
 
+pub use sink::QuadSpan;
 pub use sink::SectionLayerMesh;
 
 /// One section's meshed geometry, split by render layer.
 pub struct SectionMesh {
     pub pos: SectionPos,
-    /// Vertices shared by all layers (section-local packed).
+    /// Vertices shared by all layers (section-local packed; in the quad
+    /// format these are the pulled records of the non-rect spans).
     pub vertices: Vec<PackedVertex>,
-    /// Layers in draw order; indices reference `vertices`.
+    /// Rect quad records shared by all layers (quad format only).
+    pub quads: Vec<crate::quad_format::PackedQuad>,
+    /// Layers in draw order; indices reference `vertices` (vertex format) or
+    /// carry spans (quad format).
     pub layers: Vec<sink::SectionLayerMesh>,
     /// Section-local AABB (min/max in blocks) for frustum culling.
     pub aabb: ([f32; 3], [f32; 3]),
@@ -64,6 +69,7 @@ impl SectionMesh {
         SectionMesh {
             pos,
             vertices: Vec::new(),
+            quads: Vec::new(),
             layers: Vec::new(),
             aabb: ([0.0; 3], [0.0; 3]),
             visibility: crate::occlusion::VisibilitySet::none(),
@@ -85,6 +91,11 @@ impl SectionMesh {
     /// GPU bytes the indices will occupy in an arena.
     pub fn index_bytes(&self) -> u64 {
         self.layers.iter().map(|l| l.indices.len() as u64 * 4).sum()
+    }
+
+    /// GPU bytes the rect records will occupy in an arena (quad format).
+    pub fn quad_bytes(&self) -> u64 {
+        self.quads.len() as u64 * std::mem::size_of::<crate::quad_format::PackedQuad>() as u64
     }
 }
 
@@ -491,11 +502,12 @@ pub fn mesh_section_with(
 
         // The section's final output: the sink concatenates its buckets into
         // per-layer index vectors (see `MeshSink::take_layers`).
-        let (vertices, layers) = sink.take_layers();
+        let (vertices, quads, layers) = sink.take_layers();
 
         SectionMesh {
             pos,
             vertices,
+            quads,
             layers,
             aabb: (sink.min, sink.max),
             visibility: crate::occlusion::section_visibility(snapshot, baked, pos),

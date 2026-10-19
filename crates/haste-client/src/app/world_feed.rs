@@ -2,7 +2,9 @@
 //! which dirty sections are handed to the renderer's mesher, and the per-frame entity and
 //! block-entity instances.
 
-use std::collections::HashSet;
+mod promotion;
+
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,18 +30,6 @@ const SCAN_PER_FRAME: usize = 4096;
 /// predicted): the scan rotates through `waiting`, so the whole list is covered over a
 /// few frames without a hitch.
 const PREMESH_SCAN_PER_FRAME: usize = 2048;
-/// The eight horizontal neighbour chunks of a section (the ring vanilla
-/// `SectionUpdateTracker.hasAllNeighbors` requires loaded for a first build).
-const NEIGHBOUR_CHUNKS: [(i32, i32); 8] = [
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-    (-1, 0),
-    (1, 0),
-    (-1, 1),
-    (0, 1),
-    (1, 1),
-];
 
 /// What the client knows about a section right now: gone (its chunk is not loaded),
 /// loaded and empty, or loaded with blocks.
@@ -123,6 +113,8 @@ pub struct WorldFeed {
     first_build_waits: HashSet<ChunkPos>,
     /// A column with waiting holds just loaded: promote `waiting` this frame.
     rescan_waiting: bool,
+    /// The rotating cursor of the waiting re-check sweep (see [`SWEEP_FRACTION`]).
+    sweep_cursor: usize,
     /// The rotating cursor of the pre-mesh scan through `waiting` (see
     /// [`PREMESH_SCAN_PER_FRAME`]).
     premesh_cursor: usize,
@@ -148,6 +140,10 @@ pub struct WorldFeed {
     /// the skin it was drawn with.
     first_person: Option<game::FirstPersonView>,
     first_person_skin: Option<Arc<haste_entity::skin::PlayerSkin>>,
+    /// Each framed item stack's map id (`ItemFrame.getFramedMapId`), decoded from the
+    /// stack's components when its bytes last changed (a per-frame compare, a decode only
+    /// on change; the entity store keeps no component tables).
+    frame_map_ids: HashMap<EntityId, (haste_core::entity::ItemStackData, Option<i32>)>,
 }
 
 /// Lets the mesh worker threads capture section snapshots from the shared world under its
@@ -238,6 +234,7 @@ impl WorldFeed {
         renderer.set_work_budget(self.work_budget);
         self.collect(shared);
         self.promote_wanted(renderer);
+        self.sweep_wanted(renderer);
         if self.sort_needed {
             let d = |p: &SectionPos| {
                 let (dx, dy, dz) = (p.x - camera.x, p.y - camera.y, p.z - camera.z);
@@ -272,9 +269,13 @@ impl WorldFeed {
                 if !self.noted_columns.contains(&pos.chunk()) {
                     if let Some(chunk) = world.chunk(pos.chunk()) {
                         self.noted_columns.insert(pos.chunk());
-                        // A chunk just loaded: if any first-build hold waited on this
-                        // column, re-run the promotion this frame whatever the
-                        // visible-set version.
+                        // A chunk just loaded: the walk treated this column as
+                        // see-through-unloaded, so the sightline data changed — re-run
+                        // the walk, or the new chunk's sections stay out of the visible
+                        // mask until the camera crosses a section boundary.
+                        renderer.note_chunk_loaded();
+                        // If any first-build hold waited on this column, re-run the
+                        // promotion this frame whatever the visible-set version.
                         if self.first_build_waits.remove(&pos.chunk()) {
                             self.rescan_waiting = true;
                         }
@@ -327,13 +328,7 @@ impl WorldFeed {
                             self.queue.pop();
                             self.waiting.push(pos);
                             if first_build {
-                                // The hold waits on the section's neighbour chunks: note
-                                // their columns, so the promotion re-runs when one loads
-                                // (see [`Self::first_build_waits`]).
-                                for (nx, nz) in NEIGHBOUR_CHUNKS {
-                                    self.first_build_waits
-                                        .insert(ChunkPos::new(pos.x + nx, pos.z + nz));
-                                }
+                                self.note_first_build_hold(pos);
                             }
                             continue;
                         }
@@ -408,31 +403,6 @@ impl WorldFeed {
         self.last_feed_ms = started.elapsed().as_secs_f32() * 1000.0;
     }
 
-    /// Moves held-back sections that became wanted back into the queue (a new visible
-    /// set or a turned look both change what the renderer wants), or when a chunk a
-    /// first-build hold waited on has loaded ([`Self::rescan_waiting`]).
-    fn promote_wanted(&mut self, renderer: &Renderer) {
-        if renderer.want_version() == self.last_want_version && !self.rescan_waiting {
-            return;
-        }
-        self.rescan_waiting = false;
-        self.last_want_version = renderer.want_version();
-        if self.waiting.is_empty() {
-            return;
-        }
-        let mut i = 0;
-        while i < self.waiting.len() {
-            if renderer.wants_section(self.waiting[i]) {
-                let pos = self.waiting.swap_remove(i);
-                self.queue.push(pos);
-                self.sort_needed = true;
-                self.promoted = true;
-            } else {
-                i += 1;
-            }
-        }
-    }
-
     /// Copies the interpolated entity instances, gives players their default skin and samples
     /// each entity's light for the renderer. The local player's own model is always included
     /// (the server does not spawn us as an entity, so it is built here from the shared view):
@@ -448,6 +418,10 @@ impl WorldFeed {
         partial: f32,
         view: &game::ViewState,
     ) -> (&[EntityInstance], &[BlockEntityInstance]) {
+        // The maps' snapshot for this frame: one `Arc` clone (the renderer re-uploads only
+        // the maps whose data changed). Every path that draws goes through here, so the
+        // window, script, screenshot and bench modes all get it.
+        renderer.set_maps(shared.maps.lock().clone());
         // The sign text parser (on the game thread) needs the font for the wrap; handed over
         // once per connection.
         if shared.sign_text_metrics.get().is_none() {
@@ -470,6 +444,8 @@ impl WorldFeed {
         // The pickup particles (`take_item_entity`): one item/orb instance each at the eased
         // position, drawn through the dropped-item renderer (vanilla `ItemPickupParticleGroup`).
         game::pickup::instances(shared, partial, &mut self.instances);
+        // The item frames' map ids, from each framed stack's component patch.
+        self.patch_frame_maps(shared);
         // Entity light rides on the instances themselves (sampled once, where they are built;
         // the renderer holds no world reference and no longer keeps a per-frame light map).
         {
@@ -482,6 +458,49 @@ impl WorldFeed {
             haste_entity::minecart::snap_rails(&mut self.instances, &*world, &shared.data.blocks);
         }
         (&self.instances, &self.be_instances)
+    }
+
+    /// Each framed item stack's map id (`ItemFrame.getFramedMapId` reads the stack's
+    /// `minecraft:map_id` component): filled onto the item frame instances so the renderer
+    /// can draw the map instead of the item. The stack's bytes are compared per frame and
+    /// the component patch decoded only when they changed (the entity store keeps no
+    /// component tables, so the decode lives here on the render thread).
+    fn patch_frame_maps(&mut self, shared: &Shared) {
+        let tables = &shared.component_tables;
+        let store = shared.entities.read();
+        for inst in self.instances.iter_mut() {
+            let Some(haste_core::model::Decoration::ItemFrame(f)) = inst.decoration.as_mut() else {
+                continue;
+            };
+            if f.item.is_none() {
+                f.map_id = None;
+                continue;
+            }
+            let Some(entity) = store.get(inst.id) else {
+                f.map_id = None;
+                continue;
+            };
+            let stack = entity
+                .metadata
+                .get(haste_entity::decoration::ITEM_FRAME_ITEM)
+                .and_then(|e| match &e.value {
+                    haste_core::entity::MetadataValue::ItemStack(s) if !s.is_empty() => Some(s),
+                    _ => None,
+                });
+            let Some(stack) = stack else {
+                f.map_id = None;
+                continue;
+            };
+            if self
+                .frame_map_ids
+                .get(&inst.id)
+                .is_none_or(|(s, _)| *s != *stack)
+            {
+                let map_id = crate::net::map_id_of(stack, tables);
+                self.frame_map_ids.insert(inst.id, (stack.clone(), map_id));
+            }
+            f.map_id = self.frame_map_ids.get(&inst.id).unwrap().1;
+        }
     }
 
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's

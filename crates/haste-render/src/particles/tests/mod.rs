@@ -1,3 +1,4 @@
+mod explosion_emitter;
 mod item_particle;
 mod snapshot;
 mod terrain_particle;
@@ -176,11 +177,11 @@ fn particles_expire_within_their_lifetime() {
     let lifetime = particles.pool[0].lifetime as usize;
     // Alive through the lifetime ticks...
     for _ in 0..lifetime {
-        particles.tick();
+        particles.tick(DVec3::new(10.0, 64.0, -5.0));
     }
     assert_eq!(particles.alive(), 1);
     // ...expired one tick later.
-    particles.tick();
+    particles.tick(DVec3::new(10.0, 64.0, -5.0));
     assert_eq!(particles.alive(), 0);
 }
 
@@ -229,7 +230,7 @@ fn tick_moves_with_gravity_and_drag() {
     assert_eq!(p.behaviour.friction, 0.96);
     let vel = p.vel;
     let start = p.pos;
-    particles.tick();
+    particles.tick(DVec3::new(10.0, 64.0, -5.0));
     let p = &particles.pool[0];
     assert_eq!(p.prev_pos, start);
     assert_eq!(p.pos, start + vel);

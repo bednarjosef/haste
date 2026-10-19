@@ -160,12 +160,19 @@ impl Swing {
 pub struct HeldStack {
     pub item: Option<RegistryIndex>,
     pub swap_key: u64,
+    /// The stack's `minecraft:map_id` component: the hand draws the map itself when set
+    /// (`FirstPersonHandsAndItemsRenderer.submitArmWithItem`'s MAP_ID branch).
+    pub map: Option<i32>,
 }
 
 impl HeldStack {
     /// A stack known by its type only (the tests, and callers without component data).
     pub fn of(item: Option<RegistryIndex>) -> HeldStack {
-        HeldStack { item, swap_key: 0 }
+        HeldStack {
+            item,
+            swap_key: 0,
+            map: None,
+        }
     }
 }
 
@@ -452,6 +459,11 @@ impl Hand {
     /// hand is down and the bare arm once it is gone.
     pub fn shown_item(&self) -> Option<RegistryIndex> {
         self.equip.item()
+    }
+
+    /// The map id of the stack the hand shows, when it is a map (see [`HeldStack::map`]).
+    pub fn shown_map(&self) -> Option<i32> {
+        self.equip.item.map
     }
 
     /// The swing progress at the ends of the last tick (0 when not swinging).

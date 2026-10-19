@@ -10,7 +10,6 @@
 use std::collections::{HashMap, HashSet};
 
 use haste_core::Direction;
-use haste_data::GameData;
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{BlockPos, BlockStateId, EntityId, Identifier, RegistryIndex};
 use haste_protocol::packets::play::clientbound as cb;
@@ -110,6 +109,11 @@ pub struct Session {
     /// server sent one, else the static one from the data generator reports): resolves the
     /// vehicle's type index to its name, for the passenger seat offset.
     pub entity_type_names: Vec<Identifier>,
+    /// The maps' data by id (`handleMapItemData`'s `MapItemSavedData` store), as the
+    /// renderer's own versioned type; published to the render thread by `game::maps`.
+    pub maps: HashMap<i32, haste_render::MapData>,
+    /// Bumped whenever a map changed (the publish clones only then).
+    pub maps_version: u64,
     /// The pickup particles (`take_item_entity`): the collected item/orb flying to the
     /// collector for three ticks. Ticked here, published to the render thread each tick.
     pub pickup_particles: Vec<crate::net::pickup::PickupParticle>,
@@ -166,6 +170,12 @@ pub struct Session {
     /// Item particles queued since the last tick (a consumable in use: the eat/drink
     /// crumbs), drained by the game thread into the shared pool.
     pub item_particle_requests: Vec<crate::item_particles::ItemParticleRequest>,
+    /// The `explode` packets' block particles (vanilla `ClientExplosionTracker`), ticked
+    /// in `end_tick` into the particle queue.
+    explosions: explosion_tracker::ExplosionTracker,
+    /// The explosion sound's pitch and seed random (vanilla draws them from the level's
+    /// `RandomSource`).
+    explosion_rng: haste_audio::random::LegacyRandom,
     /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
     /// the pool by the game thread.
     pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
@@ -260,6 +270,8 @@ impl Session {
             world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
+            maps: HashMap::new(),
+            maps_version: 0,
             pickup_particles: Vec::new(),
             pickup_rng: Session::new_pickup_rng(),
             sound_requests: Vec::new(),
@@ -285,6 +297,13 @@ impl Session {
             particle_spawns: Vec::new(),
             block_particle_requests: Vec::new(),
             item_particle_requests: Vec::new(),
+            explosions: explosion_tracker::ExplosionTracker::default(),
+            explosion_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
             ambient_spawns: Vec::new(),
             particle_spawned: 0,
             particle_names,
@@ -344,63 +363,6 @@ impl Session {
         self.entity_type_names
             .get(kind.0 as usize)
             .is_some_and(|n| n.path() == "lightning_bolt")
-    }
-
-    /// One 20 Hz tick of the camera effects (vanilla's `Camera.tick`, plus `LivingEntity.tick` /
-    /// `tickDeath`'s hurt and death counters): the FOV modifier target and its smoothing, and
-    /// the hurt and death counters. The walk distance and bob for the view bobbing are the
-    /// player hand's own (vanilla's one `ClientAvatarState` serves the hand and the camera
-    /// alike). Called by the game thread after `end_tick` (the headless path has no camera and
-    /// skips it).
-    pub fn tick_camera(&mut self, data: Option<&GameData>, first_person: bool) {
-        let p = &self.player;
-        // The drawn item: the held stack while the use button is down. A change of the held
-        // stack restarts the draw (vanilla stops the use when the item in hand changes).
-        let held = p.int.input.use_item.then(|| p.main_hand().item).flatten();
-        if held != self.use_item {
-            self.use_ticks = 0;
-        }
-        self.use_item = held;
-        if held.is_some() {
-            self.use_ticks += 1;
-        }
-        let using = if self.use_ticks > 0 {
-            held.and_then(|h| UseItemKind::classify(data, h))
-        } else {
-            None
-        };
-        let sprinting = if p.state.sprinting {
-            // Vanilla adds the hardcoded "sprinting" attribute modifier (x1.3,
-            // ADD_MULTIPLIED_TOTAL) while the player sprints and `getFieldOfViewModifier`
-            // reads the attribute with it; haste's physics applies sprinting itself and
-            // strips that modifier from its own copy of the attribute.
-            1.3
-        } else {
-            1.0
-        };
-        let movement_speed = p.attrs.movement_speed * sprinting;
-        let target = fov_modifier_target(
-            p.state.flying,
-            movement_speed,
-            p.abilities.fov_modifier,
-            using,
-            self.use_ticks,
-            first_person,
-            self.fov_effect_scale,
-        );
-        self.old_fov_modifier = self.fov_modifier;
-        self.fov_modifier =
-            (self.fov_modifier + (target - self.fov_modifier) * 0.5).clamp(0.1, 1.5);
-
-        // Hurt and death counters (LivingEntity.tick / tickDeath).
-        self.hurt_ticks = self.hurt_ticks.saturating_sub(1);
-        // The damage cooldown the HUD heart blink reads (`LivingEntity.tick`).
-        self.damage_cooldown = self.damage_cooldown.saturating_sub(1);
-        if p.health <= 0.0 {
-            self.death_ticks = self.death_ticks.saturating_add(1);
-        } else {
-            self.death_ticks = 0;
-        }
     }
 }
 
@@ -513,6 +475,9 @@ impl Session {
         let Some(p) = self.apply_particles(p, world, regs) else {
             return;
         };
+        let Some(p) = self.apply_explosion(p) else {
+            return;
+        };
         let Some(p) = self.apply_effects(p, own) else {
             return;
         };
@@ -535,6 +500,7 @@ impl Session {
 pub mod account;
 mod block_entity_types;
 mod block_events;
+mod camera_tick;
 mod chat;
 pub mod chat_session;
 mod counters;
@@ -542,9 +508,12 @@ pub(crate) mod damage;
 mod driver;
 mod effects;
 mod entities;
+mod explosion;
+mod explosion_tracker;
 mod fov;
 mod item_world;
 mod lightmap;
+mod maps;
 mod misc;
 pub(crate) mod pack_prompt;
 mod particles;
@@ -565,6 +534,7 @@ pub use counters::NetCounters;
 pub use driver::NetDriver;
 pub use fov::{fov_modifier_target, UseItemKind};
 pub use lightmap::LightmapState;
+pub(crate) use maps::map_id_of;
 pub use registries::{
     attribute_names, entity_type_names, load_game_data, mob_variants, overworld_clock_id,
     painting_variants, synced_biome_count,
