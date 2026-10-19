@@ -322,3 +322,16 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
 - **2026-10-19 Test server memory.** The shared test server on 25691 ran out of its 1500M heap after
   ~21 hours of many players and summoned entities and stopped answering RCON; test-server.sh now
   defaults to 2G (`HASTE_SERVER_HEAP`).
+- **2026-10-19 Colours from the game are sRGB bytes.** Vanilla writes packet and option colours
+  (particle `ColorParticleOption`, tints) straight into a target that does not convert, so the bytes
+  are the displayed colour. Haste's main target is sRGB: a byte colour must be decoded to linear
+  before it goes into a vertex colour, or the target encodes it a second time and it comes out pale
+  (the tipped-arrow poison swirls read (192,208,160) against vanilla's dark olive). Alpha bytes are
+  not gamma-encoded and stay as they are.
+- **2026-10-19 Pre-mesh slack gate.** Cone pre-meshing (sections in the turn direction meshed before
+  they are visible) collapsed to 15-16 ms frames on a loaded machine. The gate stops pre-meshing
+  while the mesh backlog stays above 1536 sections for 400 ms and resumes below 512. Interleaved
+  runs at the reference spot: rd 12 cone 2.30 ms against off 3.02 ms, rd 32 6.59 against 6.69, no
+  collapse in 8 gated rd 32 runs. The default stays off until a sustained-load pair confirms it.
+  Next idea there: the section slab is looked up through a hash about 45k times per frame at rd 32;
+  a grid index would help every lookup site.
