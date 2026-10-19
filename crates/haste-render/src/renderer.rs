@@ -22,11 +22,13 @@ pub(crate) use readback::Capture;
 pub(crate) use surface::Offscreen;
 
 mod camera;
+mod draw_list;
 mod frame_setup;
 mod gui_pass;
 mod init;
 mod mesh_gate;
 mod premesh;
+mod quad_draw;
 mod query;
 mod readback;
 mod render_world;
@@ -238,9 +240,14 @@ struct SectionDraw {
     layer: haste_assets::RenderLayer,
     arena: u32,
     key: f32,
+    /// Vertex format: the index range and base vertex. Quad format: the
+    /// span's record base and count (`kind` says which pool).
     first_index: u32,
     index_count: u32,
     base_vertex: u32,
+    /// Quad format: the span kind (None-sized marker in the vertex format,
+    /// where the index buffer carries the geometry).
+    kind: crate::quad_format::SpanKind,
     origin: [i32; 3],
 }
 
@@ -337,6 +344,11 @@ pub struct Renderer {
     origins: Vec<[i32; 3]>,
     origin_buffer: wgpu::Buffer,
     origin_capacity: usize,
+    /// Quad format: per-draw instance data (origin, record base, span kind),
+    /// reused across frames.
+    quad_instances: Vec<crate::quad_format::QuadInstance>,
+    quad_instance_buffer: wgpu::Buffer,
+    quad_instance_capacity: usize,
     /// Indirect draw arguments (multi-draw path), reused across frames.
     /// Five u32 per draw: index count, instance count, first index, base vertex, first instance
     /// (`wgpu::util::DrawIndexedIndirectArgs` layout).
@@ -364,6 +376,10 @@ pub struct Renderer {
     pipeline_solid: wgpu::RenderPipeline,
     pipeline_cutout: wgpu::RenderPipeline,
     pipeline_translucent: wgpu::RenderPipeline,
+    /// The same three stages pulling quad records (`--terrain-format quad`).
+    quad_pipeline_solid: wgpu::RenderPipeline,
+    quad_pipeline_cutout: wgpu::RenderPipeline,
+    quad_pipeline_translucent: wgpu::RenderPipeline,
     depth: Option<wgpu::TextureView>,
     size: (u32, u32),
     /// GUI batch drawing (`FrameInput::gui`) and its own handle on the assets for lazy loads.

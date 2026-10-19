@@ -251,6 +251,104 @@ impl Renderer {
         };
         let pipeline_solid = make_pipeline("chunk-solid", "fs_main", None);
         let pipeline_cutout = make_pipeline("chunk-cutout", "fs_cutout", None);
+        // The quad-pulling pipelines (`--terrain-format quad`): the same
+        // fragment stages, but the vertex stage reads one record per quad
+        // from the arena storage buffers (group 3, bound per arena) and the
+        // only vertex buffer is the instance-rate draw data.
+        let quad_bind_group_layout =
+            gpu.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("chunk-quad-arena-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+        let make_quad_pipeline = |label: &str, fragment: &str, blend: Option<wgpu::BlendState>| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&gpu.device.create_pipeline_layout(
+                        &wgpu::PipelineLayoutDescriptor {
+                            label: Some("chunk-quad-layout"),
+                            bind_group_layouts: &[
+                                Some(&camera_bind_group_layout),
+                                Some(&atlas_bind_group_layout),
+                                Some(&lightmap_bind_group_layout),
+                                Some(&quad_bind_group_layout),
+                            ],
+                            immediate_size: 0,
+                        },
+                    )),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_quad"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(crate::quad_format::QuadInstance::LAYOUT)],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some(fragment),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: surface_format,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: Some(wgpu::Face::Back),
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth24Plus,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        let quad_pipeline_solid = make_quad_pipeline("chunk-quad-solid", "fs_main", None);
+        let quad_pipeline_cutout = make_quad_pipeline("chunk-quad-cutout", "fs_cutout", None);
+        let quad_pipeline_translucent = make_quad_pipeline(
+            "chunk-quad-translucent",
+            "fs_translucent",
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+        );
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
             "fs_translucent",
@@ -308,10 +406,15 @@ impl Renderer {
             // No face-skip rules until then (installed with `set_shapes`).
             Arc::new(crate::mesher::SkipTable::absent()),
         ));
-        let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
+        let arenas = MeshArenas::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            Some(quad_bind_group_layout),
+        );
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
         let indirect_buffer = Self::make_indirect_buffer(&gpu.device, 4096);
+        let quad_instance_buffer = Self::make_quad_instance_buffer(&gpu.device, 4096);
 
         // GUI: the font (with unifont when the assets index has it) and a renderer drawing into
         // a non-sRGB view of the target so blending happens on sRGB values like vanilla.
@@ -433,6 +536,9 @@ impl Renderer {
             origins: Vec::new(),
             origin_buffer,
             origin_capacity: 4096,
+            quad_instances: Vec::new(),
+            quad_instance_buffer,
+            quad_instance_capacity: 4096,
             indirect: Vec::new(),
             indirect_buffer,
             indirect_capacity: 4096,
@@ -450,6 +556,9 @@ impl Renderer {
             pipeline_solid,
             pipeline_cutout,
             pipeline_translucent,
+            quad_pipeline_solid,
+            quad_pipeline_cutout,
+            quad_pipeline_translucent,
             depth: None,
             size,
             gui,

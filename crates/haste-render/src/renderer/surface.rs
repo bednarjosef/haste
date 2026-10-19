@@ -108,6 +108,19 @@ impl Renderer {
         })
     }
 
+    /// The quad format's per-draw instance data (origin, record base, kind).
+    pub(super) fn make_quad_instance_buffer(
+        device: &wgpu::Device,
+        capacity: usize,
+    ) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("section-quad-instances"),
+            size: (capacity * std::mem::size_of::<crate::quad_format::QuadInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
     /// The format the GUI pass renders in: the non-sRGB view of the target where views are
     /// supported, else the target format itself.
     pub(super) fn gui_format_for(gpu: &Gpu, format: wgpu::TextureFormat) -> wgpu::TextureFormat {

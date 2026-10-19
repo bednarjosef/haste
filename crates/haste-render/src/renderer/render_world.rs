@@ -2,9 +2,9 @@
 // into the world's target — sky background, terrain layers, entities and block
 // entities, weather and lightning, the hand's own pass, and the GUI on top.
 use anyhow::{Context, Result};
-use haste_core::{ChunkPos, SectionPos};
+use haste_core::ChunkPos;
 
-use super::{Camera, CameraUniform, FrameInput, FrameStats, Renderer, SectionDraw};
+use super::{Camera, CameraUniform, FrameInput, FrameStats, Renderer};
 
 impl Renderer {
     /// Render one frame. Returns stats (frame time measured around the submit).
@@ -337,130 +337,11 @@ impl Renderer {
         self.update_mesh_gate(planes, &frame.camera, aspect);
         self.update_occlusion_walk(cam);
         // Emit draws in the occlusion walk's visit (BFS) order — vanilla draws
-        // its sections in `SectionOcclusionGraph`'s node order
-        // (`addSectionsInFrustum` appends as the graph is visited), so the
-        // opaque layers need no sort; only translucent is sorted back to front
-        // (vanilla reverses the list for that layer). Bonus sections (newly
-        // uploaded next to visible ones) follow; they are a few per frame. The
-        // per-layer buckets replace the old layer-major sort of the whole list.
-        let mut buckets = std::mem::take(&mut self.layer_buckets);
-        for b in buckets.iter_mut() {
-            b.clear();
-        }
-        let min_section = self.min_section;
-        let sections = &self.sections;
-        let emit = |buckets: &mut [Vec<SectionDraw>; 4], pos: SectionPos| {
-            let Some(s) = sections.get(pos) else {
-                return;
-            };
-            let si = s.pos.y - min_section;
-            if !(0..32).contains(&si) {
-                return;
-            }
-            let lo = [
-                (s.aabb.0[0] as f64 - cam.x) as f32,
-                (s.aabb.0[1] as f64 - cam.y) as f32,
-                (s.aabb.0[2] as f64 - cam.z) as f32,
-            ];
-            let hi = [
-                (s.aabb.1[0] as f64 - cam.x) as f32,
-                (s.aabb.1[1] as f64 - cam.y) as f32,
-                (s.aabb.1[2] as f64 - cam.z) as f32,
-            ];
-            if !Self::aabb_visible(&planes, lo, hi) {
-                return;
-            }
-            let d = glam::Vec3::new(
-                (lo[0] + hi[0]) * 0.5,
-                (lo[1] + hi[1]) * 0.5,
-                (lo[2] + hi[2]) * 0.5,
-            )
-            .length_squared();
-            for l in sections.layers(s) {
-                // Skip a direction group facing away from the camera.
-                if l.dir < 6 && l.back_facing(lo, hi) {
-                    continue;
-                }
-                // Sort key: ascending distance for opaque (early depth),
-                // negated for translucent so ascending = far first.
-                let translucent = l.layer == haste_assets::RenderLayer::Translucent;
-                let i = match l.layer {
-                    haste_assets::RenderLayer::Solid => 0,
-                    haste_assets::RenderLayer::Cutout => 1,
-                    haste_assets::RenderLayer::CutoutMipped => 2,
-                    haste_assets::RenderLayer::Translucent => 3,
-                };
-                buckets[i].push(SectionDraw {
-                    layer: l.layer,
-                    arena: s.arena,
-                    key: if translucent { -d } else { d },
-                    first_index: l.first_index,
-                    index_count: l.index_count,
-                    base_vertex: s.base_vertex,
-                    origin: [s.pos.x << 4, s.pos.y << 4, s.pos.z << 4],
-                });
-            }
-        };
-        self.for_each_visible_section(|pos| emit(&mut buckets, pos));
-        // Group the opaque buckets by arena: the draw loop issues one multi-draw
-        // call per run sharing a layer and an arena, and the visit order
-        // interleaves the arenas, so ungrouped the frame pays thousands of draw
-        // dispatches (2232 measured at rd 32 over 16 arenas). Depth-tested
-        // layers do not depend on order (terrain faces never coincide).
-        for b in buckets.iter_mut().take(3) {
-            b.sort_unstable_by_key(|d| d.arena);
-        }
-        // Translucent back to front: the key is the negated distance, so
-        // ascending key order is far first.
-        if buckets[3].len() > 1 {
-            buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
-        }
-        let mut draws = std::mem::take(&mut self.draw_list);
-        draws.clear();
-        for b in buckets.iter() {
-            draws.extend_from_slice(b);
-        }
-        self.layer_buckets = buckets;
-        let sections_total = self.sections.len() as u32;
-        let drawn = draws.len() as u32;
-        let indices_drawn: u32 = draws.iter().map(|d| d.index_count).sum();
-        self.origins.clear();
-        self.origins.extend(draws.iter().map(|d| d.origin));
-        if self.origins.len() > self.origin_capacity {
-            self.origin_capacity = self.origins.len().next_power_of_two();
-            self.origin_buffer = Self::make_origin_buffer(&self.gpu.device, self.origin_capacity);
-        }
-        if !self.origins.is_empty() {
-            self.gpu.queue.write_buffer(
-                &self.origin_buffer,
-                0,
-                bytemuck::cast_slice(&self.origins),
-            );
-        }
-        if self.gpu.multi_draw {
-            self.indirect.clear();
-            for (i, d) in draws.iter().enumerate() {
-                self.indirect.extend_from_slice(&[
-                    d.index_count,
-                    1,
-                    d.first_index,
-                    d.base_vertex,
-                    i as u32,
-                ]);
-            }
-            if draws.len() > self.indirect_capacity {
-                self.indirect_capacity = draws.len().next_power_of_two();
-                self.indirect_buffer =
-                    Self::make_indirect_buffer(&self.gpu.device, self.indirect_capacity);
-            }
-            if !self.indirect.is_empty() {
-                self.gpu.queue.write_buffer(
-                    &self.indirect_buffer,
-                    0,
-                    bytemuck::cast_slice(&self.indirect),
-                );
-            }
-        }
+        // its sections in `SectionOcclusionGraph`'s node order, so the opaque
+        // layers need no sort; only translucent is sorted back to front. See
+        // `draw_list.rs` (the cull step, split out by the file-size rule).
+        let (sections_total, drawn, indices_drawn) = self.collect_draws(&planes, cam);
+        let draws = std::mem::take(&mut self.draw_list);
 
         // Block entities (chests, shulker boxes) join the entity vertex stream, culled like the
         // sections: the frustum plus the visible mask (and the newly uploaded bonus sections)
@@ -581,8 +462,16 @@ impl Renderer {
 
             // Layered draw order (RenderLayer Ord: Solid < Cutout < CutoutMipped
             // < Translucent). Section origins come from the instance-rate origin buffer, one
-            // instance per draw; buffers are bound once per arena.
-            pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
+            // instance per draw; buffers are bound once per arena. In the quad format
+            // the instance buffer also carries each draw's record base and span kind,
+            // and the arena's storage buffers are bound as group 3 instead of vertex
+            // and index buffers.
+            let quad = crate::quad_format::quad_format_enabled();
+            if quad {
+                pass.set_vertex_buffer(0, self.quad_instance_buffer.slice(..));
+            } else {
+                pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
+            }
             let mut entities_drawn = false;
             let mut bound_arena = u32::MAX;
             let mut bound_layer = None;
@@ -618,11 +507,25 @@ impl Renderer {
                     // state, mips differ in the sampler) but must keep the alpha discard:
                     // its sprites have transparent texels by vanilla's per-sprite layer rule
                     // (NativeImage.computeTransparency -> ChunkSectionLayer.byTransparency).
-                    let (pipeline, sub) = match d.layer {
-                        haste_assets::RenderLayer::Solid => (&self.pipeline_solid, 1),
-                        haste_assets::RenderLayer::Cutout => (&self.pipeline_cutout, 2),
-                        haste_assets::RenderLayer::CutoutMipped => (&self.pipeline_cutout, 3),
-                        haste_assets::RenderLayer::Translucent => (&self.pipeline_translucent, 4),
+                    let (pipeline, sub) = match (d.layer, quad) {
+                        (haste_assets::RenderLayer::Solid, false) => (&self.pipeline_solid, 1),
+                        (haste_assets::RenderLayer::Cutout, false) => (&self.pipeline_cutout, 2),
+                        (haste_assets::RenderLayer::CutoutMipped, false) => {
+                            (&self.pipeline_cutout, 3)
+                        }
+                        (haste_assets::RenderLayer::Translucent, false) => {
+                            (&self.pipeline_translucent, 4)
+                        }
+                        (haste_assets::RenderLayer::Solid, true) => (&self.quad_pipeline_solid, 1),
+                        (haste_assets::RenderLayer::Cutout, true) => {
+                            (&self.quad_pipeline_cutout, 2)
+                        }
+                        (haste_assets::RenderLayer::CutoutMipped, true) => {
+                            (&self.quad_pipeline_cutout, 3)
+                        }
+                        (haste_assets::RenderLayer::Translucent, true) => {
+                            (&self.quad_pipeline_translucent, 4)
+                        }
                     };
                     brackets.begin_terrain_layer(&mut pass, timer, sub);
                     pass.set_pipeline(pipeline);
@@ -630,9 +533,18 @@ impl Renderer {
                 }
                 if bound_arena != d.arena {
                     let a = &self.arenas.arenas[d.arena as usize];
-                    pass.set_vertex_buffer(0, a.vertex.slice(..));
-                    pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
-                    pass.set_index_buffer(a.index.slice(..), wgpu::IndexFormat::Uint32);
+                    if quad {
+                        if let Some(bind) = &a.quad_bind {
+                            pass.set_bind_group(3, bind, &[]);
+                        }
+                    } else {
+                        pass.set_vertex_buffer(0, a.vertex.slice(..));
+                        pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
+                        pass.set_index_buffer(
+                            a.index.as_ref().unwrap().slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                    }
                     bound_arena = d.arena;
                 }
                 if self.gpu.multi_draw {
@@ -641,14 +553,33 @@ impl Renderer {
                         .iter()
                         .position(|e| e.layer != d.layer || e.arena != d.arena)
                         .map_or(draws.len(), |n| i + n);
-                    let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>();
-                    pass.multi_draw_indexed_indirect(
-                        &self.indirect_buffer,
-                        (i * stride) as u64,
-                        (end - i) as u32,
-                    );
+                    let stride = if quad {
+                        std::mem::size_of::<crate::quad_format::DrawIndirect>()
+                    } else {
+                        std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>()
+                    };
+                    if quad {
+                        pass.multi_draw_indirect(
+                            &self.indirect_buffer,
+                            (i * stride) as u64,
+                            (end - i) as u32,
+                        );
+                    } else {
+                        pass.multi_draw_indexed_indirect(
+                            &self.indirect_buffer,
+                            (i * stride) as u64,
+                            (end - i) as u32,
+                        );
+                    }
                     draw_calls += 1;
                     i = end;
+                } else if quad {
+                    pass.draw(
+                        0..d.kind.vertex_count(d.index_count),
+                        instance as u32..instance as u32 + 1,
+                    );
+                    draw_calls += 1;
+                    i += 1;
                 } else {
                     pass.draw_indexed(
                         d.first_index..d.first_index + d.index_count,

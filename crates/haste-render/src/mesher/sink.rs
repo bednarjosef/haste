@@ -4,7 +4,21 @@
 
 use haste_assets::{Direction, RenderLayer};
 
+use crate::quad_format::{pack_rect_quad, quad_format_enabled, PackedQuad, SpanKind};
 use crate::vertex::{pack_vertex, PackedVertex};
+
+/// One span of a quad-format layer bucket: `count` records of `kind`
+/// (`Rect`: quads in the section's quad vector; `Quad`: groups of four
+/// vertices; `Fan`: a ring of `count` vertices) starting at `first`, drawn in
+/// emission order. `dir` is the face-direction bucket (`Direction::ALL`
+/// index; 6 = translucent's whole layer, never direction-skipped).
+#[derive(Clone, Copy, Debug)]
+pub struct QuadSpan {
+    pub kind: SpanKind,
+    pub first: u32,
+    pub count: u32,
+    pub dir: u8,
+}
 
 /// One render layer of a section mesh: the layer's indices plus, for the
 /// depth-tested layers, the `(start, count)` range of each face direction's
@@ -12,6 +26,9 @@ use crate::vertex::{pack_vertex, PackedVertex};
 /// from the camera (the rasterizer culls them only after vertex shading;
 /// skipping saves that vertex work). Translucent keeps one range covering
 /// the whole vec — its quads must stay in emission order for blending.
+///
+/// In the quad format (`--terrain-format quad`) the indices are empty and
+/// `spans` carries the draw ranges instead, in the same per-direction split.
 pub struct SectionLayerMesh {
     pub layer: RenderLayer,
     pub indices: Vec<u32>,
@@ -19,6 +36,8 @@ pub struct SectionLayerMesh {
     pub dirs: [(u32, u32); 6],
     /// True when `dirs` is not split (translucent): one range, never skipped.
     pub whole: bool,
+    /// Quad format: the layer's draw spans (empty in the vertex format).
+    pub spans: Vec<QuadSpan>,
 }
 
 /// Per-section meshing accumulator. Vertices are shared; indices split by
@@ -28,6 +47,8 @@ pub struct SectionLayerMesh {
 /// original are folded into one `PackedVertex` push).
 pub(super) struct MeshSink {
     pub(super) vertices: Vec<PackedVertex>,
+    /// Quad format: the section's rect-quad records (shared by all layers).
+    pub(super) quads: Vec<PackedQuad>,
     /// Translucent indices, in emission order: blending between coplanar
     /// faces of one section (water under ice) depends on it, so this layer
     /// keeps a single bucket.
@@ -37,6 +58,9 @@ pub(super) struct MeshSink {
     /// all point away from the camera is skipped at draw time, saving the
     /// vertex work of quads the rasterizer culls after vertex shading.
     pub(super) dirs: [Vec<u32>; 18],
+    /// Quad format: the layer buckets' draw spans, same bucketing as `dirs`
+    /// plus bucket 18 = translucent.
+    pub(super) span_buckets: [Vec<QuadSpan>; 19],
     /// Minimum extent seen, for the AABB.
     pub(super) min: [f32; 3],
     pub(super) max: [f32; 3],
@@ -64,8 +88,10 @@ impl MeshSink {
     pub(super) fn new() -> MeshSink {
         MeshSink {
             vertices: Vec::new(),
+            quads: Vec::new(),
             translucent: Vec::new(),
             dirs: Default::default(),
+            span_buckets: Default::default(),
             min: [f32::MAX; 3],
             max: [f32::MIN; 3],
         }
@@ -74,9 +100,13 @@ impl MeshSink {
     /// Clears every bucket, keeping the capacities (thread-local scratch).
     pub(super) fn clear(&mut self) {
         self.vertices.clear();
+        self.quads.clear();
         self.translucent.clear();
         for d in &mut self.dirs {
             d.clear();
+        }
+        for s in &mut self.span_buckets {
+            s.clear();
         }
         self.min = [f32::MAX; 3];
         self.max = [f32::MIN; 3];
@@ -100,6 +130,10 @@ impl MeshSink {
         tint: u32,
         sprite: u16,
     ) {
+        if quad_format_enabled() {
+            self.push_quad_pulled(layer, dir, positions, uvs, lights, tint, sprite);
+            return;
+        }
         let base = self.vertices.len() as u32;
         for i in 0..4 {
             self.vertices.push(pack_vertex_raw(
@@ -128,6 +162,73 @@ impl MeshSink {
         }
     }
 
+    /// The quad-format path of `push_quad`: a rect-shaped quad becomes one
+    /// `PackedQuad` record; anything else (cross planes, tilted fluids) keeps
+    /// four vertex records with the AO-flip rotation baked into their order,
+    /// so the shader's fixed corner table reproduces the vertex path's
+    /// triangles. Both keep the layer's emission order.
+    #[allow(clippy::too_many_arguments)]
+    fn push_quad_pulled(
+        &mut self,
+        layer: RenderLayer,
+        dir: Direction,
+        positions: &[[f32; 3]; 4],
+        uvs: &[[f32; 2]; 4],
+        lights: [[u8; 3]; 4],
+        tint: u32,
+        sprite: u16,
+    ) {
+        for p in positions {
+            self.note_position(*p);
+        }
+        let bucket = self.span_bucket(layer, dir);
+        if let Some(rec) = pack_rect_quad(positions, uvs, &lights, tint, sprite) {
+            let first = self.quads.len() as u32;
+            self.quads.push(rec);
+            push_span(
+                &mut self.span_buckets[bucket],
+                SpanKind::Rect,
+                first,
+                1,
+                dir,
+            );
+        } else {
+            let ao = |v: usize| (lights[v][1] & 7) as u32;
+            let order: [usize; 4] = if ao(0) + ao(2) < ao(1) + ao(3) {
+                [1, 2, 3, 0]
+            } else {
+                [0, 1, 2, 3]
+            };
+            let first = self.vertices.len() as u32;
+            for &i in &order {
+                self.vertices.push(pack_vertex_raw(
+                    positions[i],
+                    uvs[i],
+                    lights[i],
+                    tint,
+                    sprite,
+                ));
+            }
+            push_span(
+                &mut self.span_buckets[bucket],
+                SpanKind::Quad,
+                first,
+                1,
+                dir,
+            );
+        }
+    }
+
+    /// The (layer, direction) span bucket index, mirroring the index buckets
+    /// (19 = translucent).
+    fn span_bucket(&self, layer: RenderLayer, dir: Direction) -> usize {
+        if layer == RenderLayer::Translucent {
+            18
+        } else {
+            layer_index(layer) * 6 + dir.index()
+        }
+    }
+
     /// Emits one merged rectangle as a triangle fan over its boundary ring
     /// (see `merge.rs`): the ring carries a vertex wherever the quads next to
     /// an edge have a corner (a T-junction, whose floating-point
@@ -143,6 +244,10 @@ impl MeshSink {
         tint: u32,
         sprite: u16,
     ) {
+        if quad_format_enabled() {
+            self.push_fan_pulled(layer, dir, ring, light, tint, sprite);
+            return;
+        }
         let base = self.vertices.len() as u32;
         for (pos, uv) in ring {
             self.vertices
@@ -159,12 +264,110 @@ impl MeshSink {
         }
     }
 
+    /// The quad-format path of `push_fan`: an unsplit rectangle (a four-corner
+    /// ring) is one rect record; a split ring keeps its exact fan
+    /// triangulation as pulled vertices (the shader's apex-fan corner table
+    /// reproduces `push_fan`'s triangles, so the T-junction behaviour and the
+    /// per-triangle fog interpolation are unchanged).
+    fn push_fan_pulled(
+        &mut self,
+        layer: RenderLayer,
+        dir: Direction,
+        ring: &[([f32; 3], [f32; 2])],
+        light: [u8; 3],
+        tint: u32,
+        sprite: u16,
+    ) {
+        for (pos, _) in ring {
+            self.note_position(*pos);
+        }
+        let bucket = self.span_bucket(layer, dir);
+        if ring.len() == 4 {
+            let mut positions = [[0.0; 3]; 4];
+            let mut uvs = [[0.0; 2]; 4];
+            for i in 0..4 {
+                positions[i] = ring[i].0;
+                uvs[i] = ring[i].1;
+            }
+            if let Some(rec) = pack_rect_quad(&positions, &uvs, &[light; 4], tint, sprite) {
+                let first = self.quads.len() as u32;
+                self.quads.push(rec);
+                push_span(
+                    &mut self.span_buckets[bucket],
+                    SpanKind::Rect,
+                    first,
+                    1,
+                    dir,
+                );
+                return;
+            }
+            // A four-corner ring the rect packer rejects (its UVs): four
+            // vertices in ring order, same triangles as the fan.
+            let first = self.vertices.len() as u32;
+            for (pos, uv) in ring {
+                self.vertices
+                    .push(pack_vertex_raw(*pos, *uv, light, tint, sprite));
+            }
+            push_span(
+                &mut self.span_buckets[bucket],
+                SpanKind::Quad,
+                first,
+                1,
+                dir,
+            );
+            return;
+        }
+        let first = self.vertices.len() as u32;
+        for (pos, uv) in ring {
+            self.vertices
+                .push(pack_vertex_raw(*pos, *uv, light, tint, sprite));
+        }
+        push_span(
+            &mut self.span_buckets[bucket],
+            SpanKind::Fan,
+            first,
+            ring.len() as u32,
+            dir,
+        );
+    }
+
     /// Takes the section's output: the vertices move, the layer buckets are
     /// concatenated into per-layer index vectors (the buckets keep their
     /// capacity in the thread-local scratch, so the next section of a similar
-    /// shape does not grow them again).
-    pub(super) fn take_layers(&mut self) -> (Vec<PackedVertex>, Vec<SectionLayerMesh>) {
+    /// shape does not grow them again). In the quad format the vertices move
+    /// too (as pulled records), the rect records move, and the spans move per
+    /// layer.
+    pub(super) fn take_layers(
+        &mut self,
+    ) -> (Vec<PackedVertex>, Vec<PackedQuad>, Vec<SectionLayerMesh>) {
         let vertices = std::mem::take(&mut self.vertices);
+        if quad_format_enabled() {
+            let quads = std::mem::take(&mut self.quads);
+            let mut layers: Vec<SectionLayerMesh> = Vec::with_capacity(4);
+            let mut push = |spans: &mut Vec<QuadSpan>, layer: RenderLayer, whole: bool| {
+                if spans.is_empty() {
+                    return;
+                }
+                layers.push(SectionLayerMesh {
+                    layer,
+                    indices: Vec::new(),
+                    dirs: [(0, 0); 6],
+                    whole,
+                    spans: std::mem::take(spans),
+                });
+            };
+            push(&mut self.span_buckets[18], RenderLayer::Translucent, true);
+            for l in 0..3 {
+                for d in 0..6 {
+                    push(
+                        &mut self.span_buckets[l * 6 + d],
+                        layer_from_index(l),
+                        false,
+                    );
+                }
+            }
+            return (vertices, quads, layers);
+        }
         let mut layers: Vec<SectionLayerMesh> = Vec::with_capacity(4);
         let t_len = self.translucent.len();
         if t_len > 0 {
@@ -173,6 +376,7 @@ impl MeshSink {
                 indices: std::mem::take(&mut self.translucent),
                 dirs: [(0, t_len as u32), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)],
                 whole: true,
+                spans: Vec::new(),
             });
         }
         self.translucent = Vec::with_capacity(t_len);
@@ -193,10 +397,33 @@ impl MeshSink {
                 indices,
                 dirs,
                 whole: false,
+                spans: Vec::new(),
             });
         }
-        (vertices, layers)
+        (vertices, Vec::new(), layers)
     }
+}
+
+/// Appends a span to its bucket, extending the previous one when the records
+/// are contiguous (keeps the span count near the bucket's quad count). `first`
+/// is in vertex-arena records (four per `SpanKind::Quad` quad).
+fn push_span(bucket: &mut Vec<QuadSpan>, kind: SpanKind, first: u32, count: u32, dir: Direction) {
+    let per = match kind {
+        SpanKind::Quad => 4,
+        _ => 1,
+    };
+    if let Some(last) = bucket.last_mut() {
+        if last.kind == kind && last.first + last.count * per == first {
+            last.count += count;
+            return;
+        }
+    }
+    bucket.push(QuadSpan {
+        kind,
+        first,
+        count,
+        dir: dir.index() as u8,
+    });
 }
 
 /// `vertex::pack_vertex` on plain values (no QuadVertex indirection): identical math.
