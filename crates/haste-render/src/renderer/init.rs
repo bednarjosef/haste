@@ -413,6 +413,7 @@ impl Renderer {
             want_version: 0,
             want_look: None,
             want_frustum: None,
+            premesh: super::premesh::Premesh::new(),
             camera_spectator: false,
             cull_sections: true,
             visible_for: None,

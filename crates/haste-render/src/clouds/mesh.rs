@@ -1,17 +1,20 @@
-// The extruded cloud cell mesh (vanilla `CloudRenderer`'s texture analysis and
+// The cloud cell face records (vanilla `CloudRenderer`'s texture analysis and
 // `buildMesh`/`buildExtrudedCell`): the `clouds.png` cells with their wrapped
-// neighbour flags, and the faces each cell draws around the camera.
+// neighbour flags, and — like vanilla — one compact 3-byte record per face the
+// cells draw around the camera, decoded and expanded to quads by the vertex
+// shader (`clouds.wgsl`, vanilla `clouds.vsh`).
 
 use haste_assets::Assets;
 use haste_core::Identifier;
 
-use super::{CloudVertex, CELL_HEIGHT, CELL_SIZE};
+use super::CELL_HEIGHT;
 
 /// A clouds.png texel is a cloud cell when its alpha is at least this (vanilla
 /// `isCellEmpty`: alpha < 10 is empty).
 const CELL_EMPTY_ALPHA: u8 = 10;
 
-/// The face directions of an extruded cell, vanilla `Direction.get3DDataValue` order.
+/// The face directions of an extruded cell, vanilla `Direction.get3DDataValue` order
+/// (the record's low three bits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Dir {
     Down = 0,
@@ -31,57 +34,37 @@ impl Dir {
         Dir::West,
         Dir::East,
     ];
-    /// The face shade vanilla's `clouds.vsh` gives the direction (bottom 0.7, top 1.0,
-    /// north/south 0.8, west/east 0.9).
-    fn shade(self) -> f32 {
-        match self {
-            Dir::Down => 0.7,
-            Dir::Up => 1.0,
-            Dir::North | Dir::South => 0.8,
-            Dir::West | Dir::East => 0.9,
-        }
+
+    /// The direction of a record's low three bits (vanilla
+    /// `Direction.get3DDataValue`'s order).
+    #[cfg(test)]
+    pub(super) fn from_index(bits: u32) -> Dir {
+        Self::ALL[(bits & 7) as usize]
     }
-    /// The four corners of the face in cell units (vanilla `clouds.vsh`'s vertex table).
-    pub(super) fn corners(self) -> [[f32; 3]; 4] {
-        match self {
-            Dir::Down => [
-                [1.0, 0.0, 0.0],
-                [1.0, 0.0, 1.0],
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 0.0],
-            ],
-            Dir::Up => [
-                [0.0, 1.0, 0.0],
-                [0.0, 1.0, 1.0],
-                [1.0, 1.0, 1.0],
-                [1.0, 1.0, 0.0],
-            ],
-            Dir::North => [
-                [0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [1.0, 0.0, 0.0],
-            ],
-            Dir::South => [
-                [1.0, 0.0, 1.0],
-                [1.0, 1.0, 1.0],
-                [0.0, 1.0, 1.0],
-                [0.0, 0.0, 1.0],
-            ],
-            Dir::West => [
-                [0.0, 0.0, 1.0],
-                [0.0, 1.0, 1.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0],
-            ],
-            Dir::East => [
-                [1.0, 0.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [1.0, 1.0, 1.0],
-                [1.0, 0.0, 1.0],
-            ],
-        }
+}
+
+/// Vanilla `encodeFace`'s flags. `INSIDE` reverses the quad's winding (visible from
+/// within a cloud); `USE_TOP_COLOR` shades the face with the top colour whatever its
+/// direction (the flat cells' down faces).
+pub(super) const FLAG_INSIDE_FACE: u32 = 16;
+pub(super) const FLAG_USE_TOP_COLOR: u32 = 32;
+
+/// One face record, vanilla `encodeFace`'s three bytes packed into the low three bytes
+/// of a u32 (the instance buffer reads whole records): `x >> 1` and `z >> 1` (signed
+/// bytes; the half-resolution cells reach ±127), and `dir | flags | (x & 1) << 7 |
+/// (z & 1) << 6`. The cell's low bit travels in the flags byte, exactly vanilla's
+/// layout, decoded by `clouds.wgsl`.
+pub(super) fn pack_face(x: i32, z: i32, dir: Dir, top_color: bool, inside: bool) -> u32 {
+    let mut dir_and_flags = dir as u32;
+    if inside {
+        dir_and_flags |= FLAG_INSIDE_FACE;
     }
+    if top_color {
+        dir_and_flags |= FLAG_USE_TOP_COLOR;
+    }
+    dir_and_flags |= (x as u32 & 1) << 7;
+    dir_and_flags |= (z as u32 & 1) << 6;
+    ((x >> 1) as u8 as u32) | ((z >> 1) as u8 as u32) << 8 | dir_and_flags << 16
 }
 
 /// One cell of `clouds.png` (vanilla `packCellData`): the pixel colour is unused (the
@@ -205,10 +188,10 @@ impl RelativeCameraPos {
 
 /// Vanilla `buildMesh`: every cell of the disc of `radius_cells` cells around the
 /// camera's cell (x² + z² <= radius²), taking the cloud state from the texture with
-/// wraparound. `fancy` is vanilla's `extrude`: the extruded boxes of the FANCY mode or
-/// the flat cells of the FAST one.
-pub(super) fn build_mesh(
-    out: &mut Vec<CloudVertex>,
+/// wraparound, emits its faces' records. `fancy` is vanilla's `extrude`: the extruded
+/// boxes of the FANCY mode or the flat cells of the FAST one.
+pub(super) fn build_faces(
+    out: &mut Vec<u32>,
     texture: &CloudTexture,
     center_x: i32,
     center_z: i32,
@@ -233,7 +216,7 @@ pub(super) fn build_mesh(
 /// The parameter list mirrors vanilla's own.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_build_cell(
-    out: &mut Vec<CloudVertex>,
+    out: &mut Vec<u32>,
     texture: &CloudTexture,
     center_x: i32,
     center_z: i32,
@@ -258,70 +241,33 @@ pub(super) fn try_build_cell(
 /// for z > 0 and so on), and all six faces of the nine cells around the camera reversed
 /// (vanilla's `FLAG_INSIDE_FACE`) so they are visible from inside a cloud.
 pub(super) fn build_extruded_cell(
-    out: &mut Vec<CloudVertex>,
+    out: &mut Vec<u32>,
     x: i32,
     z: i32,
     cell: Cell,
     relative_pos: RelativeCameraPos,
 ) {
     if relative_pos != RelativeCameraPos::BelowClouds {
-        encode_face(out, x, z, Dir::Up, false, false);
+        out.push(pack_face(x, z, Dir::Up, false, false));
     }
     if relative_pos != RelativeCameraPos::AboveClouds {
-        encode_face(out, x, z, Dir::Down, false, false);
+        out.push(pack_face(x, z, Dir::Down, false, false));
     }
     if cell.north && z > 0 {
-        encode_face(out, x, z, Dir::North, false, false);
+        out.push(pack_face(x, z, Dir::North, false, false));
     }
     if cell.south && z < 0 {
-        encode_face(out, x, z, Dir::South, false, false);
+        out.push(pack_face(x, z, Dir::South, false, false));
     }
     if cell.west && x > 0 {
-        encode_face(out, x, z, Dir::West, false, false);
+        out.push(pack_face(x, z, Dir::West, false, false));
     }
     if cell.east && x < 0 {
-        encode_face(out, x, z, Dir::East, false, false);
+        out.push(pack_face(x, z, Dir::East, false, false));
     }
     if x.abs() <= 1 && z.abs() <= 1 {
         for dir in Dir::ALL {
-            encode_face(out, x, z, dir, false, true);
+            out.push(pack_face(x, z, dir, false, true));
         }
-    }
-}
-
-/// Vanilla `encodeFace` + the vertex shader's position math: the face's corners in
-/// camera-cell-relative blocks (the per-frame offset inside the cell comes from the
-/// uniform), two triangles per quad like vanilla's quad index buffer. `top_color` is
-/// vanilla's `FLAG_USE_TOP_COLOR` (the face is shaded `faceColors[1]`, the top colour,
-/// whatever its direction — the flat cells' down faces); `inside` faces reverse the
-/// vertex order (vanilla's `FLAG_INSIDE_FACE`).
-pub(super) fn encode_face(
-    out: &mut Vec<CloudVertex>,
-    x: i32,
-    z: i32,
-    dir: Dir,
-    top_color: bool,
-    inside: bool,
-) {
-    let shade = if top_color { 1.0 } else { dir.shade() };
-    let corner = |c: [f32; 3]| CloudVertex {
-        pos: [
-            (x as f32 + c[0]) * CELL_SIZE,
-            c[1] * CELL_HEIGHT,
-            (z as f32 + c[2]) * CELL_SIZE,
-        ],
-        shade,
-    };
-    let c = dir.corners();
-    // Vanilla's sequential quad index buffer: (0, 1, 2) and (0, 2, 3); inside faces use
-    // the reversed order (3 - quadVertex), which is the same two triangles wound the
-    // other way.
-    let order: [usize; 6] = if inside {
-        [3, 2, 1, 3, 1, 0]
-    } else {
-        [0, 1, 2, 0, 2, 3]
-    };
-    for i in order {
-        out.push(corner(c[i]));
     }
 }
