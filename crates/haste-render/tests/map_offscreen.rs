@@ -312,3 +312,79 @@ fn held_map_draws_the_two_handed_view() {
     }
     assert!(blue > 200, "the held map's contents drew {blue} pixels");
 }
+
+/// The same map id held in the hand and framed in view at once: both draw from the one
+/// texture the map's id owns (`MapTextureManager.MapInstance`), so the frame must show the
+/// contents too, not just the paper behind them.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn framed_and_held_map_share_the_one_texture() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
+    renderer.set_item_registry(&data.registries);
+    let world = Flat {
+        stone: data
+            .blocks
+            .default_state(&Identifier::minecraft("stone"))
+            .unwrap(),
+    };
+    let filled_map = data
+        .registries
+        .index("minecraft:item", &Identifier::minecraft("filled_map"))
+        .unwrap();
+    let mut maps = HashMap::new();
+    maps.insert(7, map_data());
+    renderer.set_maps(Arc::new(maps));
+    let mut entities = vec![frame_instance(
+        1,
+        glam::DVec3::new(0.5, 1.5, 0.5),
+        Some(7),
+        filled_map,
+    )];
+    renderer.set_first_person(Some(haste_render::FirstPerson {
+        skin: None,
+        slim: false,
+        sleeve: true,
+        item: None,
+        map: Some(7),
+        offhand_empty: true,
+        light: (15, 0),
+        use_eat: false,
+        use_remaining: 0,
+        use_duration: 0,
+        attack: haste_render::TickPair::fixed(0.0),
+        equip: haste_render::TickPair::fixed(1.0),
+        x_bob: haste_render::TickPair::fixed(0.0),
+        y_bob: haste_render::TickPair::fixed(0.0),
+    }));
+    let img = render(&mut renderer, &world, &mut entities);
+    renderer.set_first_person(None);
+
+    // The frame sits above the held map's screen area: its half of the screen must show the
+    // map's water blue (the held map below covers the lower half with the same texture).
+    let (mut framed_blue, mut held_blue) = (0, 0);
+    for y in 120..480 {
+        for x in 160..480 {
+            let p = img.get_pixel(x, y).0;
+            let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+            if b > 120 && b > r + 40 && g < 100 {
+                if y < 240 {
+                    framed_blue += 1;
+                } else {
+                    held_blue += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        framed_blue > 100,
+        "the framed map's contents drew {framed_blue} pixels above the held map"
+    );
+    assert!(
+        held_blue > 200,
+        "the held map's contents drew {held_blue} pixels below the frame"
+    );
+}
