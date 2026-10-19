@@ -43,12 +43,30 @@ pub const WATER_INERTIA: f64 = 0.6;
 pub const ROTATION_LERP: f32 = 0.2;
 
 /// Whether `kind` is an arrow we render (`minecraft:arrow`, `minecraft:spectral_arrow`).
-/// Modded arrow types fall through to the generic box, like any unknown entity.
+/// Modded arrow types fall through to the generic box, like any unknown entity. The kind
+/// ids resolve from the registry once (this runs per entity per tick, so it must not look
+/// the name up every time).
 pub fn is_arrow(kind: haste_core::RegistryIndex) -> bool {
-    matches!(
-        crate::registry::entity_type_name(kind),
-        Some("minecraft:arrow") | Some("minecraft:spectral_arrow")
-    )
+    use std::sync::OnceLock;
+    static KINDS: OnceLock<(usize, Option<usize>, Option<usize>)> = OnceLock::new();
+    let (len, arrow, spectral) = *KINDS.get_or_init(|| {
+        let names = crate::registry::entity_type_names();
+        let find = |name: &str| {
+            names.and_then(|n| {
+                n.iter()
+                    .find(|(_, v)| **v == name)
+                    .map(|(k, _)| k.0 as usize)
+            })
+        };
+        (
+            names.map_or(0, |n| n.len()),
+            find("minecraft:arrow"),
+            find("minecraft:spectral_arrow"),
+        )
+    });
+    let i = kind.0 as usize;
+    // Without the registry (no cache) nothing is an arrow, like the name lookup would answer.
+    i < len && (Some(i) == arrow || Some(i) == spectral)
 }
 
 /// The potion colour of a tipped arrow (`Arrow.getColor`), `-1` when it has none.
