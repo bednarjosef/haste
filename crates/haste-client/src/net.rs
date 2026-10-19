@@ -471,6 +471,10 @@ impl Session {
             for (pos, state) in edits {
                 self.set_block_with_block_entities(world, pos, state);
             }
+            // The predictions the ack in this batch released (`ClientLevel
+            // .syncBlockState`: the server's state restored, the player snapped back
+            // only when it collides with it).
+            self.sync_block_state(world);
             // The boat we steer is this side's authoritative instance of it (vanilla
             // `Entity.isLocalInstanceAuthoritative`): the entity the world draws sits where our
             // simulation put it, not where the server's move packets for it still have it.
@@ -534,6 +538,7 @@ mod registries;
 mod remote_use;
 mod session_tick;
 mod sinks;
+mod sync_block_state;
 mod vehicle;
 mod weather;
 mod world;

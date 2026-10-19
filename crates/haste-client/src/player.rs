@@ -256,7 +256,7 @@ pub struct LocalPlayer {
     pending_accept_age: u32,
     /// Counters for tests and the headless printout.
     pub teleports: u64,
-    prev_pos: DVec3,
+    pub(crate) prev_pos: DVec3,
     /// The camera's smoothed eye height and its last-tick value (vanilla `Camera.eyeHeight`/
     /// `eyeHeightOld`, f32 like vanilla). The camera, not the player, smooths: each tick it
     /// halves the distance to the pose's eye height, and the render lerps the two values.
@@ -484,11 +484,10 @@ impl LocalPlayer {
                 self.pending_accept = Some(t.teleport_id);
                 self.pending_accept_age = 0;
                 // `ClientPacketListener.handleMovePlayer` also calls
-                // `BlockStatePredictionHandler.onTeleport` (a record of the prediction
-                // sequence at the teleport; our predictions never snap the player, so there
-                // is nothing to keep) and `MultiPlayerGameMode.stopDestroyBlock`: a running
-                // break is aborted here, before this tick's key handling — unlike the
-                // accept, which the join-teleport race above keeps a tick late.
+                // `BlockStatePredictionHandler.onTeleport` and
+                // `MultiPlayerGameMode.stopDestroyBlock`: a running break is aborted
+                // here, before this tick's key handling.
+                self.int.prediction.on_teleport();
                 self.stop_destroy(out);
                 // `xLast`/`yLast`/`zLast` are left untouched, so the first sendPosition
                 // after the teleport reports the new position whatever the threshold (the
