@@ -115,7 +115,14 @@ impl Ui {
                 true
             }
             k if (keys::NUM_1..keys::NUM_1 + 9).contains(&k) => {
-                self.state(|s| s.selected_slot = k - keys::NUM_1);
+                // Vanilla `Minecraft.handleKeybinds`' hotbar loop: in spectator the digits
+                // go to the spectator menu (`SpectatorGui.onHotbarSelected`), never the
+                // inventory slot.
+                if self.state(|s| s.game_mode == GameMode::Spectator) {
+                    self.spectator_hotbar_selected(k - keys::NUM_1);
+                } else {
+                    self.state(|s| s.selected_slot = k - keys::NUM_1);
+                }
                 true
             }
             _ => false,
@@ -142,6 +149,11 @@ impl Ui {
         if !gui.is_open() {
             // No screen: vanilla's `MouseHandler.onPress` sets the mouse `KeyMapping`s.
             gui.game_mouse(button, pressed);
+            // Vanilla `Minecraft.handleKeybinds`: the key bound to `keySpectatorHotbar`
+            // (mouse middle) opens or activates the spectator menu, in spectator mode only.
+            if pressed && button == 2 && self.state(|s| s.game_mode == GameMode::Spectator) {
+                self.spectator_hotbar_action_key();
+            }
             return false;
         }
         gui.mouse(x, y, Some((button, pressed)));
@@ -164,6 +176,47 @@ impl Ui {
         let step = if dy > 0.0 { -1 } else { 1 };
         self.state(|s| s.selected_slot = (s.selected_slot + step).rem_euclid(9));
         true
+    }
+
+    // ---- the spectator menu (vanilla `SpectatorGui`; see `ui/spectator`) ----
+
+    /// Whether the spectator menu is open (`SpectatorGui.isMenuActive`; the wheel's
+    /// spectator branch asks before stepping the flying speed instead).
+    pub fn spectator_menu_active(&self) -> bool {
+        self.shared.spectator.lock().menu_active()
+    }
+
+    /// `SpectatorGui.onHotbarSelected` (a digit key).
+    pub fn spectator_hotbar_selected(&self, slot: i32) {
+        let mut fx = super::spectator::MenuEffects::default();
+        self.shared
+            .spectator
+            .lock()
+            .on_hotbar_selected(slot, &mut fx);
+        self.apply_menu_effects(fx);
+    }
+
+    /// `SpectatorGui.onMouseScrolled` (the wheel with the menu open).
+    pub fn spectator_mouse_scrolled(&self, wheel: i32) {
+        let mut fx = super::spectator::MenuEffects::default();
+        self.shared
+            .spectator
+            .lock()
+            .on_mouse_scrolled(wheel, &mut fx);
+        self.apply_menu_effects(fx);
+    }
+
+    /// `SpectatorGui.onHotbarActionKeyPressed` (the `keySpectatorHotbar` key: middle click).
+    pub fn spectator_hotbar_action_key(&self) {
+        let mut fx = super::spectator::MenuEffects::default();
+        self.shared.spectator.lock().on_hotbar_action_key(&mut fx);
+        self.apply_menu_effects(fx);
+    }
+
+    /// What activating a menu item did: its packets queue in the outbox (the per-tick
+    /// drain sends them, like vanilla's `handleKeybinds`-tick `Connection.send`).
+    fn apply_menu_effects(&self, fx: super::spectator::MenuEffects) {
+        self.shared.outbox.lock().extend(fx.packets);
     }
 }
 
