@@ -81,20 +81,30 @@ impl EntityStore {
                 self.world_age,
             );
             let is_passenger = self.riding.vehicle_of(slot.id).is_some();
-            // `AbstractBoatModel.setupAnim` for boats (the paddles); the generic `setupAnim`
-            // for everything else. A player-typed entity is never posed as a boat (its kind
-            // may be anything the server paired it with).
+            // `AbstractBoatModel.setupAnim` for boats (the paddles); the armour stand's pose
+            // from its synced data (vanilla `ArmorStandArmorModel.setupAnim` overwrites what
+            // `HumanoidModel.setupAnim` set, walk animation and head aim included); the
+            // generic `setupAnim` for everything else. A player-typed entity is never posed
+            // as a boat (its kind may be anything the server paired it with).
             let is_boat = slot.is_boat && !slot.is_player_type;
+            let is_armor_stand = !slot.is_player_type
+                && crate::registry::entity_type_name(slot.kind) == Some("minecraft:armor_stand");
             let pose = if is_boat {
                 crate::boat::setup_anim(slot, &model, partial_tick)
+            } else if is_armor_stand {
+                crate::armor_stand::pose(slot, slot.yaw_at(partial_tick))
             } else {
                 crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger)
             };
             let texture = model.texture.path();
-            // `AbstractBoatRenderer.submit`'s rotations for boats; the generic
+            // `AbstractBoatRenderer.submit`'s rotations for boats; the armour stand's
+            // setupRotations is only the hit wobble (`ArmorStandRenderer.setupRotations` does
+            // not call super, so no death tilt or sleeping rotations either); the generic
             // `setupRotations` for everything else.
             let body = if is_boat {
                 crate::boat::body_transform(slot, partial_tick)
+            } else if is_armor_stand {
+                crate::armor_stand::body_transform(slot, partial_tick)
             } else {
                 crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"))
             };

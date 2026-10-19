@@ -128,6 +128,10 @@ pub struct Entity {
     pub old_swell: i32,
     /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
     pub attack_ticks: i32,
+    /// The tick count when entity event 32 last arrived (`ArmorStand.handleEntityEvent` sets
+    /// `lastHit = gameTime`): the armour stand's hit wobble counts from it. A sentinel far in
+    /// the past means "never hit" (vanilla's `lastHit = 0` against a large game time).
+    pub last_hit: i64,
     /// A dropped item entity's stack (metadata index 8, `ItemEntity.DATA_ITEM`), if its metadata
     /// named one.
     pub item: Option<ItemStackData>,
@@ -220,6 +224,7 @@ impl Entity {
             swell: 0,
             old_swell: 0,
             attack_ticks: 0,
+            last_hit: -1000,
             item: None,
             is_item,
             is_boat,
@@ -273,32 +278,6 @@ impl Entity {
     /// Head yaw between the last two ticks (`Mth.rotLerp(partial, yHeadRotO, yHeadRot)`).
     pub fn head_yaw_at(&self, partial: f32) -> f32 {
         self.prev_head_yaw + partial * wrap_degrees(self.head_yaw - self.prev_head_yaw)
-    }
-}
-
-/// `LivingEntity.tick`'s body-rotation step: follow the horizontal movement direction, then
-/// `tickHeadTurn` (0.3 lerp, 50 degree head/body split).
-pub(crate) fn update_body_yaw(e: &mut Entity, d: DVec3) {
-    let mut target = e.body_yaw;
-    let side_dist = (d.x * d.x + d.z * d.z) as f32;
-    if side_dist > 0.002_500_000_2 {
-        let walk_direction = (d.z.atan2(d.x) as f32).to_degrees() - 90.0;
-        let diff = (wrap_degrees(e.yaw) - walk_direction).abs();
-        target = if 95.0 < diff && diff < 265.0 {
-            walk_direction - 180.0
-        } else {
-            walk_direction
-        };
-    }
-    if e.swing.progress() > 0.0 {
-        target = e.yaw;
-    }
-    let body_delta = wrap_degrees(target - e.body_yaw);
-    e.body_yaw += body_delta * 0.3;
-    let head_diff = wrap_degrees(e.yaw - e.body_yaw);
-    let max_head = 50.0;
-    if head_diff.abs() > max_head {
-        e.body_yaw += head_diff - head_diff.signum() * max_head;
     }
 }
 
@@ -591,6 +570,16 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 32 (`ArmorStand.handleEntityEvent`): the armour stand was hit; its
+    /// render-side wobble counts from now (`lastHit = gameTime`).
+    pub fn mark_hit(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.last_hit = e.tick_count as i64;
+            }
+        }
+    }
+
     /// Entity event 70 (`MinecartTNT.handleEntityEvent` -> `primeFuse`): the TNT cart's fuse
     /// starts at 80 ticks and counts down client-side (`MinecartTNT.tick`).
     pub fn prime_tnt_minecart(&mut self, id: EntityId) {
@@ -759,7 +748,7 @@ impl EntityStore {
             } else {
                 slot.walk.stop();
             }
-            update_body_yaw(slot, d);
+            crate::walk_swing::update_body_yaw(slot, d);
             // `LivingEntity.updateSwimAmount` (smoothed 0.09 per tick).
             slot.swim_amount_o = slot.swim_amount;
             if slot.pose == Pose::Swimming {

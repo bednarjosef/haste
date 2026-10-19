@@ -193,6 +193,9 @@ impl Session {
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
+            // Entity status 32: an armour stand was hit (`ArmorStand.handleEntityEvent` sets
+            // `lastHit` on the client, driving its render-side wobble).
+            P::EntityEvent(e) if e.status == 32 => entities.mark_hit(EntityId(e.entity_id)),
             // Entity status 70 primes a TNT minecart's fuse (MinecartTNT.handleEntityEvent).
             P::EntityEvent(e) if e.status == 70 => {
                 entities.prime_tnt_minecart(EntityId(e.entity_id))

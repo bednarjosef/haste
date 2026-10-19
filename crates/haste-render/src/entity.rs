@@ -57,6 +57,7 @@ mod thrown_item;
 mod thrown_item_tests;
 mod tnt;
 
+mod armor_stand;
 mod hand;
 mod humanoid;
 mod item_display;
@@ -76,6 +77,7 @@ pub(crate) use item_display::{
 pub use map::{MapData, MapMarker};
 pub(crate) use model_parts::{
     aabb_in_frustum, emit_part, emit_part_tinted, model_extents, model_top, part_matrix,
+    pose_without_hidden,
 };
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
@@ -477,17 +479,33 @@ impl EntityRenderer {
             // entities still wear armour and hold items.
             if !e.invisible {
                 let rect = self.texture_rect(&texture, assets);
-                emit_part_tinted(
-                    &mut self.vertices,
-                    &e.model,
-                    &e.model.root,
-                    &e.pose,
-                    root,
-                    rect,
-                    light,
-                    e.hurt,
-                    [1.0; 3],
-                );
+                // A small armour stand's model is authored with big cubes and small pivots;
+                // its root children go through the small layer's per-part scale (heads 3/4,
+                // the rest 1/2, about each pivot), which the cubes' UV layout needs vanilla's
+                // original sizes for.
+                if armor_stand::small_of(&e.model).is_some() {
+                    armor_stand::emit_small_body(
+                        &mut self.vertices,
+                        &e.model,
+                        &e.pose,
+                        root,
+                        rect,
+                        light,
+                        e.hurt,
+                    );
+                } else {
+                    emit_part_tinted(
+                        &mut self.vertices,
+                        &e.model,
+                        &e.model.root,
+                        &e.pose,
+                        root,
+                        rect,
+                        light,
+                        e.hurt,
+                        [1.0; 3],
+                    );
+                }
                 // Overlay layers: the same transform and pose, each with its own texture and
                 // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
                 for overlay in e.overlays.iter().flatten() {

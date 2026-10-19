@@ -3,6 +3,7 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
 pub mod animation;
+pub mod armor_stand;
 pub mod avatar;
 pub mod boat;
 pub mod decoration;
