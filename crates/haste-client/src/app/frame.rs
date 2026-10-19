@@ -164,6 +164,9 @@ impl App {
             }
         }
         let renderer = self.renderer.as_mut().expect("checked above");
+        // The maps to draw: the game thread's snapshot, one `Arc` clone (vanilla's
+        // `MapTextureManager` re-uploads only the maps whose data changed).
+        renderer.set_maps(session.shared.maps.lock().clone());
         // The bench tracks pop-in (visible-but-unmeshed sections and pre-mesh verdicts);
         // enabling it before the settle phase seeds the meshed set with everything the
         // settle meshed, so the measured phase starts from zero.

@@ -703,27 +703,23 @@ fn frames_and_paintings_offscreen() {
         .registries
         .index("minecraft:item", &Identifier::minecraft("diamond"))
         .expect("diamond item");
+    // An item frame with an item, a glowing empty one and a painting, in a row.
+    let frame = |id: i32, pos: glam::DVec3, glow: bool, item, rotation: u8| {
+        decoration(
+            id,
+            pos,
+            Decoration::ItemFrame(ItemFrameDecoration {
+                facing: Direction::North,
+                rotation,
+                glow,
+                item,
+                map_id: None,
+            }),
+        )
+    };
     let mut entities = vec![
-        decoration(
-            1,
-            glam::DVec3::new(0.0, 1.5, 0.5),
-            Decoration::ItemFrame(ItemFrameDecoration {
-                facing: Direction::North,
-                rotation: 1,
-                glow: false,
-                item: Some(diamond),
-            }),
-        ),
-        decoration(
-            2,
-            glam::DVec3::new(1.6, 1.5, 0.5),
-            Decoration::ItemFrame(ItemFrameDecoration {
-                facing: Direction::North,
-                rotation: 0,
-                glow: true,
-                item: None,
-            }),
-        ),
+        frame(1, glam::DVec3::new(0.0, 1.5, 0.5), false, Some(diamond), 1),
+        frame(2, glam::DVec3::new(1.6, 1.5, 0.5), true, None, 0),
         decoration(
             3,
             glam::DVec3::new(-2.0, 1.5, 0.5),

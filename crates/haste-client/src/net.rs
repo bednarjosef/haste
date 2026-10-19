@@ -110,6 +110,11 @@ pub struct Session {
     /// server sent one, else the static one from the data generator reports): resolves the
     /// vehicle's type index to its name, for the passenger seat offset.
     pub entity_type_names: Vec<Identifier>,
+    /// The maps' data by id (`handleMapItemData`'s `MapItemSavedData` store), as the
+    /// renderer's own versioned type; published to the render thread by `game::maps`.
+    pub maps: HashMap<i32, haste_render::MapData>,
+    /// Bumped whenever a map changed (the publish clones only then).
+    pub maps_version: u64,
     /// The pickup particles (`take_item_entity`): the collected item/orb flying to the
     /// collector for three ticks. Ticked here, published to the render thread each tick.
     pub pickup_particles: Vec<crate::net::pickup::PickupParticle>,
@@ -260,6 +265,8 @@ impl Session {
             world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
+            maps: HashMap::new(),
+            maps_version: 0,
             pickup_particles: Vec::new(),
             pickup_rng: Session::new_pickup_rng(),
             sound_requests: Vec::new(),
@@ -545,6 +552,7 @@ mod entities;
 mod fov;
 mod item_world;
 mod lightmap;
+mod maps;
 mod misc;
 pub(crate) mod pack_prompt;
 mod particles;
@@ -565,6 +573,7 @@ pub use counters::NetCounters;
 pub use driver::NetDriver;
 pub use fov::{fov_modifier_target, UseItemKind};
 pub use lightmap::LightmapState;
+pub(crate) use maps::map_id_of;
 pub use registries::{
     attribute_names, entity_type_names, load_game_data, mob_variants, overworld_clock_id,
     painting_variants, synced_biome_count,
