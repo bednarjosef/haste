@@ -309,6 +309,12 @@ pub struct Renderer {
     /// Finished meshes held back by the adaptive budget's visible-first ordering (a
     /// section the gate no longer wants: pre-meshed or turned away from). Reused.
     premesh_hold: std::collections::VecDeque<SectionMesh>,
+    /// Pre-mesh slack gate (see `renderer/terrain_feed.rs`): when the mesh pipeline's
+    /// backlog stood above `PREMESH_SATURATED` this long, pre-meshing stops until it
+    /// drains — under machine contention the pre-mesh volume is what collapses the
+    /// frame, and a turn burst (which drains in a few hundred ms) must not trip it.
+    premesh_saturated_since: Option<std::time::Instant>,
+    premesh_gated: bool,
     /// The camera entity is a spectator (`Camera.extractRenderState` reads it off the player),
     /// for the solid-block rule below.
     camera_spectator: bool,

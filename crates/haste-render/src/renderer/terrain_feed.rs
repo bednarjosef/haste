@@ -20,6 +20,47 @@ const PREMESH_HOLD_CAP: usize = 2048;
 /// budget: a pre-meshed section is preparation, not pop-in, so it uploads in the frame's
 /// slack; a turn's visible burst keeps the work budget to itself.
 const PREMESH_UPLOAD_MS: f32 = 1.0;
+/// Pre-mesh slack gate: the mesh pipeline's backlog above this many sections counts as
+/// saturated (the workers cannot keep up, or the machine is contended — under load the
+/// pre-mesh volume is what collapses the frame; a quiet machine drains a turn's burst
+/// past it in a few hundred ms).
+const PREMESH_SATURATED: usize = 1536;
+/// The backlog must drain below this before pre-meshing resumes (hysteresis: a backlog
+/// hovering around the saturation mark must not flip the gate every frame).
+const PREMESH_DRAINED: usize = 512;
+/// How long the backlog must stand above [`PREMESH_SATURATED`] before pre-meshing stops
+/// (a normal turn burst must not trip the gate).
+const PREMESH_SUSTAIN: std::time::Duration = std::time::Duration::from_millis(400);
+
+impl Renderer {
+    /// Whether pre-meshing may add work this frame: the mesh pipeline's backlog must not
+    /// have stood saturated ([`PREMESH_SATURATED`] for [`PREMESH_SUSTAIN`]). The feed's
+    /// pre-mesh scan checks this every frame, so it backs off the moment the pipeline
+    /// stops draining and resumes once it does.
+    pub fn premesh_slack(&self) -> bool {
+        !self.premesh_gated
+    }
+
+    /// One feed frame of the slack gate ([`Self::premesh_slack`]).
+    fn update_premesh_slack(&mut self) {
+        let pending = self.mesher.pending_len();
+        if pending > PREMESH_SATURATED {
+            match self.premesh_saturated_since {
+                None => self.premesh_saturated_since = Some(std::time::Instant::now()),
+                Some(t) => {
+                    if t.elapsed() >= PREMESH_SUSTAIN {
+                        self.premesh_gated = true;
+                    }
+                }
+            }
+        } else {
+            self.premesh_saturated_since = None;
+            if pending < PREMESH_DRAINED {
+                self.premesh_gated = false;
+            }
+        }
+    }
+}
 
 /// What the client knows about a section's blocks, reported as dirty sections are
 /// examined (vanilla: `ClientChunkCache` reports its empty sections to
@@ -169,6 +210,7 @@ impl Renderer {
             self.mesh_carry.extend_from_slice(dirty);
         }
         self.last_uploads = self.upload_finished();
+        self.update_premesh_slack();
     }
 
     /// Uploads finished meshes; returns (sections uploaded, bytes written). The budget

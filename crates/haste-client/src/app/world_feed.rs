@@ -346,6 +346,7 @@ impl WorldFeed {
             // same batch). A wrong guess only meshes a section early.
             if renderer.premesh_enabled()
                 && renderer.premesh_active()
+                && renderer.premesh_slack()
                 && batch.len() < SUBMIT_PER_FRAME
                 && !self.waiting.is_empty()
             {
