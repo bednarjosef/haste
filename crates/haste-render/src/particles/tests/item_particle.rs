@@ -88,7 +88,7 @@ fn spawn_item_follows_breaking_item_particle() {
     // It falls like vanilla's generic tick (gravity 1, friction 0.98).
     let start = p.pos;
     let v = p.vel;
-    particles.tick();
+    particles.tick(DVec3::new(10.0, 64.0, -5.0));
     assert_eq!(particles.pool[0].pos, start + v - Vec3::new(0.0, 0.04, 0.0));
 }
 

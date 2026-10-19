@@ -88,7 +88,7 @@ fn crit_matches_crit_particle() {
     let mut particles = Particles::new(types_for_tests(&[("crit", &[[0, 0, 4, 4]])]));
     spawn_fixed(&mut particles, "crit", 1);
     let before = particles.pool[0].color;
-    particles.tick();
+    particles.tick(DVec3::new(10.0, 64.0, -5.0));
     let after = &particles.pool[0];
     assert!((after.color[1] - before[1] * 0.96).abs() < 1e-6);
     assert!((after.color[2] - before[2] * 0.9).abs() < 1e-6);
@@ -122,7 +122,7 @@ fn portal_matches_portal_particle() {
     let lifetime = particles.pool[0].lifetime;
     let mut ticks = 0;
     // The first tick lifts the particle to (1 - 1/lifetime) blocks above the spawn point.
-    particles.tick();
+    particles.tick(DVec3::new(10.0, 64.0, -5.0));
     ticks += 1;
     let mut last_y = particles.pool[0].pos.y;
     assert!((last_y - start.y - (1.0 - 1.0 / lifetime)).abs() < 1e-4);
@@ -130,7 +130,7 @@ fn portal_matches_portal_particle() {
     let mut last_z = f32::NAN;
     while alive(&particles) {
         let before_y = last_y;
-        particles.tick();
+        particles.tick(DVec3::new(10.0, 64.0, -5.0));
         ticks += 1;
         if alive(&particles) {
             assert!(particles.pool[0].pos.y < before_y);
@@ -161,7 +161,7 @@ fn explosion_matches_huge_explosion_particle() {
     assert!(p.behaviour.full_light);
     // It does not move.
     let pos = p.pos;
-    particles.tick();
+    particles.tick(DVec3::new(10.0, 64.0, -5.0));
     assert_eq!(particles.pool[0].pos, pos);
 }
 
