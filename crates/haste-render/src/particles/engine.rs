@@ -30,6 +30,9 @@ pub(super) struct ParticleState {
     pub(super) quad: f32,
     /// Spawn-time colour jitter already applied, so the renderer multiplies once.
     pub(super) color: [f32; 3],
+    /// The particle's alpha (`Particle.alpha`): the behaviour's, or the colour option's
+    /// (`SpellParticle.MobEffectProvider`'s `setAlpha`).
+    pub(super) alpha: f32,
     /// Start position for the spiral path (`PortalParticle`).
     pub(super) portal_start: DVec3,
     /// Terrain-particle override: the block sprite (clamping rect) and its 4x4
@@ -235,7 +238,7 @@ impl Particles {
         pos: DVec3,
         speed: Vec3,
         dust: Option<DustOption>,
-        color: Option<[f32; 3]>,
+        color: Option<i32>,
     ) {
         if self.pool.len() >= MAX_PARTICLES {
             return;
@@ -250,7 +253,23 @@ impl Particles {
             lifetime *= dust_scale;
             quad *= dust_scale;
         }
-        let color = spawn_color(behaviour, dust, color, &mut self.rng);
+        // A `ColorParticleOption` replaces the type's colour (its sRGB bytes decoded to the
+        // linear RGB the sRGB target encodes back at output) and carries the option's own
+        // alpha (`SpellParticle.MobEffectProvider`'s `setAlpha`).
+        let (color, alpha) = match color {
+            Some(argb) => (
+                crate::sky::linear([
+                    ((argb >> 16) & 0xFF) as f32 / 255.0,
+                    ((argb >> 8) & 0xFF) as f32 / 255.0,
+                    (argb & 0xFF) as f32 / 255.0,
+                ]),
+                ((argb >> 24) & 0xFF) as f32 / 255.0,
+            ),
+            None => (
+                spawn_color(behaviour, dust, &mut self.rng),
+                behaviour.alpha.unwrap_or(1.0),
+            ),
+        };
         // `Particle`'s speed constructor: the packet speed inside a ±0.4 jitter per axis,
         // rescaled to `(r+r+1) * 0.15` and lifted by 0.1 on y.
         let jittered = {
@@ -344,6 +363,7 @@ impl Particles {
             behaviour: *behaviour,
             quad,
             color,
+            alpha,
             portal_start: pos,
             block_sprite: None,
         };
@@ -414,6 +434,7 @@ impl Particles {
                     randomization: 0,
                     override_limiter: false,
                     dust: None,
+                    color: None,
                     block_state: None,
                 });
             }
@@ -462,18 +483,14 @@ impl Particles {
 }
 
 /// The spawn colour: the behaviour's base, its spawn-time jitter (`BaseAshSmokeParticle`'s
-/// grey, `CritParticle`'s bright grey), the `dust` option colour, an explicit option colour
-/// (`entity_effect`'s `ColorParticleOption`, which replaces whatever the constructor rolled)
-/// and finally any scale (`enchanted_hit`).
+/// grey, `CritParticle`'s bright grey), the `dust` option colour and finally any scale
+/// (`enchanted_hit`). A `ColorParticleOption` colour never reaches here — `push` replaces
+/// the whole colour (and alpha) with the option's.
 pub(super) fn spawn_color(
     behaviour: &ParticleBehaviour,
     dust: Option<DustOption>,
-    color: Option<[f32; 3]>,
     rng: &mut Rng,
 ) -> [f32; 3] {
-    if let Some(color) = color {
-        return color;
-    }
     let mut color = behaviour.color;
     if let Some((low, high)) = behaviour.color_jitter {
         let jitter = low + rng.next_f32() * (high - low);

@@ -44,16 +44,13 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
             let (kind, color, speed) = match r.kind {
                 ArrowParticleKind::Color(argb) => (
                     haste_core::Identifier::minecraft("entity_effect"),
-                    Some([
-                        ((argb >> 16) & 0xFF) as f32 / 255.0,
-                        ((argb >> 8) & 0xFF) as f32 / 255.0,
-                        (argb & 0xFF) as f32 / 255.0,
-                    ]),
+                    Some(argb),
                     [0.0; 3],
                 ),
                 ArrowParticleKind::SpectralSwirl => (
                     haste_core::Identifier::minecraft("effect"),
-                    Some([1.0; 3]),
+                    // `SpellParticleOption.create(EFFECT, -1, 1.0F)`: opaque white.
+                    Some(-1),
                     [0.0; 3],
                 ),
                 ArrowParticleKind::Crit => (
@@ -111,18 +108,12 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
         // skull smoke at their position, half a block up, one particle per tick (the dragon
         // fireball's dragon-breath trail is a separate task).
         for pos in shared.entities.read().smoke_trail_positions() {
-            ambient.push(haste_render::ParticleSpawn {
-                kind: haste_core::Identifier::minecraft("smoke"),
-                pos: pos + haste_core::DVec3::new(0.0, 0.5, 0.0),
-                offset: [0.0; 3],
-                // count 0: one particle at the position, no velocity of its own.
-                max_speed: [1.0; 3],
-                count: 0,
-                randomization: 0,
-                override_limiter: false,
-                dust: None,
-                block_state: None,
-            });
+            // count 0: one particle at the position, no velocity of its own.
+            ambient.push(haste_render::ParticleSpawn::client(
+                haste_core::Identifier::minecraft("smoke"),
+                pos + haste_core::DVec3::new(0.0, 0.5, 0.0),
+                [0.0; 3],
+            ));
         }
     }
     for s in &ambient {

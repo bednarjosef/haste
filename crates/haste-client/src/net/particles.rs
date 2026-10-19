@@ -133,17 +133,12 @@ pub(super) fn block_state_option(
     None
 }
 
-/// `entity_effect`'s `ColorParticleOption` from a particle's raw data (one ARGB int;
-/// `SpellParticle.MobEffectProvider` tints the particle with its colour); `None` for every
-/// other type and for a malformed payload.
-fn color_option(kind: &Identifier, data: &[u8]) -> Option<[f32; 3]> {
+/// `entity_effect`'s `ColorParticleOption` from a particle's raw data (one ARGB int, colour
+/// and alpha; `SpellParticle.MobEffectProvider` tints the particle with it); `None` for
+/// every other type and for a malformed payload.
+fn color_option(kind: &Identifier, data: &[u8]) -> Option<i32> {
     if kind.path() != "entity_effect" || data.len() < 4 {
         return None;
     }
-    let argb = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    Some([
-        ((argb >> 16) & 0xFF) as f32 / 255.0,
-        ((argb >> 8) & 0xFF) as f32 / 255.0,
-        (argb & 0xFF) as f32 / 255.0,
-    ])
+    Some(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))
 }
