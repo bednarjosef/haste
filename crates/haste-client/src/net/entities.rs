@@ -196,6 +196,10 @@ impl Session {
             // Entity status 32: an armour stand was hit (`ArmorStand.handleEntityEvent` sets
             // `lastHit` on the client, driving its render-side wobble).
             P::EntityEvent(e) if e.status == 32 => entities.mark_hit(EntityId(e.entity_id)),
+            // Entity status 70 primes a TNT minecart's fuse (MinecartTNT.handleEntityEvent).
+            P::EntityEvent(e) if e.status == 70 => {
+                entities.prime_tnt_minecart(EntityId(e.entity_id))
+            }
             P::SetEntityData(d) => {
                 // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
                 // supply and the screen effects' on-fire and freeze ticks), and `_ if

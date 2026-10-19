@@ -3,6 +3,18 @@
 
 use super::*;
 
+/// The bridge from the model's pixel space to the block units vanilla's layer transforms use:
+/// `root` ends in `scale(s / 16)` (model pixels -> blocks), so the arm part's pivot comes out in
+/// blocks, but everything `ItemInHandLayer.submitArmWithItem` and `CustomHeadLayer
+/// .translateToHead` push afterwards (the hand offset `(±1, 2, -10) / 16`, the head's
+/// `(0, -0.25, 0)` and its `(0.625, -0.625, -0.625)` scale) and the item's own 0..1-block
+/// geometry are in block units — vanilla's `ModelPart.translateAndRotate` divides only the
+/// pivot by 16. Scaling by 16 right after the arm matrix undoes the model's pixel scale for
+/// the layer transform and the item, leaving the pivot converted.
+pub(crate) fn pixel_units() -> Mat4 {
+    Mat4::from_scale(Vec3::splat(16.0))
+}
+
 impl EntityRenderer {
     /// Draws an entity's equipment on top of its model (already emitted at `root`): the held
     /// items (`ItemInHandLayer`) and armour (`HumanoidArmorLayer`). Unknown items and equipment
@@ -30,14 +42,7 @@ impl EntityRenderer {
             let Some(arm_m) = part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, arm) else {
                 continue;
             };
-            // The item's geometry is block space; `arm_m` and the layer matrix are model
-            // units (vanilla renders items on its model pose stack: quads 0..1 blocks on a
-            // stack scaled 16 units per block, flipped like the model space itself). The
-            // `held_item_layer_matrix` doc names the vanilla order.
-            let item_root = root
-                * arm_m
-                * held_item_layer_matrix(left)
-                * Mat4::from_scale(Vec3::new(16.0, -16.0, -16.0));
+            let item_root = root * arm_m * pixel_units() * held_item_layer_matrix(left);
             let display = if left {
                 ItemDisplay::ThirdPersonLeft
             } else {
@@ -139,7 +144,7 @@ impl EntityRenderer {
                 if let Some(head_m) =
                     part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, parts::HEAD)
                 {
-                    let head_root = root * head_m * custom_head_layer_matrix();
+                    let head_root = root * head_m * pixel_units() * custom_head_layer_matrix();
                     let mut out = std::mem::take(&mut self.vertices);
                     self.emit_item(
                         &mut out,

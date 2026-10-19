@@ -48,14 +48,16 @@ pub(crate) fn arm_model(slim: bool, sleeve: bool) -> CubeModel {
 }
 
 /// `ItemInHandLayer.submitArmWithItem`'s transform after `ArmedModel.translateToHand`: rotate X
-/// -90 degrees, rotate Y 180 degrees, then the hand offset (`(±1, 2, -10)` model units —
-/// vanilla's `/16` on its block-space pose stack is one model unit here; a left-hand item is
-/// offset to -1). The item itself is block-space geometry: `equipment.rs` scales it into these
-/// model units behind this matrix.
+/// -90 degrees, rotate Y 180 degrees, then the hand offset (`(±1, 2, -10)/16` for adults; a
+/// left-hand item is offset to -1). The item then draws through `thirdperson_righthand`.
 pub(crate) fn held_item_layer_matrix(left: bool) -> Mat4 {
     Mat4::from_rotation_x((-90.0f32).to_radians())
         * Mat4::from_rotation_y(180.0f32.to_radians())
-        * Mat4::from_translation(Vec3::new(if left { -1.0 } else { 1.0 }, 2.0, -10.0))
+        * Mat4::from_translation(Vec3::new(
+            if left { -1.0 } else { 1.0 } / 16.0,
+            2.0 / 16.0,
+            -10.0 / 16.0,
+        ))
 }
 
 /// `CustomHeadLayer.translateToHead` (the static one, after the head part's own transform):

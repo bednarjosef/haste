@@ -1111,26 +1111,8 @@ pub fn shadow_radius_for_name(name: &str) -> f32 {
         // ExperienceOrbRenderer 0.15, AbstractBoatRenderer 0.8, AbstractMinecartRenderer 0.7,
         // TntRenderer 0.5, FallingBlockRenderer 0.5, EndCrystalRenderer 0.5.
         "minecraft:item" | "minecraft:experience_orb" => 0.15,
-        "minecraft:oak_boat"
-        | "minecraft:spruce_boat"
-        | "minecraft:birch_boat"
-        | "minecraft:jungle_boat"
-        | "minecraft:acacia_boat"
-        | "minecraft:cherry_boat"
-        | "minecraft:dark_oak_boat"
-        | "minecraft:mangrove_boat"
-        | "minecraft:pale_oak_boat"
-        | "minecraft:bamboo_raft"
-        | "minecraft:oak_chest_boat"
-        | "minecraft:spruce_chest_boat"
-        | "minecraft:birch_chest_boat"
-        | "minecraft:jungle_chest_boat"
-        | "minecraft:acacia_chest_boat"
-        | "minecraft:cherry_chest_boat"
-        | "minecraft:dark_oak_chest_boat"
-        | "minecraft:mangrove_chest_boat"
-        | "minecraft:pale_oak_chest_boat"
-        | "minecraft:bamboo_chest_raft" => 0.8,
+        // Every type the boat table names (all 22 vanilla boats, chest boats and rafts).
+        _ if crate::boat::entry_for_name(name).is_some() => 0.8,
         "minecraft:minecart"
         | "minecraft:chest_minecart"
         | "minecraft:furnace_minecart"

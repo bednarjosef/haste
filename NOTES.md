@@ -239,3 +239,60 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   crumbs itself, but `ClientLevel.playSeededSound` only plays for our own player: the eating
   sound of others arrives as the server's broadcast sound packet. The 16-particle finish burst
   (entity event 9) is sent only to the eater's own client.
+- **2026-10-19 Answer in-play teleports at once.** The vanilla server drops `use_item_on` while a
+  teleport is unconfirmed (`ServerGamePacketListenerImpl.handleUseItemOn`,
+  `awaitingPositionFromClient`). Haste sent `accept_teleportation` one tick late, so a click right
+  after any teleport or position correction vanished. In-play teleports are now accepted in their
+  arrival tick, ahead of that tick's uses; only the join teleport keeps the one-tick wait
+  (`player/teleport_accept.rs`).
+- **2026-10-19 Turn pre-meshing is off by default.** Lead A/B on `--bench-path turns` at the
+  reference spot: `--premesh cone` cut visible-but-unmeshed section-frames by 20-55 % but made
+  frames 10-25 % slower (rd 32 avg 9.1/10.0 -> 9.9/11.4 ms, rd 12 2.3/2.0 -> 2.7/2.5 ms). The
+  bigger finding: even with it off, a section entering the view at rd 12 waits ~1 s for its mesh,
+  so meshing throughput, not prediction, is the pop-in cause (task frame-work-budget).
+- **2026-10-19 Clouds use vanilla's per-face records.** Like `CloudRenderer.encodeFace`, one
+  packed record per drawn face, expanded in the vertex shader and drawn instanced: a cloud cell
+  crossing uploads 143 KB instead of 3.4 MB, rebuild 2.0 -> 1.3 ms, pixel-identical (GPU test).
+  `Options.cloudRange` sets the radius (`ceil(range * 16 / 12)` cells, default 128 chunks).
+- **2026-10-19 T-junction cracks in merged quads.** Greedy-merged rectangles' edges ran past
+  neighbouring quads' corners and rasterized sky-coloured pixel cracks. Edges now split only where
+  a neighbouring quad has a corner on them, and at every block along section borders (both sides
+  agree). Splitting every edge at every block cost ~7 % frame time; the precise split costs +2 %
+  terrain memory on a real world.
+- **2026-10-19 Held items are in block units.** After the arm's model transform (pixel scale,
+  `/16`), vanilla's `ItemInHandLayer` transforms and the item geometry are in blocks; Haste drew
+  them 16x too small. 26.3 has no EAT/DRINK arm pose (eating shows ITEM), and 26.3's summon NBT
+  for equipment is `equipment:{mainhand:{id:...}}` (the old `HandItems` is silently ignored).
+- **2026-10-19 Side-by-side with the real client.** `scripts/vanilla-client.sh 127.0.0.1:25691
+  <scenario>` with a scenario `wait_world / wait 100 / hud off / wait 20 / screenshot NAME / quit`,
+  RCON `gamemode spectator HasteRef` + `tp HasteRef x y z yaw pitch` once it joined, and a Haste
+  bot holding or doing the thing in front of it, gives a vanilla reference of any entity visual
+  in a minute. Use it before calling a visual done.
+- **2026-10-19 Left-hand item display.** Vanilla resolves the left hand's
+  `ItemDisplayContext.THIRD_PERSON_LEFT_HAND` to the model's own `thirdperson_lefthand` entry
+  (e.g. `item/handheld`'s), not to the right-hand entry mirrored; mirroring drew an off-hand
+  sword about twice too long and too upright.
+- **2026-10-19 Returning memory after the join (perf-ram-diet).** The join floods the client with
+  short-lived chunk data; glibc keeps freed arena pages and the JVM keeps its grown heap. Fixes:
+  `malloc_trim(0)` on a background thread once the world is quiet (no chunk arrivals for 15 s, at
+  most once a minute; 5-6 ms off the game and render threads), the atlas releasing its CPU pixel
+  copy after upload, and the embedded JVM on G1 with a 5 s periodic GC, `MaxGCPauseMillis=5`,
+  10-30 % free ratios and no class unloading at concurrent mark (remarks were 8-18 ms with it;
+  pauses now at most 2.5 ms). A forced full GC returned the same memory but froze play for
+  150-290 ms. Shenandoah never uncommitted (+174 MiB RSS); ZGC's multi-mapped heap counts
+  twice in RSS (1.1 GiB). Settled RSS rd 12 635 -> 558 MiB, rd 32 766 -> ~675. The two ~150 MiB
+  anonymous mappings in smaps were the glibc heap and the JVM heap. Phase 2: mods that churn
+  classes may need class unloading at concurrent mark back.
+- **2026-10-19 Pop-in under a still camera.** Sections held back because a neighbour chunk was
+  missing were re-checked only when the camera turned, so they stayed holes until the next turn.
+  They now register their neighbour columns and are re-promoted when one loads (vanilla re-checks
+  its dirty set every frame). Pop-in while turning was not meshing throughput: a turn meshes and
+  uploads ~640 sections within a second. `--work-budget adaptive` (EWMA of CPU, GPU and frame
+  interval, 2-8 ms per frame) makes `--premesh cone` cheap at rd 32 but not yet at rd 12; both
+  stay off by default until a quiet-machine A/B says otherwise.
+- **2026-10-19 Benches at the reference spot.** The bench player stands at 144.5 100 -191.5 only
+  if its player data has creative flight (`perfmem` has it); a new user name falls. The bench
+  scripts are not executable: run them as `bash scripts/...`. The reference server on 25620 lives
+  two hours per start; a bench that starts during its restart fails with "Connection refused".
+- **2026-10-19 Entity type id 0 is acacia_boat.** Test fixtures that spawn a default-kind entity
+  now spawn a boat; use an explicit kind (`minecraft:arrow`, `minecraft:zombie`).

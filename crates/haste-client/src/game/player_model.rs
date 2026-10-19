@@ -63,6 +63,9 @@ pub(super) fn tick(s: &Session, shared: &Shared, prev_look: (f32, f32), look: (f
     if !s.player.main_hand().is_empty() {
         model.equipment.push((0, s.player.main_hand().clone()));
     }
+    if !s.player.int.offhand.is_empty() {
+        model.equipment.push((1, s.player.int.offhand.clone()));
+    }
     for (wire, armor) in [(5u8, 0usize), (4, 1), (3, 2), (2, 3)] {
         if !s.player.int.armor[armor].is_empty() {
             model
@@ -70,6 +73,10 @@ pub(super) fn tick(s: &Session, shared: &Shared, prev_look: (f32, f32), look: (f
                 .push((wire, s.player.int.armor[armor].clone()));
         }
     }
+    // The use state for the arm poses (`AvatarRenderer.getArmPose` reads `isUsingItem`):
+    // mirrored from the local use. The off-hand bit stays false (which hand a local use
+    // started on is not tracked here), so an off-hand use poses the main arm.
+    model.metadata.living.using_item = s.player.is_using_item();
 }
 
 /// Pushes the local player's own instance onto the render list (the render thread's step for

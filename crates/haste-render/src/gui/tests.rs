@@ -161,6 +161,7 @@ fn flat_items_are_full_bright_and_block_faces_shade_like_vanilla() {
             },
             firstperson: haste_assets::DisplayTransform::IDENTITY,
             thirdperson: haste_assets::DisplayTransform::IDENTITY,
+            thirdperson_left: haste_assets::DisplayTransform::IDENTITY,
             head: haste_assets::DisplayTransform::IDENTITY,
             ground: haste_assets::DisplayTransform::IDENTITY,
             fixed: haste_assets::DisplayTransform::IDENTITY,

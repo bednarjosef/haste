@@ -29,12 +29,14 @@
 //! Per tick (vanilla's order): hotbar, target, then the key handling (clicks, held use,
 //! continueAttack, `missTime`--), then pick block, then drop / off-hand swap.
 //!
-//! Predictions: a block we break is set to air locally at once (`take_world_edits`). Until the
-//! server acknowledges our sequence number (`block_changed_ack`) its block updates for that
-//! position are only recorded; on the ack the last state the server told us (or, if it said
-//! nothing, the state from before our prediction) is put back. Observed on the vanilla server:
-//! a break it rejects gets an ack and no block update, so without the revert our world would keep
-//! a block the server still has.
+//! Predictions: a block we break or place is set in the client world at once
+//! (`take_world_edits`). Until the server acknowledges our sequence number
+//! (`block_changed_ack`) its block updates for that position are only recorded; on the ack
+//! the last state the server told us (or, if it said nothing, the state from before our
+//! prediction) is put back, and the player snaps back to where it made the prediction when
+//! the server's state collides with it (`BlockStatePredictionHandler`, see
+//! `prediction.rs`). Observed on the vanilla server: a break it rejects gets an ack and no
+//! block update, so without the revert our world would keep a block the server still has.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -47,6 +49,7 @@ use haste_physics::mining::{BlockTags, ToolTable};
 use super::LocalPlayer;
 
 mod attack;
+mod block_classes;
 mod consumable;
 mod consume_effects;
 mod destroy;
@@ -56,6 +59,7 @@ mod held_item;
 mod packets;
 mod pick;
 mod place;
+pub(crate) mod prediction;
 mod step;
 mod use_item;
 pub(crate) use consume_effects::{should_emit, ConsumeEffects};
@@ -178,12 +182,9 @@ pub struct Interaction {
     /// locally yet (`LivingEntity.onSyncedDataUpdated` reads the held item then; we do it on
     /// the next tick, when the game data is at hand).
     pending_use_hand: Option<i32>,
-    /// Last sequence number used for a prediction.
-    sequence: i32,
-    /// Predicted blocks: (sequence, pos, the server's state: before the prediction, then the
-    /// latest block update held back).
-    predictions: Vec<(i32, BlockPos, BlockStateId)>,
-    world_edits: Vec<(BlockPos, BlockStateId)>,
+    /// Vanilla `BlockStatePredictionHandler`: our block predictions and the server states
+    /// they hold back (see `prediction.rs`).
+    pub(crate) prediction: prediction::BlockStatePrediction,
     /// Hotbar 0..=8 and off hand.
     pub hotbar: [ItemStackData; 9],
     pub offhand: ItemStackData,
@@ -391,25 +392,34 @@ impl Interaction {
         self.pending_use_hand = None;
         self.attack_clicks = 0;
         self.use_clicks = 0;
+        // A respawn is a new `ClientLevel` in vanilla: no prediction survives it.
+        self.prediction.clear();
     }
 
+    /// `BlockStatePredictionHandler.startPredicting`'s sequence: the number the next
+    /// predicted action's packet carries (vanilla increments for every use/destroy
+    /// packet, predicting or not).
     fn next_sequence(&mut self) -> i32 {
-        self.sequence += 1;
-        self.sequence
+        self.prediction.start_predicting()
     }
 
-    /// Predicts `pos` becomes `state` (`None`: left to the server); `old` is our current state.
-    fn predict(&mut self, seq: i32, pos: BlockPos, old: BlockStateId, state: Option<BlockStateId>) {
-        // An earlier prediction for the same block already holds the server's state.
-        let server = self
-            .predictions
-            .iter()
-            .rev()
-            .find(|p| p.1 == pos)
-            .map_or(old, |p| p.2);
-        self.predictions.push((seq, pos, server));
+    /// Predicts `pos` becomes `state` (`None`: left to the server); `old` is our current
+    /// state. The player's position is retained with it (`retainKnownServerState`) for
+    /// the ack's snap-back.
+    fn predict(
+        &mut self,
+        seq: i32,
+        pos: BlockPos,
+        old: BlockStateId,
+        state: Option<BlockStateId>,
+        player_pos: DVec3,
+    ) {
+        let server = self.prediction.retained_server_state(pos).unwrap_or(old);
         if let Some(s) = state {
-            self.world_edits.push((pos, s));
+            self.prediction
+                .set_predicted(seq, pos, server, player_pos, s);
+        } else {
+            self.prediction.retain(seq, pos, server, player_pos);
         }
     }
 }
@@ -498,10 +508,16 @@ impl LocalPlayer {
         self.hand.reset_only_attack_strength_ticker();
     }
 
-    /// Predicted block changes to apply to the world now (breaking), and server states released
-    /// by `block_changed_ack`.
-    pub fn take_world_edits(&mut self) -> std::vec::Drain<'_, (BlockPos, BlockStateId)> {
-        self.int.world_edits.drain(..)
+    /// Predicted block changes to apply to the world now (breaking and placing), and
+    /// server states released by `block_changed_ack`.
+    pub fn take_world_edits(&mut self) -> Vec<(BlockPos, BlockStateId)> {
+        self.int.prediction.take_world_edits()
+    }
+
+    /// The syncs the last `block_changed_ack` released, for the driver's
+    /// `ClientLevel.syncBlockState` (the block restore and the player's snap-back).
+    pub fn take_prediction_syncs(&mut self) -> std::vec::Drain<'_, prediction::Sync> {
+        self.int.prediction.take_syncs()
     }
 
     /// A server block update: `true` if it was held back because we predicted that block and the
@@ -511,15 +527,10 @@ impl LocalPlayer {
             tracing::debug!(
                 "block update {pos:?} -> {} (predicted: {})",
                 state.0,
-                self.int.predictions.iter().any(|p| p.1 == pos)
+                self.int.prediction.is_predicted(pos)
             );
         }
-        let mut held = false;
-        for p in self.int.predictions.iter_mut().filter(|p| p.1 == pos) {
-            p.2 = state;
-            held = true;
-        }
-        held
+        self.int.prediction.update_known_server_state(pos, state)
     }
 
     /// Whether the chest armor is a usable glider: vanilla `LivingEntity.canGlide` ->

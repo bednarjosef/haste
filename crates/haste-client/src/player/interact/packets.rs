@@ -1,7 +1,7 @@
 //! Server packets that touch the interaction state (player workstream): the inventory sync
 //! (`ContainerSetContent`/`ContainerSetSlot` for the player inventory menu,
-//! `SetPlayerInventory`), the mob-effect add/remove, and `block_changed_ack` that releases
-//! our break predictions.
+//! `SetPlayerInventory`), the mob-effect add/remove, and `block_changed_ack` that ends our
+//! block predictions.
 
 use haste_core::entity::ItemStackData;
 use haste_protocol::ClientboundPlay;
@@ -16,18 +16,10 @@ impl LocalPlayer {
         match p {
             P::BlockChangedAck(a) => {
                 tracing::debug!("block_changed_ack {}", a.sequence);
-                let (done, keep): (Vec<_>, Vec<_>) = self
-                    .int
-                    .predictions
-                    .drain(..)
-                    .partition(|p| p.0 <= a.sequence);
-                self.int.predictions = keep;
-                for (_, pos, server) in done {
-                    // The server's state wins, unless a newer prediction still covers the block.
-                    if !self.int.predictions.iter().any(|p| p.1 == pos) {
-                        self.int.world_edits.push((pos, server));
-                    }
-                }
+                // `endPredictionsUpTo`: the covered predictions release their server states
+                // for the driver's `ClientLevel.syncBlockState` (the restore and the
+                // snap-back live there, with the world).
+                self.int.prediction.end_predictions_up_to(a.sequence);
             }
             P::ContainerSetContent(c) if c.window_id == 0 => {
                 for (i, s) in c.slots.iter().enumerate() {
