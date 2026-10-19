@@ -43,7 +43,8 @@ ALLOW = TOOLS[1:] + [f"Bash({p})" for p in (
     "du *", "sed -n *", "awk *", "jq *", "echo*", "printf *", "true", "false", "test *", "[ *",
     "pwd", "which *", "sleep *", "date*", "mkdir -p *", "touch *", "timeout * cargo *",
     "timeout * target/*", "timeout * ./target/*", "timeout * scripts/*", "timeout -s INT * target/*",
-    "nproc", "free *", "pgrep *", "ps *", "ss *")]
+    "nproc", "free *", "pgrep *", "ps *", "ss *", "sed -i *", "rm crates/*", "rm target/*",
+    "rm -f crates/*", "rm -f target/*", "git rm *", "git mv *")]
 NUDGE = ("You are running headless: no notification will ever arrive, and ending your turn ends "
          "the session for good. The shell is not banned: plain commands run from the worktree "
          "root (`git status`, `git add -A`, `git commit -m MSG`, `hx check`, `cargo test -p "
@@ -64,13 +65,15 @@ and RCON command.
 """
 
 
-def worker_env(wt, base):
+def worker_env(wt, base, user=None):
     env = dict(os.environ)
     env.update({
         "PATH": f"{REPO / 'scripts'}{os.pathsep}{env['PATH']}",
         "HASTE_ROOT": str(wt),
         "HASTE_CACHE": str(MAIN / "cache"),
         "HX_BASE": base,
+        # scripts/vanilla-client.sh logs in as this player (an env prefix would be refused).
+        "HASTE_VANILLA_USER": user or "",
         "CARGO_BUILD_JOBS": env.get("CARGO_BUILD_JOBS", "3"),
         "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS": "6000",
         "BASH_MAX_OUTPUT_LENGTH": "12000",
@@ -127,11 +130,12 @@ def launch(a):
     model = MODELS.get(a.model, a.model)
     base = git("rev-parse", a.base)
     wt = make_worktree(a.branch, base)
-    env = worker_env(wt, base)
+    user = a.user or a.branch[:16]
+    env = worker_env(wt, base, user)
     brief = Path(a.brief).read_text()
     pack = subprocess.run([str(REPO / "scripts" / "hx"), "context", a.brief], env=env,
                           capture_output=True, text=True).stdout
-    prompt = header(a.branch, wt, a.user or a.branch[:16]) + brief + "\n\n" + pack
+    prompt = header(a.branch, wt, user) + brief + "\n\n" + pack
     budget = a.budget or BUDGET.get(model_key, 10)
     cmd = claude_cmd(prompt, model, a.effort, budget)
     if a.dry_run:
@@ -140,7 +144,8 @@ def launch(a):
         return
     pid = start(cmd, wt, env, RUNS / f"{a.branch}.jsonl")
     save_meta(a.branch, {"pid": pid, "start": time.time(), "model": model, "base": base,
-                         "effort": a.effort, "budget": budget, "brief": str(a.brief)})
+                         "effort": a.effort, "budget": budget, "brief": str(a.brief),
+                         "user": user})
     print(f"started {a.branch} ({model}) pid {pid}; events in {RUNS / (a.branch + '.jsonl')}")
 
 
@@ -155,7 +160,8 @@ def resume(branch):
     wt = WT / branch
     cmd = claude_cmd(NUDGE, meta["model"], meta["effort"], meta["budget"],
                      extra=("--resume", session))
-    pid = start(cmd, wt, worker_env(wt, meta["base"]), RUNS / f"{branch}.r{n}.jsonl")
+    pid = start(cmd, wt, worker_env(wt, meta["base"], meta.get("user")),
+                RUNS / f"{branch}.r{n}.jsonl")
     save_meta(branch, {"resumes": meta.get("resumes", []) + [{"pid": pid, "start": time.time()}]})
     print(f"resumed {branch} as segment r{n}, pid {pid}")
 

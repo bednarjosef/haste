@@ -15,6 +15,9 @@ message is the task: do exactly that task, completely, alone. Nobody answers que
 - Shell commands are checked against an allow-list that refuses loops, `$(...)`, `$VARIABLE`
   expansion and heredocs: spell paths out, run one command per item (several joined with `;` or
   `&&` in one call are fine), and write files with the Write and Edit tools.
+- `HASTE_CACHE`, `HASTE_ROOT` and `HASTE_VANILLA_USER` are already set: never put an env
+  assignment in front of a command (refused). Read JSON with `jq`, not python. Do not redirect
+  output into files: `hx client` keeps the full log in `target/`.
 - A refused command is a rule, not a glitch: never retry it as is or work around it with other
   tools; use the alternative the refusal names. Never push, install packages or delete
   things you did not create. Never start or stop servers.
