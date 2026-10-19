@@ -176,10 +176,6 @@ pub struct Shared {
     /// [`Shared::packet_wake`] (the same wake a arriving packet uses); drained by the
     /// game thread before every packet drain.
     pub ui_sends: Mutex<Vec<(ServerboundPlay, Instant)>>,
-    /// The settle diet's quiet clock (see [`crate::game::settle_diet`]): the frame loop
-    /// stamps `now` here while chunks arrive or meshes are pending, and the diet thread
-    /// waits for it to go quiet before returning freed memory to the OS.
-    pub settle_activity_ms: AtomicU64,
 }
 
 impl Shared {
@@ -336,22 +332,11 @@ impl Shared {
             chunks_unloaded: AtomicU64::new(0),
             packet_wake: (Mutex::new(0), Condvar::new()),
             ui_sends: Mutex::new(Vec::new()),
-            settle_activity_ms: AtomicU64::new(super::settle_diet::now_ms()),
         }
     }
 
     /// Whether the game thread has ended (connection closed or stop requested).
     pub fn is_closed(&self) -> bool {
         self.closed.lock().is_some()
-    }
-
-    /// Stamps meshing activity on the settle diet's quiet clock (see
-    /// [`crate::game::settle_diet`]): one relaxed atomic store, called from the frame
-    /// loop only while the world is busy.
-    pub fn note_settle_activity(&self) {
-        self.settle_activity_ms.store(
-            super::settle_diet::now_ms(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
     }
 }

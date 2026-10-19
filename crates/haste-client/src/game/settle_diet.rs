@@ -4,24 +4,26 @@
 //! streams ~120 MiB of chunk packets, decoded, meshed and dropped — and the allocators
 //! keep those freed pages instead of handing them back: glibc's arenas only shrink their
 //! tops, and the JVM's serial-GC heap stays grown after its join spike. So while the
-//! player is idle (no chunk arrival, no pending mesh), a background thread runs a diet:
-//! `malloc_trim(0)` walks glibc's arenas and frees what they can spare, and once per
-//! session one full GC on the HUD's JVM uncommits the heap's join spike (the JVM starts
-//! with a tight `-XX:MaxHeapFreeRatio` so that GC shrinks it). The diet runs at most once
-//! a minute, never on the render thread, and only after the world has been quiet — the
-//! one full-GC pause lands while standing still, not while streaming chunks.
+//! player is idle, a background thread runs a diet: `malloc_trim(0)` walks glibc's
+//! arenas and frees what they can spare, and once per session one full GC on the HUD's
+//! JVM uncommits the heap's join spike (the JVM starts with a tight
+//! `-XX:MaxHeapFreeRatio` so that GC shrinks it). The diet runs at most once a minute,
+//! never on the render thread, and only after the world has been quiet — the one
+//! full-GC pause lands while standing still, not while streaming chunks.
 //!
-//! Started with the game thread (see `run.rs`); the frame loop stamps meshing activity
-//! into `Shared::settle_activity_ms` (`Shared::note_settle_activity`), which is all the
-//! thread knows about the world.
+//! Started with the game thread (see `run.rs`). "Quiet" is watched through
+//! [`Shared::chunks_loaded`], the chunk-arrival counter the game thread publishes once a
+//! second: it moves on every chunk the server sends (join flood, flying around), which
+//! is exactly the work whose freed memory the diet returns; the meshing backlog always
+//! drains within seconds of the last arrival (the bench settles on 1.5 s of it).
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use super::Shared;
 
-/// How long without meshing work before a diet, and the minimum time between diets.
+/// How long without a chunk arrival before a diet, and the minimum time between diets.
 const QUIET: Duration = Duration::from_secs(15);
 const INTERVAL: Duration = Duration::from_secs(60);
 /// The diet thread's poll period.
@@ -36,14 +38,6 @@ pub(super) fn start(shared: Arc<Shared>) {
         .expect("spawning the settle-diet thread");
 }
 
-/// Milliseconds since the epoch (the timestamp `Shared::settle_activity_ms` holds).
-pub(super) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Whether a diet is due: the world has been quiet for [`QUIET`] and the last diet (if
 /// any) is older than [`INTERVAL`]. Pure over the inputs so the timing can be tested.
 fn diet_due(quiet: Duration, since_last_diet: Option<Duration>) -> bool {
@@ -51,6 +45,8 @@ fn diet_due(quiet: Duration, since_last_diet: Option<Duration>) -> bool {
 }
 
 fn diet_thread(shared: Arc<Shared>) {
+    let mut last_chunks = shared.chunks_loaded.load(Ordering::Relaxed);
+    let mut last_arrival = Instant::now();
     let mut last_diet: Option<Instant> = None;
     let mut gc_done = false;
     loop {
@@ -58,10 +54,12 @@ fn diet_thread(shared: Arc<Shared>) {
         if shared.is_closed() {
             return;
         }
-        let quiet = Duration::from_millis(
-            now_ms().saturating_sub(shared.settle_activity_ms.load(Ordering::Relaxed)),
-        );
-        if !diet_due(quiet, last_diet.map(|t| t.elapsed())) {
+        let chunks = shared.chunks_loaded.load(Ordering::Relaxed);
+        if chunks != last_chunks {
+            last_chunks = chunks;
+            last_arrival = Instant::now();
+        }
+        if !diet_due(last_arrival.elapsed(), last_diet.map(|t| t.elapsed())) {
             continue;
         }
         last_diet = Some(Instant::now());
