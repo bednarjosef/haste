@@ -43,6 +43,8 @@ pub struct Session {
     pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
+    /// Game ticks since the join (the packet handlers' log lines carry it).
+    pub tick: u64,
     /// Profiles added by `player_info_update` since the game thread last took them, with their
     /// `textures` property, for the skin manager (`game::skins`).
     pub profiles: Vec<crate::game::skins::ProfileRequest>,
@@ -223,6 +225,7 @@ impl Session {
                 got_login: true,
                 ..Default::default()
             },
+            tick: 0,
             entity_id,
             dimension,
             breaking: HashMap::new(),

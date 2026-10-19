@@ -25,6 +25,7 @@ impl Session {
         // Sound requests nobody drained (headless) are dropped here; the game thread
         // drains them between `receive` and `end_tick`.
         self.sound_requests.clear();
+        self.tick += 1;
         // The player's own block sounds this tick (footsteps, mining, placing): played
         // through the same request channel the packets use, so the game thread's
         // `Sounds::apply` picks them up; headless only counts them.
