@@ -405,7 +405,7 @@ fn the_arm_sits_at_vanilla_rest_position() {
     // `PartPose` (-5, 2, 0) and its 0.1 rad z tilt: the hand ends up right of the view
     // centre, below it and in front of the camera, reaching down and forward.
     let m = arm_matrix(&still_hand(), 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
-    let model = arm_model(false, true);
+    let model = arm_model(false, true, false);
     let mut out = Vec::new();
     emit_part_tinted(
         &mut out,
@@ -441,8 +441,8 @@ fn the_arm_sits_at_vanilla_rest_position() {
     let mut out2 = Vec::new();
     emit_part_tinted(
         &mut out2,
-        &arm_model(false, true),
-        &arm_model(false, true).root,
+        &arm_model(false, true, false),
+        &arm_model(false, true, false).root,
         &PoseOverrides::default(),
         swung,
         [0, 0, 64, 64],
@@ -680,7 +680,7 @@ fn the_hand_lags_behind_the_camera_turn() {
 #[test]
 fn the_arm_model_is_the_player_models_right_arm() {
     // `HumanoidModel.createMesh` + `PlayerModel.createMesh` + `AvatarRenderer.renderHand`.
-    let wide = arm_model(false, true);
+    let wide = arm_model(false, true, false);
     assert_eq!(wide.root.pivot, Vec3::new(-5.0, 2.0, 0.0));
     assert_eq!(wide.root.rotation, Vec3::new(0.0, 0.0, 0.1));
     let cube = &wide.root.cubes[0];
@@ -692,7 +692,7 @@ fn the_arm_model_is_the_player_models_right_arm() {
     assert_eq!(sleeve.cubes[0].uv, [40, 32]);
     assert_eq!(sleeve.cubes[0].inflate, 0.25);
     // Slim: a 3 px arm one pixel to the right.
-    let slim = arm_model(true, true);
+    let slim = arm_model(true, true, false);
     assert_eq!(slim.root.cubes[0].origin, Vec3::new(-2.0, -2.0, -2.0));
     assert_eq!(slim.root.cubes[0].size, Vec3::new(3.0, 12.0, 4.0));
 }

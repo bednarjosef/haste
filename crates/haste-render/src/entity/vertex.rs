@@ -58,6 +58,37 @@ pub(crate) fn push_world_quad(
     }
 }
 
+/// One unshaded textured quad (`uv` 0..1 over `rect`) through `m`: the geometry vanilla's
+/// text render types draw (maps and their decorations — no normal, so no entity directional
+/// lighting, only the lightmap). The four corners come in vanilla's own order,
+/// counter-clockwise seen from the visible side, so the two triangles are emitted as given.
+pub(crate) fn push_flat_quad(
+    out: &mut Vec<EntityVertex>,
+    m: Mat4,
+    p: [Vec3; 4],
+    uv: [[f32; 2]; 4],
+    light: (u8, u8),
+    rect: [u32; 4],
+) {
+    let p = p.map(|v| m.transform_point3(v));
+    let uv = uv.map(|t| {
+        [
+            rect[0] as f32 + t[0] * rect[2] as f32,
+            rect[1] as f32 + t[1] * rect[3] as f32,
+        ]
+    });
+    let r16 = rect.map(|v| v as u16);
+    for i in [0usize, 1, 2, 0, 2, 3] {
+        out.push(EntityVertex {
+            pos: p[i].to_array(),
+            uv: uv[i],
+            color: [1.0, 1.0, 1.0, 1.0],
+            rect: r16,
+            light: [light.0 as u16, light.1 as u16, 0, 0],
+        });
+    }
+}
+
 /// World-space entity shading: two directional lights at 0.6 and 0.4 ambient (the same
 /// lighting model as GUI items, with the light directions in world space).
 pub(crate) fn entity_shade(n: Vec3) -> f32 {

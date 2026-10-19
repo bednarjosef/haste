@@ -30,6 +30,12 @@ public final class Native {
     public static native int blockState(int x, int y, int z);
     /** The local player's name. */
     public static native String playerName();
+    /**
+     * The cooldown percent of an item's cooldown group (vanilla
+     * {@code ItemCooldowns.getCooldownPercent} on the player's cooldowns), for the item overlay
+     * ({@code GuiGraphicsExtractor.itemCooldown}); 0 when the group has no cooldown.
+     */
+    public static native float itemCooldown(String group, float partialTick);
 
     /** Fills the mirror arrays with Rust's primitive player and debug state (layout: haste.gui.Mirror). */
     public static native void mirror(int[] ints, double[] doubles);

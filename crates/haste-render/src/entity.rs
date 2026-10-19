@@ -31,6 +31,13 @@ mod flame;
 mod flame_tests;
 mod item;
 mod item_frame;
+pub mod map;
+mod map_color;
+#[cfg(test)]
+mod map_color_tests;
+mod map_decoration_types;
+#[cfg(test)]
+mod map_tests;
 mod minecart;
 #[cfg(test)]
 mod minecart_tests;
@@ -52,9 +59,9 @@ mod item_display;
 mod model_parts;
 mod vertex;
 
+pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matrix};
 #[cfg(test)]
-use hand::{arm_matrix, arm_model, hand_root_matrix, item_arm_matrix};
-pub(crate) use hand::{custom_head_layer_matrix, held_item_layer_matrix};
+use hand::{arm_model, hand_root_matrix, item_arm_matrix};
 pub(crate) use humanoid::{elytra_model, humanoid_armor};
 use humanoid::{missing_item_model, missing_texture, placeholder_texture};
 use item_display::item_model_bbox;
@@ -62,6 +69,7 @@ pub(crate) use item_display::{
     argb_linear, item_display_matrix, item_frame_item_transform, item_frame_transform,
     painting_transform,
 };
+pub use map::{MapData, MapMarker};
 pub(crate) use model_parts::{
     aabb_in_frustum, emit_part, emit_part_tinted, model_extents, model_top, part_matrix,
     pose_without_hidden,
@@ -69,7 +77,8 @@ pub(crate) use model_parts::{
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
 pub(crate) use vertex::{
-    entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_world_quad,
+    entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_flat_quad,
+    push_world_quad,
 };
 pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
@@ -301,9 +310,10 @@ pub struct EntityRenderer {
     hand: Vec<EntityVertex>,
     item_names: Vec<Identifier>,
     item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
-    /// The first-person arm model, by [`FirstPerson::slim`] and [`FirstPerson::sleeve`]
-    /// (built once on first use).
-    arm_models: [Option<Arc<CubeModel>>; 4],
+    /// The first-person arm models, by left, [`FirstPerson::slim`] and
+    /// [`FirstPerson::sleeve`] (built once on first use; the left arm serves the two-handed
+    /// map pose).
+    arm_models: [Option<Arc<CubeModel>>; 8],
     /// The item frame block model quads, by `(glow, map)`, built once on first use.
     frame_models: HashMap<(bool, bool), Arc<Vec<haste_assets::BakedQuad>>>,
     /// The moving pistons' moved-block quads, by the state string (resolved once per state a
@@ -341,6 +351,15 @@ pub struct EntityRenderer {
     /// Equipment asset info (`equipment/<asset>.json`), by asset id, loaded once (`None` for an
     /// asset that failed to load, so it is not retried every frame).
     equipment_infos: HashMap<Identifier, Option<Arc<haste_assets::EquipmentInfo>>>,
+    /// The maps to draw (`MapTextureManager`'s data side): published by the client through an
+    /// `Arc` swap whenever a map's packets changed it.
+    maps: Arc<HashMap<i32, map::MapData>>,
+    /// Each drawn map's atlas entry (see `map::MapTexture`).
+    map_textures: HashMap<i32, map::MapTexture>,
+    /// Each map decoration type's sprite rectangle, resolved once (`None`: no sprite).
+    map_decoration_rects: HashMap<u32, Option<[u32; 4]>>,
+    /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
+    map_decoration_names: Vec<Identifier>,
     pub drawn: u32,
 }
 
@@ -571,11 +590,6 @@ impl EntityRenderer {
                 bytemuck::cast_slice(&self.mask_vertices),
             );
         }
-    }
-    /// Item registry names by protocol id (for the held item).
-    pub fn set_item_names(&mut self, names: Vec<Identifier>) {
-        self.item_names = names;
-        self.item_models.clear();
     }
 
     /// Draws into the main pass (camera bind group at group 0); the boats' water masks ride

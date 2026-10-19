@@ -105,11 +105,7 @@ impl EntityRenderer {
             Some(at) => at,
             None => {
                 // Full: start over (textures re-upload on demand).
-                tracing::warn!("entity atlas full; repacking");
-                self.shelf = Shelf::default();
-                for t in self.textures.values_mut() {
-                    t.rect = None;
-                }
+                self.repack_atlas();
                 match self.shelf.alloc_in(w, h, ATLAS_SIZE) {
                     Some(at) => at,
                     None => return [0, 0, 1, 1],
@@ -143,5 +139,19 @@ impl EntityRenderer {
         let r = [at[0], at[1], w, h];
         t.rect = Some(r);
         r
+    }
+
+    /// Starts the atlas shelf over (a full atlas): every entity texture, map texture and map
+    /// decoration sprite forgets its rectangle and re-uploads on demand.
+    pub(super) fn repack_atlas(&mut self) {
+        tracing::warn!("entity atlas full; repacking");
+        self.shelf = Shelf::default();
+        for t in self.textures.values_mut() {
+            t.rect = None;
+        }
+        for t in self.map_textures.values_mut() {
+            t.rect = None;
+        }
+        self.map_decoration_rects.clear();
     }
 }

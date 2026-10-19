@@ -39,6 +39,7 @@ impl Session {
                     self.sound_requests.push(request);
                 }
             }
+            P::MapItemData(m) => self.apply_map_item_data(&m),
             _ => return Some(p),
         }
         None
