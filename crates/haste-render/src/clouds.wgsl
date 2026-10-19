@@ -10,8 +10,10 @@ struct Clouds {
     // The mesh's offset inside the camera's cell: (-xInCell, cloud bottom relative to
     // the camera, -zInCell) — vanilla's CloudOffset.
     offset: vec3<f32>,
-    _pad0: f32,
-    // The cloud colour (sRGB; the shade multiplies it before linearising) and alpha.
+    // 1 when the target view is sRGB and the hardware encodes (GL fallback); see
+    // entity.wgsl. 0 with the non-sRGB view, where the sRGB-encoded bytes are written raw.
+    hw_srgb: f32,
+    // The cloud colour (sRGB; the shade multiplies it) and alpha.
     color: vec4<f32>,
     // The cloud fog end distance.
     fog_end: f32,
@@ -39,7 +41,8 @@ fn linear_fog_value(dist: f32, start: f32, end: f32) -> f32 {
     return (dist - start) / (end - start);
 }
 
-// sRGB to linear (the target is sRGB; the colour chain runs in sRGB like vanilla's).
+// sRGB to linear, for the GL fallback's sRGB view (the colour chain runs in sRGB like
+// vanilla's; the normal non-sRGB view takes the encoded value raw).
 fn srgb_to_linear(c: f32) -> f32 {
     if (c <= 0.04045) {
         return c / 12.92;
@@ -125,14 +128,12 @@ fn vs_main(
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Vanilla clouds.vsh: vertexColor = faceColors[direction] * CloudColor; clouds.fsh:
     // alpha *= 1 - linear_fog_value(spherical distance, 0, cloud end). The shade
-    // multiplies the sRGB colour before linearising (vanilla writes both straight into
-    // its sRGB target).
+    // multiplies the sRGB colour, and the encoded result is written raw into the
+    // non-sRGB view so the translucent cloud pixels blend on the sRGB bytes like
+    // vanilla's plain UNORM target (the GL fallback's sRGB view gets the linear value
+    // for its hardware encode instead).
     let c = in.shade * clouds.color.rgb;
-    let rgb = vec3<f32>(
-        srgb_to_linear(c.r),
-        srgb_to_linear(c.g),
-        srgb_to_linear(c.b),
-    );
+    let rgb = select(c, vec3<f32>(srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)), clouds.hw_srgb == 1.0);
     let fade = 1.0 - linear_fog_value(length(in.pos), 0.0, clouds.fog_end);
     return vec4<f32>(rgb, clouds.color.a * fade);
 }

@@ -15,8 +15,7 @@ pub const WEATHER_RADIUS: i32 = 10;
 
 /// One weather column extracted this frame (vanilla
 /// `WeatherEffectRenderer.ColumnInstance`): the block column, the y range to cover, the
-/// texture offsets the column's random seed fixed for it, and the light at its sample
-/// position.
+/// texture offsets its random seed fixed, and the light at its sample position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeatherColumn {
     /// The column's block x and z.
@@ -111,8 +110,7 @@ pub struct LightningBolt {
 }
 
 /// One lightning vertex: camera-relative position and RGBA colour (vanilla
-/// `rendertype_lightning`'s POSITION_COLOR format; the pipeline is additive, fogged, no
-/// texture or lightmap).
+/// `rendertype_lightning`'s POSITION_COLOR; additive, fogged, no texture or lightmap).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct LightningVertex {
@@ -122,7 +120,7 @@ struct LightningVertex {
 }
 
 /// One weather vertex: camera-relative position, texture coordinates in atlas texels, RGBA
-/// colour (the distance fade times intensity in alpha), the wrap rectangle, and the light
+/// colour (the distance fade times intensity in alpha), the wrap rectangle and the light
 /// levels (sampled against the lightmap in the shader).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -145,25 +143,25 @@ struct WeatherUniforms {
     fog_env_end: f32,
     fog_rd_start: f32,
     fog_rd_end: f32,
-    _pad: [f32; 4],
+    /// 1 when the target view is sRGB (GL fallback: hardware encodes; see weather.wgsl).
+    hw_srgb: f32,
+    _pad: [f32; 3],
 }
 
 /// The weather pass: draws the frame's rain and snow columns as camera-relative quads over
-/// `environment/rain.png` and `environment/snow.png` in the sky atlas, two batched draws
-/// (rain, then snow — vanilla's texture bind order).
+/// `environment/rain.png` and `environment/snow.png` in the sky atlas, two batched draws.
 pub struct WeatherRenderer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipeline: wgpu::RenderPipeline,
     /// The lightning pass (vanilla `RenderPipelines.LIGHTNING`: additive, fogged,
-    /// POSITION_COLOR). Drawn from its own vertex buffer after the columns.
+    /// POSITION_COLOR), from its own vertex buffer after the columns.
     lightning_pipeline: wgpu::RenderPipeline,
     /// Lightning's own bind group: the uniforms at 0 (view matrix, fog) and the atlas at 1
     /// is unused by the shader but the layout is shared with the weather pass.
     lightning_bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
-    /// Sky-atlas and lightmap views; set once at startup, so the bind group outlives the
-    /// frame (`set_textures` builds the group around them).
+    /// Sky-atlas and lightmap views; set once at startup (`set_textures` builds the group).
     bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     capacity: usize,
@@ -185,12 +183,14 @@ pub struct WeatherRenderer {
     pub drawn: u32,
     /// Whether the one-time diagnostics line was logged.
     logged: bool,
+    /// Whether the target view is sRGB and the hardware encodes (GL fallback).
+    hw_srgb: bool,
 }
 
 impl WeatherRenderer {
     /// Builds the pass over the sky atlas's rain and snow rectangles. The atlas view and
-    /// lightmap (with its sampler) must be supplied via [`Self::set_textures`] before the
-    /// first frame; until then a white placeholder keeps the group valid.
+    /// lightmap must be supplied via [`Self::set_textures`] before the first frame; until
+    /// then a white placeholder keeps the group valid.
     pub fn new(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
@@ -452,6 +452,7 @@ impl WeatherRenderer {
             lightning_count: 0,
             drawn: 0,
             logged: false,
+            hw_srgb: target_format.is_srgb(),
         }
     }
 
@@ -491,7 +492,7 @@ impl WeatherRenderer {
 
     /// Builds this frame's vertices and uploads them and the uniforms. `camera` is the
     /// frame's world matrix (camera-relative vertices), `fog` the frame's fog bands and
-    /// colour (linear), matching the entity pass's group-0 camera.
+    /// colour (linear; the entity pass's group-0 camera matches).
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
@@ -532,12 +533,11 @@ impl WeatherRenderer {
                 let z1 = relative_z + half_z;
                 let y0 = c.bottom_y as f32 - cam.y;
                 let y1 = c.top_y as f32 - cam.y;
-                // Rain: the full rain.png width (`uOffset` is 0 for rain columns, so
-                // `u0 = uOffset + 0`, `u1 = uOffset + 1` spans the whole texture); the
-                // scroll sits in `v_offset`, and the vertex V runs `bottomY * 0.25` to
-                // `topY * 0.25` past it (vanilla `prepareInstances`). Snow: the u/v drift
-                // the column's random fixed, still spanning a full texture width from the
-                // sub-tile offset. The atlas rect is in texels; the UVs may leave the rect
+                // Rain: the full rain.png width (`uOffset` is 0, so u spans the whole
+                // texture); the scroll sits in `v_offset`, the vertex V running
+                // `bottomY * 0.25` to `topY * 0.25` past it (vanilla `prepareInstances`).
+                // Snow: the u/v drift the column's random fixed, still spanning a full
+                // texture width. The atlas rect is in texels; the UVs may leave the rect
                 // (vanilla's sampler REPEATs), and the fragment wraps them back inside.
                 let r = rect.map(|v| v as f32);
                 let u0 = r[0] + c.u_offset * r[2];
@@ -569,8 +569,7 @@ impl WeatherRenderer {
         push(&mut self.vertices, &weather.snow, self.snow_rect, 0.8);
         self.vertex_count = self.vertices.len() as u32;
         self.drawn = (weather.rain.len() + weather.snow.len()) as u32;
-        // One-time diagnostics: what the pass actually received (column counts, vertex
-        // count, intensity), so an invisible weather pass is debuggable from the log.
+        // One-time diagnostics: what the pass received (columns, vertices, intensity).
         if !self.logged {
             self.logged = true;
             tracing::info!(
@@ -600,14 +599,15 @@ impl WeatherRenderer {
             fog_env_end: fog.environmental_end,
             fog_rd_start: fog.render_distance_start,
             fog_rd_end: fog.render_distance_end,
-            _pad: [0.0; 4],
+            hw_srgb: f32::from(self.hw_srgb),
+            _pad: [0.0; 3],
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
     }
 
-    /// Draws the rain then snow columns into the main pass (after translucent terrain, where
-    /// the sky renderer's overlays run). Two draw calls.
+    /// Draws the rain then snow columns into the main pass (after translucent terrain,
+    /// where the sky renderer's overlays run).
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
         if self.vertex_count == 0 {
             return 0;

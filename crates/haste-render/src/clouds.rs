@@ -123,7 +123,9 @@ struct CloudUniforms {
     /// The offset of the mesh inside the camera's cell: (-xInCell, cloud bottom relative
     /// to the camera, -zInCell) — vanilla's `CloudOffset`.
     offset: [f32; 3],
-    _pad0: f32,
+    /// 1 when the target view is sRGB and the hardware encodes (GL fallback); the shader
+    /// emits linear colour then, and its sRGB-encoded bytes otherwise (clouds.wgsl).
+    hw_srgb: f32,
     /// The cloud colour (sRGB; the shader linearises shade * colour) and alpha.
     color: [f32; 4],
     /// The cloud fog end distance.
@@ -158,6 +160,8 @@ pub struct CloudRenderer {
     range_chunks: u32,
     /// Whether the one-time diagnostics line was logged.
     logged: bool,
+    /// Whether the target view is sRGB and the hardware encodes (GL fallback).
+    hw_srgb: bool,
 }
 
 impl CloudRenderer {
@@ -243,6 +247,7 @@ impl CloudRenderer {
             status: CloudStatus::default(),
             range_chunks: DEFAULT_RANGE_CHUNKS,
             logged: false,
+            hw_srgb: target_format.is_srgb(),
             device,
             queue,
             pipeline,
@@ -375,7 +380,7 @@ impl CloudRenderer {
         let u = CloudUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             offset: [-x_in_cell, (cloud_height - camera.pos.y as f32), -z_in_cell],
-            _pad0: 0.0,
+            hw_srgb: f32::from(self.hw_srgb),
             color,
             fog_end: fog.cloud_end,
             _pad1: [0.0; 7],

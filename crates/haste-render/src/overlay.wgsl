@@ -26,7 +26,10 @@ struct Camera {
     // (renderer.rs asserts both are equal).
     // Vanilla `Globals.GameTime` (the end portal layers scroll with it; see endportal.wgsl).
     game_time: f32,
-    _pad: f32,
+    // 1 when the target view is sRGB and the hardware encodes (GL fallback): emit linear
+    // colour there; 0 with the non-sRGB view, where the sRGB-encoded bytes are written raw
+    // (see entity.wgsl).
+    hw_srgb: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -79,7 +82,11 @@ fn vs_main(v: CrackVertexIn) -> VertexOut {
 
 @fragment
 fn fs_line(in: VertexOut) -> @location(0) vec4<f32> {
-    return in.data;
+    // The outline's vertex colour, encoded for the non-sRGB view like entity.wgsl (the
+    // colour is black today, whose encoding is the identity, but encode anyway so a
+    // coloured outline keeps its bytes).
+    let rgb = select(srgb_encode(in.data.rgb), in.data.rgb, camera.hw_srgb == 1.0);
+    return vec4<f32>(rgb, in.data.a);
 }
 
 @fragment
@@ -91,5 +98,19 @@ fn fs_crack(in: VertexOut) -> @location(0) vec4<f32> {
     if (c.a < 0.01) {
         discard;
     }
-    return vec4<f32>(c.rgb, c.a);
+    // The cracks strip is an UNORM texture, so the texel is the stored sRGB byte: write it
+    // raw, and the crack blend multiplies the target's sRGB bytes like vanilla's. On the
+    // GL fallback's sRGB view the hardware would encode, so the decoded value goes out.
+    let rgb = select(c.rgb, srgb_decode(c.rgb), camera.hw_srgb == 1.0);
+    return vec4<f32>(rgb, c.a);
+}
+
+// The sRGB transfer functions (IEC 61966-2-1), the ones the sRGB formats apply.
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3<f32>(0.0));
+    return select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3<f32>(0.0031308));
 }

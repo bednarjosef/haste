@@ -1,6 +1,7 @@
 // Sky, celestial bodies, stars, clouds and rain. One environment atlas (sun, moon phases, clouds,
-// rain, snow, end sky) fetched by texel with per-vertex wrap rectangles. Colours in linear space
-// (the target is sRGB).
+// rain, snow, end sky) fetched by texel with per-vertex wrap rectangles. Colours in linear space;
+// `target_color` writes them sRGB-encoded for the non-sRGB target view (the GL fallback's sRGB
+// view gets the linear value for its hardware encode).
 
 struct Sky {
     view_proj: mat4x4<f32>,
@@ -12,7 +13,9 @@ struct Sky {
     sunrise_color: vec4<f32>,
     // xyz: horizontal direction of the sunrise glow, w: star brightness.
     sunrise_dir: vec4<f32>,
-    // x: the sky kind (0 overworld, 1 none, 2 end); the other slots are unused.
+    // w: the sky kind (0 overworld, 1 none, 2 end); y: 1 when the target view is sRGB and
+    // the hardware encodes (GL fallback, see entity.wgsl) — 0 with the non-sRGB view,
+    // where the sRGB-encoded bytes are written raw.
     params: vec4<f32>,
     // Vanilla fog bands for the sky dome and weather: environmental start/end,
     // render distance start/end.
@@ -98,10 +101,10 @@ fn fs_background(in: BackgroundOut) -> @location(0) vec4<f32> {
         }
         let texel = (uv * 0.5 + 0.5) * 16.0 * vec2<f32>(sky.end_rect.zw);
         let c = fetch(vec2<f32>(sky.end_rect.xy) + texel, sky.end_rect);
-        return vec4<f32>(c.rgb * sky.sky_color.rgb, 1.0);
+        return vec4<f32>(target_color(c.rgb * sky.sky_color.rgb), 1.0);
     }
     // Skyless dimensions: flat fog colour (the overworld dome is the disc fan).
-    return vec4<f32>(sky.fog_color.rgb, 1.0);
+    return vec4<f32>(target_color(sky.fog_color.rgb), 1.0);
 }
 
 // ---- sky disc: the dome fan, fogged by spherical distance over the sky fog end ----
@@ -129,14 +132,14 @@ fn fs_disc(in: DiscOut) -> @location(0) vec4<f32> {
     // Vanilla sky.fsh: max(linear(spherical, 0, skyEnd), linear(cylindrical, skyEnd,
     // skyEnd)); the cylindrical term is 1 only past the ring where the spherical is too.
     let fog = linear_fog_value(length(in.pos), 0.0, sky.fog_bands2.x);
-    return vec4<f32>(mix(sky.sky_color.rgb, sky.fog_color.rgb, fog), 1.0);
+    return vec4<f32>(target_color(mix(sky.sky_color.rgb, sky.fog_color.rgb, fog)), 1.0);
 }
 
 @fragment
 fn fs_dark_disc(in: DiscOut) -> @location(0) vec4<f32> {
     // Vanilla renderDarkDisc: the sky pipeline coloured black, fogged like the sky disc.
     let fog = linear_fog_value(length(in.pos), 0.0, sky.fog_bands2.x);
-    return vec4<f32>(mix(vec3<f32>(0.0), sky.fog_color.rgb, fog), 1.0);
+    return vec4<f32>(target_color(mix(vec3<f32>(0.0), sky.fog_color.rgb, fog)), 1.0);
 }
 
 // ---- sunrise/sunset fan: translucent timeline colour, alpha ramping center to ring ----
@@ -160,7 +163,7 @@ fn fs_sunrise(in: VertexOut) -> @location(0) vec4<f32> {
     if (a <= 0.0) {
         discard;
     }
-    return vec4<f32>(sky.sunrise_color.rgb, a);
+    return vec4<f32>(target_color(sky.sunrise_color.rgb), a);
 }
 
 // ---- celestial: sun, moon, stars in the camera's rotation frame, additive ----
@@ -200,11 +203,24 @@ fn fs_celestial(in: VertexOut) -> @location(0) vec4<f32> {
         // Stars: plain quads coloured (b, b, b, b) with the star brightness b, blended
         // src-alpha/one (vanilla `RenderPipelines.STARS`, `BlendFunction.OVERLAY`): b * b.
         let b = sky.sunrise_dir.w;
-        return vec4<f32>(in.color.rgb * b * b, 1.0);
+        return vec4<f32>(target_color(in.color.rgb * b * b), 1.0);
     }
     // Additive with the texture's alpha (src alpha, one), like vanilla's sun and moon.
     let c = fetch(in.uv, in.rect);
-    return vec4<f32>(c.rgb * c.a * in.color.rgb * in.color.a, 1.0);
+    return vec4<f32>(target_color(c.rgb * c.a * in.color.rgb * in.color.a), 1.0);
+}
+
+// The colour a fragment writes to the target: the normal non-sRGB view stores the
+// sRGB-encoded bytes raw (so blends act on them like vanilla's plain UNORM target), and
+// the GL fallback's sRGB view gets the linear value for its hardware encode instead.
+fn target_color(rgb: vec3<f32>) -> vec3<f32> {
+    return select(srgb_encode(rgb), rgb, sky.params.y == 1.0);
+}
+
+// The sRGB transfer function (IEC 61966-2-1), the one the sRGB texture formats apply.
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3<f32>(0.0));
+    return select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3<f32>(0.0031308));
 }
 
 // ---- the End flash: a celestial quad in the flash's own pose (vanilla renderEndFlash) ----
