@@ -100,7 +100,11 @@ fn seed_spawns_six_shrinking_explosions_per_tick() {
         let quad = 2.0 * (1.0 - size as f32 * 0.5);
         for p in newest {
             assert_eq!(p.behaviour.source, "HugeExplosionParticle");
-            assert!((p.quad - quad).abs() < 1e-6, "quad {} at tick {tick}", p.quad);
+            assert!(
+                (p.quad - quad).abs() < 1e-6,
+                "quad {} at tick {tick}",
+                p.quad
+            );
             // HugeExplosionParticle: life 6 + r(0..4), grey 0.4..1.0, full light, no
             // motion, and the spawn position jittered by ±4 around the seed.
             assert!((6.0..=9.0).contains(&p.lifetime), "life {}", p.lifetime);

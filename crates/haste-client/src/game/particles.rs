@@ -78,7 +78,7 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
         particles.spawn(s, camera, None);
     }
     driver.session.ambient_spawns = ambient;
-    particles.tick();
+    particles.tick(camera);
     // The render snapshot for the coming frames (vanilla's per-frame
     // `ParticleEngine.extract` folded into the tick: light sampled at the tick
     // position, see `build_snapshot`), published while the locks are still held —

@@ -86,7 +86,7 @@ impl Session {
 
 /// `DustParticleOptions` from a particle's raw data (the ARGB colour int, then the size
 /// scale f32); `None` for every other type and for a malformed payload.
-fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOption> {
+pub(super) fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOption> {
     if kind.path() != "dust" || data.len() < 8 {
         return None;
     }
@@ -106,7 +106,10 @@ fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOptio
 /// `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`); `None` for every other
 /// type and for a malformed payload. The fall-damage landing particles
 /// (`LivingEntity.checkFallDamage` -> `sendParticles`) arrive this way.
-fn block_state_option(kind: &Identifier, data: &[u8]) -> Option<haste_core::BlockStateId> {
+pub(super) fn block_state_option(
+    kind: &Identifier,
+    data: &[u8],
+) -> Option<haste_core::BlockStateId> {
     const BLOCK_KINDS: [&str; 5] = [
         "block",
         "block_marker",
