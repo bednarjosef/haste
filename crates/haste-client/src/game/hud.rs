@@ -178,3 +178,25 @@ pub(super) fn publish_attack_indicator(driver: &NetDriver, shared: &Shared) {
         ui.set_crosshair_pick(player.crosshair_pick_living(&*shared.entities.read()));
     }
 }
+
+/// This tick's item cooldowns (vanilla `Player.cooldowns`), published for the HUD's item
+/// overlay: the Java `GuiGraphicsExtractor.itemCooldown` asks for a stack's percent per frame
+/// through the `itemCooldown` native, which reads this snapshot.
+pub(super) fn publish_item_cooldowns(driver: &NetDriver) {
+    let (tick_count, cooldowns) = driver.session.player.int.cooldowns.snapshot();
+    haste_jvm::set_item_cooldowns(haste_jvm::ItemCooldownsHud {
+        tick_count,
+        cooldowns: cooldowns
+            .into_iter()
+            .map(|(group, c)| {
+                (
+                    group,
+                    haste_jvm::ItemCooldownHud {
+                        start_tick: c.start_tick,
+                        end_tick: c.end_tick,
+                    },
+                )
+            })
+            .collect(),
+    });
+}

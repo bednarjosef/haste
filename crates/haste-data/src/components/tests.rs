@@ -389,3 +389,61 @@ fn parses_the_use_effects_component() {
     let c = ItemComponents::default();
     assert_eq!(c.use_effects(&attr("wooden_spear")), UseEffects::DEFAULT);
 }
+
+#[test]
+fn parses_the_use_cooldown_group() {
+    // `UseCooldown.CODEC`'s `cooldown_group`: only a named group lands in the table; a
+    // `use_cooldown` without one (or none at all) leaves the item grouping under its own id.
+    let mut c = ItemComponents::default();
+    assert_eq!(c.cooldown_group(&attr("ender_pearl")), None);
+    c.insert_use_cooldown(attr("ender_pearl"), attr("ender_pearl"));
+    assert_eq!(
+        c.cooldown_group(&attr("ender_pearl")),
+        Some(&attr("ender_pearl"))
+    );
+    // The loader reads the group out of a report file.
+    let dir = std::env::temp_dir().join(format!(
+        "haste-cooldown-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let item_dir = dir.join("item");
+    std::fs::create_dir_all(&item_dir).unwrap();
+    std::fs::write(
+        item_dir.join("shield.json"),
+        br#"{"components":{"minecraft:use_cooldown":{"seconds":0.5,"cooldown_group":"minecraft:shield"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        item_dir.join("ender_pearl.json"),
+        br#"{"components":{"minecraft:use_cooldown":{"seconds":1.0}}}"#,
+    )
+    .unwrap();
+    let regs = Registries::parse(
+        r#"{"minecraft:item": {"entries": {
+            "minecraft:shield": {"protocol_id": 0},
+            "minecraft:ender_pearl": {"protocol_id": 1}
+        }},"minecraft:data_component_type": {"entries": {}}}"#,
+    )
+    .unwrap();
+    let c = ItemComponents::load(&item_dir, &regs);
+    assert_eq!(c.cooldown_group(&attr("shield")), Some(&attr("shield")));
+    assert_eq!(c.cooldown_group(&attr("ender_pearl")), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The report's `minecraft:use_cooldown`: vanilla 26.3 registers it with seconds only
+/// (`Items.ENDER_PEARL`... `.useCooldown(1.0F)`, wind charge 0.5, chorus fruit 1.0), so no
+/// item names a `cooldown_group` and every item groups under its own registry id — the
+/// fallback of `ItemCooldowns.getCooldownGroup`. (The group field stays mod/datapack
+/// territory; the client resolves it off the stack in Java.)
+#[test]
+#[ignore = "needs cache/datagen/26.3/reports (data generator)"]
+fn report_use_cooldowns_name_no_groups() {
+    let c = ItemComponents::load_default().unwrap();
+    assert!(c.len() > 30, "the report did not load");
+    assert!(c.use_cooldown_items().next().is_none());
+}

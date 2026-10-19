@@ -220,6 +220,11 @@ impl LocalPlayer {
             }
         }
 
+        // Vanilla `Player.tick` ticks the item cooldowns after the key handling
+        // (`attackStrengthTicker++` ... `cooldowns.tick()`), so a click this tick still sees
+        // the cooldown as the last tick ended it.
+        self.int.cooldowns.tick();
+
         // The press-only fields are consumed; held buttons stay until the caller changes them.
         self.int.input.pick_block = false;
         self.int.input.pick_block_ctrl = false;

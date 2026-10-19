@@ -52,9 +52,11 @@ mod attack;
 mod block_classes;
 mod consumable;
 mod consume_effects;
+pub(crate) mod cooldowns;
 mod destroy;
 mod drop;
 mod effects;
+mod entity_interact;
 mod held_item;
 mod packets;
 mod pick;
@@ -63,6 +65,7 @@ pub(crate) mod prediction;
 mod step;
 mod use_item;
 pub(crate) use consume_effects::{should_emit, ConsumeEffects};
+pub(crate) use cooldowns::ItemCooldowns;
 use effects::EffectIds;
 pub(crate) use effects::{LightmapEffectIds, MovementEffectIds};
 pub use pick::Target;
@@ -225,6 +228,9 @@ pub struct Interaction {
     recent: Vec<BlockPos>,
     /// The screen the last use opened (see [`UsedScreen`]), until the game thread takes it.
     used_screen: Option<UsedScreen>,
+    /// Vanilla `Player.cooldowns` (`ItemCooldowns`): the cooldown groups the server's
+    /// `cooldown` packets started, ticked in the player's tick (see [`cooldowns`]).
+    pub(crate) cooldowns: ItemCooldowns,
     /// Whether a screen is open (the game thread sets it from the UI). While one is,
     /// vanilla skips `Minecraft.handleKeybinds` entirely (`Minecraft.tick` only runs it
     /// with no screen, and pins `missTime` to 10000): no clicks, no held use, no
@@ -392,6 +398,8 @@ impl Interaction {
         self.pending_use_hand = None;
         self.attack_clicks = 0;
         self.use_clicks = 0;
+        // Vanilla's respawned player is a new `Player` with fresh `ItemCooldowns`.
+        self.cooldowns = ItemCooldowns::default();
         // A respawn is a new `ClientLevel` in vanilla: no prediction survives it.
         self.prediction.clear();
     }
@@ -555,6 +563,8 @@ impl LocalPlayer {
     }
 }
 
+#[cfg(test)]
+mod cooldowns_tests;
 #[cfg(test)]
 mod spectator_tests;
 #[cfg(test)]
