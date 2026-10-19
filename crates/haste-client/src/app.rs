@@ -3030,7 +3030,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         perspective: game::Perspective::default(),
         window: None,
         renderer: None,
-        feed: WorldFeed::default(),
+        // `--work-budget` rides on the feed (its uploads are the budgeted work).
+        feed: frame::work_feed(args)?,
         ui: None,
         gui: GuiFrame::default(),
         input: InputRouter::default(),

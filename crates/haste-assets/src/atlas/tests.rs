@@ -348,6 +348,37 @@ fn perf_jar_atlas_build_time() {
     );
 }
 
+/// `drop_uploaded_pixels` (the renderer calls it after `upload_atlas`) releases the
+/// mip chain but keeps the animated sprites' frames and every region, so the sprite
+/// animator and the mesher keep working.
+#[test]
+#[ignore = "needs the client jar and datagen reports in the cache"]
+fn jar_atlas_drop_uploaded_pixels() {
+    let jar = haste_core::paths::client_jar();
+    if !jar.exists() {
+        eprintln!("ignored: needs the client jar in the cache");
+        return;
+    }
+    let mut assets =
+        Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3").unwrap();
+    let reports = haste_core::paths::datagen_reports();
+    let states = crate::bake::BlocksJsonStates::load(&reports.join("blocks.json")).unwrap();
+    let mut atlas = AtlasBuilder::build(&mut assets, &[], true).unwrap();
+    crate::bake::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+    let frames: u64 = atlas
+        .animated_sprites()
+        .iter()
+        .flat_map(|s| s.frames.iter())
+        .map(|f| (f.width() * f.height() * 4) as u64)
+        .sum();
+    let regions = atlas.regions.len();
+    let before = atlas.pixel_bytes();
+    assert!(before > frames, "the mip chain is retained before the drop");
+    atlas.drop_uploaded_pixels();
+    assert_eq!(atlas.pixel_bytes(), frames);
+    assert_eq!(atlas.regions.len(), regions);
+}
+
 #[test]
 #[ignore = "needs the client jar and datagen reports in the cache"]
 fn jar_atlas_animated_sprites() {

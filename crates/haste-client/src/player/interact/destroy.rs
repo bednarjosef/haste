@@ -45,7 +45,7 @@ impl LocalPlayer {
         let state = world.block_state(h.pos);
         // A block we broke this tick (or whose break the server has not acknowledged yet) is
         // gone for us even if the world has not applied the edit yet.
-        let predicted_gone = self.int.predictions.iter().any(|p| p.1 == h.pos);
+        let predicted_gone = self.int.prediction.is_predicted(h.pos);
         if env.data.is_air(state) || predicted_gone {
             return (false, false);
         }
@@ -334,9 +334,10 @@ impl LocalPlayer {
         }));
         if breaks {
             // Predict the block gone; a waterlogged block leaves water, which we leave to the
-            // server's update.
+            // server's update. The position we stood at is retained with it, for the ack's
+            // snap-back when the server's state there collides with us.
             let to = env.data.fluid(state).is_none().then_some(BlockStateId::AIR);
-            self.int.predict(seq, h.pos, state, to);
+            self.int.predict(seq, h.pos, state, to, self.state.pos);
             // The break sound, played the moment the block goes for us (the server's
             // 2001 broadcast excludes the breaker; its sound half we do not decode).
             if let Some(t) = env.data.block_sound_type(state) {
