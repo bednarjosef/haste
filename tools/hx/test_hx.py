@@ -131,6 +131,9 @@ class Guard(unittest.TestCase):
         self.assertEqual(self.decide("C=crates; ls $C"), "deny")
         self.assertEqual(self.decide("cat > notes.txt <<'EOF'"), "deny")
         self.assertEqual(self.decide("git -C ../x status"), "deny")
+        self.assertEqual(self.decide("cd /tmp && git status"), "deny")
+        self.assertEqual(self.decide(
+            "hx client --user a --before 'summon x {CustomName:'\"'\"'\"S\"'\"'\"'}'"), "deny")
 
     def test_allowed(self):
         self.assertEqual(self.decide("grep -rln tick cache/source/26.3/client"), "allow")
@@ -141,6 +144,19 @@ class Guard(unittest.TestCase):
         self.assertEqual(self.decide("awk '{print $1}' Cargo.toml"), "allow")
         self.assertEqual(self.decide("cd crates && ls | head -2"), "allow")
         self.assertEqual(self.decide('grep -n "end$" Cargo.toml'), "allow")
+
+
+class Commands(unittest.TestCase):
+    def test_commands_file(self):
+        import tempfile
+        import client
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write("# setup\nbefore: op a\n5: summon armor_stand ~ ~ ~ {CustomName:'S'}\n")
+        try:
+            self.assertEqual(client.read_commands(f.name),
+                             (["op a"], ["5.0:summon armor_stand ~ ~ ~ {CustomName:'S'}"]))
+        finally:
+            os.unlink(f.name)
 
 
 class Checklist(unittest.TestCase):
@@ -161,6 +177,15 @@ class Checklist(unittest.TestCase):
                 with open(os.path.join(d, "target", "hx-checklist.md"), "w") as f:
                     f.write("- [x] pose\n- [x] armour layer\n")
                 self.assertEqual(checks.checklist_missing(), [])
+                with open(os.path.join(d, "target", "hx-checklist.md"), "a") as f:
+                    f.write("- [blocked: not in the dump] armour\n")
+                old_state = checks.state_file
+                checks.state_file = lambda: os.path.join(d, "hx-check")
+                try:
+                    self.assertEqual(len(checks.unreviewed_blocked()), 1)
+                    self.assertEqual(checks.unreviewed_blocked(), [])
+                finally:
+                    checks.state_file = old_state
             finally:
                 checks.ROOT = old
 

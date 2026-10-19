@@ -24,6 +24,22 @@ def rcon(port, command):
     return (res.stdout + res.stderr).strip()
 
 
+def read_commands(path):
+    """RCON commands from a file: `before: CMD` lines run before the client starts,
+    `SECONDS: CMD` lines that many seconds into the run; blank and `#` lines are skipped."""
+    before, at = [], []
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        when, _, command = line.partition(":")
+        if when.strip() == "before":
+            before.append(command.strip())
+        else:
+            at.append(f"{float(when)}:{command.strip()}")
+    return before, at
+
+
 def cmd_client(user, script=None, walk=None, seconds=60, headless=False, before=(), at=(),
                server="127.0.0.1:25691", extra=()):
     binary = os.path.join(ROOT, "target", "release", "haste")

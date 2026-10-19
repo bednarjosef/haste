@@ -36,13 +36,14 @@ task: it already resolves every vanilla class and method the task names.
 | The crates, or a directory's files with summaries | `hx map`, `hx map crates/haste-entity/src` |
 | A Rust file's items with line ranges | `hx outline FILE`, then Read only the range (offset/limit) |
 | A Rust definition / its uses | `hx def NAME`, `hx refs NAME [PATH]` |
+| Game data on an id: model layers, sizes, registry ids, block states | `hx data armor_stand` |
 | fmt + file sizes + clippy + tests of changed crates | `hx check` (errors only; `--filter NAME` runs some tests) |
 | What is still missing before you may finish | `hx done` |
 
 First, write `target/hx-checklist.md`: one `- [ ] item` line per deliverable of the brief (each
 thing to port, the tests, checks, measurements and report items; the launcher may have started
 it). Tick `- [x]` as you finish each one; mark `- [blocked: why]` only what truly cannot be done
-here, after looking for existing Haste code to build on. `hx done` (and so the end of your turn)
+here, after looking for existing Haste code and game data to build on (`hx ported`, `hx data`). `hx done` (and so the end of your turn)
 waits for every item.
 
 Work in this order: read the pack; read the vanilla code you port (`hx vanilla`); find the
@@ -86,7 +87,9 @@ Build with `cargo build --release -p haste-client`, then run the client through 
 (script commands: `wait_until joined`, `wait N`, `look YAW PITCH`, `screenshot NAME`; shots land
 in `target/shots/`), or `hx client --user <you> --walk FILE --headless --seconds 60` for a
 movement walk (`crates/haste-client/walks/`: `hold`, `cmd`, `mark`, ...). `--before 'op <you>'`
-runs an RCON command first, `--at '5:tp <you> 30000 200 30000'` five seconds into the run. The
+runs an RCON command first, `--at '5:tp <you> 30000 200 30000'` five seconds into the run;
+commands with NBT or quotes go in a file (`before: CMD` / `SECONDS: CMD` lines, written with
+Write) passed as `--commands FILE`. The
 client exits when its script ends (20 ticks a second), so make the script outlast `--at`, or put
 the command in a walk script (`cmd tp @s 30000 200 30000`, after `--before 'op <you>'`). It
 prints a digest of the log; the full log is in `target/hx-client-<you>.log`. Open at least one

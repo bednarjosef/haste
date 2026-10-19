@@ -9,13 +9,17 @@ small, capped answer instead of raw search output, so a worker's context stays s
   hx vanilla CLASS[.method]... vanilla class outline (--grep RE filters it, --fields adds fields)
                                or a method's body with line numbers (every overload)
   hx vgrep [-l] RE [DIR]       search the vanilla source; each hit labelled Class.method:line
+  hx data NAME                 game data on a name: entity model layers, sizes, registry ids,
+                               block states (the dumps Haste reads at runtime)
   hx check [CRATE...] [--no-tests] [--filter NAME]
                                cargo fmt, file sizes, clippy -D warnings and tests of the crates
                                changed since the branch base (or those given), errors only
   hx client --user NAME [--script FILE] [--walk FILE] [--seconds N] [--headless]
-            [--before 'RCON CMD']... [--at 'SECONDS:RCON CMD']...
+            [--before 'RCON CMD']... [--at 'SECONDS:RCON CMD']... [--commands FILE]
                                run target/release/haste against the test server, RCON before
-                               and during the run, print a digest of the log and new screenshots
+                               and during the run, print a digest of the log and new screenshots;
+                               FILE holds RCON lines `before: CMD` or `SECONDS: CMD` (for NBT
+                               and quotes, which the shell cannot carry)
   hx done                      what is still missing before a worker may finish
   hx context BRIEF             the orientation pack for a brief (the worker launcher adds it)
 """
@@ -27,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import checks  # noqa: E402
 import client  # noqa: E402
 import context  # noqa: E402
+import data  # noqa: E402
 import guard  # noqa: E402
 import haste  # noqa: E402
 import vanilla  # noqa: E402
@@ -69,6 +74,8 @@ def main(argv):
             print("usage: hx vgrep [-l] REGEX [DIR under the source root]")
             return 2
         vanilla.cmd_vgrep(pos[0], pos[1] if len(pos) > 1 else None, files_only=files_only)
+    elif cmd == "data" and pos:
+        data.cmd_data(pos[0])
     elif cmd == "check":
         filt = opt("--filter")
         return 0 if checks.cmd_check(pos, skip_tests="--no-tests" in flags, filt=filt) else 1
@@ -81,6 +88,10 @@ def main(argv):
                 del args[i:i + 2]
             return vals
         before, at = many("--before"), many("--at")
+        commands = opt("--commands")
+        if commands:
+            b, a = client.read_commands(commands)
+            before, at = before + b, at + a
         user, script, walk = opt("--user"), opt("--script"), opt("--walk")
         seconds = int(opt("--seconds") or 60)
         if not user:

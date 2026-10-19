@@ -5,6 +5,7 @@ It replaces the first dozens of searches a worker would otherwise spend finding 
 import os
 import re
 
+import data
 import haste
 import vanilla
 from common import ROOT, clip, out, rg
@@ -54,12 +55,32 @@ def concept_files(text, names, limit=15):
                 if rank is not None:
                     hits.append((rank, os.path.relpath(os.path.join(r, f), ROOT)))
     if not hits:
-        return
+        return strong
     out("Existing Haste files named after concepts in the task (plug into these; "
         "`hx outline FILE`):")
     for _, p in sorted(hits)[:limit]:
         full = os.path.join(ROOT, p)
         out(f"- {p} ({haste.count_lines(full)} lines) {clip(haste.module_doc(full), 110)}")
+    return strong
+
+
+def game_data(stems, limit=4):
+    """The game data on the task's concepts (`ArmorStandRenderer` -> armor_stand): model layers,
+    sizes and registry ids the work builds on, so nobody concludes they are missing."""
+    shown = False
+    names = set()
+    for stem in stems or ():
+        for suffix in ("_renderer", "_model", "_layer", "_screen", "_armor"):
+            stem = stem.removesuffix(suffix)
+        names.add(stem)
+    for stem in sorted(names):
+        found = data.lookup(stem, limit) if data.is_game_id(stem) else None
+        if not found:
+            continue
+        if not shown:
+            out("Game data on those concepts (`hx data NAME`; Haste reads these dumps at runtime):")
+            shown = True
+        data.print_lookup(stem, found, limit)
 
 
 def cmd_context(brief_path):
@@ -110,7 +131,8 @@ def cmd_context(brief_path):
         shown += 1
     if not shown:
         out("  (the brief names no vanilla class)")
-    concept_files(text, names)
+    stems = concept_files(text, names)
+    game_data(stems)
     paths = sorted({p.rstrip(".,:;)`/") for p in PATH.findall(text)})
     if paths:
         out("Haste paths in the brief:")

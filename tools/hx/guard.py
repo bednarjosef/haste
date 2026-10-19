@@ -4,7 +4,8 @@ pre:  PreToolUse on Bash. Refuses what wastes a worker's context or ends a headl
       background commands, unbounded searches of the decompiled source, whole-file `cat` of big
       files, workspace-wide cargo runs. Each refusal names the cheaper command to use instead.
 stop: Stop. While `hx done` lists something missing, the worker may not end its turn (at most
-      HX_STOP_BLOCKS times per session, so a truly blocked worker can still finish).
+      HX_STOP_BLOCKS times per session, so a truly blocked worker can still finish); then each
+      checklist item marked blocked is sent back once for a second look.
 """
 import json
 import os
@@ -12,7 +13,7 @@ import re
 import sys
 
 import checks
-from common import ROOT
+from common import ROOT, clip
 
 
 def deny(reason):
@@ -54,6 +55,14 @@ def pre(event):
              "expansion and heredocs. Spell paths and values out, run one command per item "
              "(several commands joined with ; or && in one call are fine), and create or edit "
              "files with the Write and Edit tools.")
+    if "'\"'\"'" in cmd or "'\\''" in cmd:
+        deny("The permission checker refuses quotes nested inside quotes. For RCON commands "
+             "with NBT or JSON text (summon, give, tellraw), write them one per line to a file "
+             "with Write (`before: CMD`, or `SECONDS: CMD` for a time into the run) and run "
+             "`hx client --commands FILE ...`; for file contents use Write or Edit.")
+    if re.match(r"\s*cd\s+/", cmd):
+        deny("Your shell already starts in the worktree root: drop the `cd /...` and run the "
+             "command as is (absolute cd is refused).")
     if re.search(r"\bgit\s+-C\b", cmd):
         deny("Your shell starts in the worktree root: run git there without -C (the allow-list "
              "matches `git status`, `git add`, `git commit`, not `git -C PATH ...`).")
@@ -83,6 +92,23 @@ def stop(event):
         return
     todo = checks.missing()
     if not todo:
+        blocked = checks.unreviewed_blocked()
+        if blocked:
+            sys.stderr.write(
+                f"Before you finish, look again at the {len(blocked)} checklist items you "
+                "marked blocked:\n" + "\n".join("- " + clip(b, 200) for b in blocked)
+                + "\nMost blocked items turn out to be doable. Check the usual causes:\n"
+                "- \"not in the data / dump / assets\": look it up with `hx data NAME` and "
+                "`hx vanilla Class`. Haste reads model layers, sizes, registries and textures "
+                "at runtime.\n"
+                "- \"not built in Haste\": `hx ported VanillaClass`, `hx map DIR`, `hx refs NAME`.\n"
+                "- \"a command was refused\": the refusal names the alternative (RCON with NBT "
+                "or quotes: `hx client --commands FILE`).\n"
+                "- \"needs a file I may not edit\": work around it and put the request in "
+                "your report.\n"
+                "Do each item now. Keep `[blocked: ...]` only when it still fails, and say "
+                "what you tried. Then end your turn again.\n")
+            sys.exit(2)
         return
     with open(marker, "w") as f:
         f.write(str(count + 1))

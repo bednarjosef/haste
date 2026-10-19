@@ -202,6 +202,25 @@ def checklist_missing():
             "(look for existing Haste code first: hx map, hx ported, hx refs)"]
 
 
+def blocked_items():
+    path = checklist_path()
+    if not os.path.isfile(path):
+        return []
+    return [l.strip() for l in open(path) if re.match(r"\s*[-*] \[blocked", l)]
+
+
+def unreviewed_blocked():
+    """Blocked items not yet sent back for a second look (each one is, once): weaker models
+    mark work blocked on a wrong guess ("not in the data", "not built") more often than not."""
+    seen_path = os.path.join(os.path.dirname(state_file()), "hx-blocked-reviewed")
+    seen = set(open(seen_path).read().split("\n")) if os.path.exists(seen_path) else set()
+    new = [b for b in blocked_items() if b not in seen]
+    if new:
+        with open(seen_path, "a") as f:
+            f.write("".join(b + "\n" for b in new))
+    return new
+
+
 def cmd_done():
     todo = missing()
     if not todo:
