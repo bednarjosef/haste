@@ -1120,6 +1120,7 @@ pub fn shadow_radius_for_name(name: &str) -> f32 {
         | "minecraft:dark_oak_boat"
         | "minecraft:mangrove_boat"
         | "minecraft:pale_oak_boat"
+        | "minecraft:poplar_boat"
         | "minecraft:bamboo_raft"
         | "minecraft:oak_chest_boat"
         | "minecraft:spruce_chest_boat"
@@ -1130,6 +1131,7 @@ pub fn shadow_radius_for_name(name: &str) -> f32 {
         | "minecraft:dark_oak_chest_boat"
         | "minecraft:mangrove_chest_boat"
         | "minecraft:pale_oak_chest_boat"
+        | "minecraft:poplar_chest_boat"
         | "minecraft:bamboo_chest_raft" => 0.8,
         "minecraft:minecart"
         | "minecraft:chest_minecart"

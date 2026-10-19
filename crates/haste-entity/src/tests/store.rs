@@ -343,8 +343,18 @@ fn equipment_replaces_slot() {
 #[ignore = "timed test, run in release: cargo test --release -p haste-entity -- --ignored"]
 fn ten_k_entities_tick_under_1ms() {
     let mut s = store();
+    // A type no renderer covers, so the entities stay on the generic box path (the registry's
+    // first id is a boat, whose renderer the boat path draws).
+    let arrow = crate::registry::entity_type_names().and_then(|names| {
+        names
+            .iter()
+            .find(|(_, n)| **n == "minecraft:arrow")
+            .map(|(k, _)| *k)
+    });
     for i in 0..10_000 {
-        s.spawn(&spawn(i, DVec3::new(f64::from(i) * 0.1, 64.0, 0.0)));
+        let mut sp = spawn(i, DVec3::new(f64::from(i) * 0.1, 64.0, 0.0));
+        sp.kind = arrow.unwrap_or(sp.kind);
+        s.spawn(&sp);
     }
     // Half of them get a delta each tick, so the lerp path is exercised too.
     for t in 0..10 {

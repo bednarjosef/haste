@@ -136,8 +136,15 @@ fn player_gets_humanoid_model_and_nametag() {
     s.render_instances(0.0, &mut out);
     assert_eq!(out[0].model.texture.to_string(), "haste:entity/humanoid");
     assert_eq!(out[0].nametag.as_deref(), Some("Steve"));
-    // Non-player (no player_info entry): generic box.
-    s.spawn(&spawn(2, DVec3::ZERO));
+    // Non-player (no player_info entry): generic box. The kind is a type no renderer covers
+    // (`minecraft:arrow`; the registry's first id is a boat, which the boat renderer draws).
+    let mut sp2 = spawn(2, DVec3::ZERO);
+    if let Some(names) = crate::registry::entity_type_names() {
+        if let Some((kind, _)) = names.iter().find(|(_, n)| **n == "minecraft:arrow") {
+            sp2.kind = *kind;
+        }
+    }
+    s.spawn(&sp2);
     let mut out = Vec::new();
     s.render_instances(0.0, &mut out);
     let other = out.iter().find(|i| i.id == EntityId(2)).unwrap();
