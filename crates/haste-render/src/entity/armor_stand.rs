@@ -242,3 +242,6 @@ fn build(slot: EquipmentSlot, small: bool) -> Arc<CubeModel> {
         },
     })
 }
+
+#[cfg(test)]
+mod tests;

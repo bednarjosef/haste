@@ -53,6 +53,7 @@ pub(crate) use item_display::{
 };
 pub(crate) use model_parts::{
     aabb_in_frustum, emit_part, emit_part_tinted, model_extents, model_top, part_matrix,
+    pose_without_hidden,
 };
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
