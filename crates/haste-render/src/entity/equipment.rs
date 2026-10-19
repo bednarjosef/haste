@@ -42,7 +42,14 @@ impl EntityRenderer {
             let Some(arm_m) = part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, arm) else {
                 continue;
             };
-            let item_root = root * arm_m * pixel_units() * held_item_layer_matrix(left);
+            // A small stand's arm carries the small layer's 1/2 part scale (vanilla's pose
+            // scale on the arm's frame), so its held item scales with it.
+            let arm_scale = if armor_stand::small_of(&e.model) == Some(true) {
+                Mat4::from_scale(Vec3::splat(0.5))
+            } else {
+                Mat4::IDENTITY
+            };
+            let item_root = root * arm_m * arm_scale * pixel_units() * held_item_layer_matrix(left);
             let display = if left {
                 ItemDisplay::ThirdPersonLeft
             } else {
@@ -95,17 +102,36 @@ impl EntityRenderer {
                     .map(argb_linear)
                     .unwrap_or([1.0; 3]);
                 let rect = self.texture_rect(&layer.texture, assets);
-                emit_part_tinted(
-                    &mut out,
-                    &model,
-                    &model.root,
-                    &armor_pose,
-                    root,
-                    rect,
-                    light,
-                    e.hurt,
-                    tint,
-                );
+                // A small stand's armour goes through the small layer's per-part scale (the
+                // armour model is authored with big cubes and small pivots, like the body).
+                match stand_small {
+                    Some(_) => {
+                        for child in &model.root.children {
+                            emit_part_tinted(
+                                &mut out,
+                                &model,
+                                child,
+                                &armor_pose,
+                                root * armor_stand::small_part_scale(child),
+                                rect,
+                                light,
+                                e.hurt,
+                                tint,
+                            );
+                        }
+                    }
+                    None => emit_part_tinted(
+                        &mut out,
+                        &model,
+                        &model.root,
+                        &armor_pose,
+                        root,
+                        rect,
+                        light,
+                        e.hurt,
+                        tint,
+                    ),
+                }
             }
             // Wings (`WingsLayer`): an elytra on the chest draws the WINGS layers on the elytra
             // model, pushed 0.125 blocks back (the wings' flap animation is not modelled yet).
@@ -144,7 +170,14 @@ impl EntityRenderer {
                 if let Some(head_m) =
                     part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, parts::HEAD)
                 {
-                    let head_root = root * head_m * pixel_units() * custom_head_layer_matrix();
+                    // A small stand's head carries the small layer's 3/4 part scale.
+                    let head_scale = if armor_stand::small_of(&e.model) == Some(true) {
+                        Mat4::from_scale(Vec3::splat(0.75))
+                    } else {
+                        Mat4::IDENTITY
+                    };
+                    let head_root =
+                        root * head_m * head_scale * pixel_units() * custom_head_layer_matrix();
                     let mut out = std::mem::take(&mut self.vertices);
                     self.emit_item(
                         &mut out,

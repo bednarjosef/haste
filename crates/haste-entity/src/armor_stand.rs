@@ -6,7 +6,9 @@
 //! body layer through `HumanoidModel.BABY_TRANSFORMER`) are built here once and shared as
 //! `Arc`s. Parts are authored with vanilla `PartPose` pivots (the literals match the vanilla
 //! source); the root children are then shifted into Haste model space (`crate::models`: the
-//! ground at y = 0 instead of vanilla's y = 24, y still growing downward).
+//! ground at y = 0 instead of vanilla's y = 24, y still growing downward). The small layer
+//! transforms only the pivots; its per-part scale (heads 3/4, the rest 1/2) is the renderer's
+//! to apply at emit time, about each pivot, so the cubes keep vanilla's UV layout.
 //!
 //! The pose (head/body/arms/legs rotations in degrees, the small/show-arms/no-base-plate
 //! flags) is synced entity data (`ArmorStand.DATA_CLIENT_FLAGS` at index 15, the six
@@ -156,9 +158,10 @@ fn grounded(mut p: ModelPart) -> ModelPart {
 
 /// One root child of the small layer: the pivot through `PartPose.translated(0, lift, 0)
 /// .scaled(s)` around the ground plane (heads translate (0, 16, 0) and scale 3/4, the rest
-/// (0, 24, 0) and 1/2; `HumanoidModel.BABY_TRANSFORMER`), the subtree geometry scaled by `s`
-/// — the model carries no per-part scale, so it is baked in; UVs are untouched, like
-/// vanilla's part scale.
+/// (0, 24, 0) and 1/2; `HumanoidModel.BABY_TRANSFORMER`). The cubes keep their original
+/// sizes and UV layout — vanilla's part scale shrinks the geometry at render time, not the
+/// UVs — so the renderer applies the per-part scale about the pivot when it emits a small
+/// stand (`haste-render`'s `armor_stand::small_part_scale`).
 fn small_layer_part(mut p: ModelPart) -> ModelPart {
     let (s, lift) = if p.id == parts::HEAD {
         (0.75, 16.0)
@@ -170,21 +173,7 @@ fn small_layer_part(mut p: ModelPart) -> ModelPart {
         (p.pivot.y + GROUND_Y + lift) * s - GROUND_Y,
         p.pivot.z * s,
     );
-    scale_subtree(&mut p, s);
     p
-}
-
-/// Scales a part's cubes and its children's pivots and cubes by `s` around the part's pivot.
-fn scale_subtree(p: &mut ModelPart, s: f32) {
-    for c in &mut p.cubes {
-        c.origin *= s;
-        c.size *= s;
-        c.inflate *= s;
-    }
-    for child in &mut p.children {
-        child.pivot *= s;
-        scale_subtree(child, s);
-    }
 }
 
 /// A model from root children already in Haste space.

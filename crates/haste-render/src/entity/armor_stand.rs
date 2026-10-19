@@ -4,7 +4,8 @@
 //! pivot y = 1, leg pivots y = 11 — with the outer 1.0 / inner 0.5 deformations and the
 //! legs' extra -0.1. The small set is the same through `HumanoidModel.BABY_TRANSFORMER`
 //! (heads translate (0, 16, 0) and scale 3/4, the rest (0, 24, 0) and 1/2, around the ground
-//! plane y = 24; the model carries no per-part scale, so it is baked into the geometry).
+//! plane y = 24), applied to the pivots only: the cubes keep vanilla's sizes and UV layout,
+//! and `small_part_scale` applies the per-part scale at emit time.
 //!
 //! Like the humanoid armour (`humanoid.rs`), these are renderer-side: vanilla's
 //! `HumanoidArmorLayer` owns its model set, separate from the body model the store picked.
@@ -12,6 +13,7 @@
 //! the small layer halves the base plate's pivot height.
 use std::sync::{Arc, OnceLock};
 
+use glam::Mat4;
 use haste_core::math::Vec3;
 use haste_core::model::{Cube, CubeModel, EquipmentSlot, ModelPart};
 use haste_core::parts;
@@ -58,8 +60,10 @@ fn grounded(mut p: ModelPart) -> ModelPart {
 }
 
 /// One root child of the small layer: the pivot through `PartPose.translated(0, lift, 0)
-/// .scaled(s)` around the ground plane, the subtree geometry scaled by `s` (UVs untouched,
-/// like vanilla's part scale).
+/// .scaled(s)` around the ground plane (heads translate (0, 16, 0) and scale 3/4, the rest
+/// (0, 24, 0) and 1/2). The cubes keep their original sizes and UV layout — vanilla's part
+/// scale shrinks the geometry at render time, not the UVs — so [`small_part_scale`] applies
+/// the scale about the pivot when the small model is emitted.
 fn small_layer_part(mut p: ModelPart) -> ModelPart {
     let (s, lift) = if p.id == parts::HEAD {
         (0.75, 16.0)
@@ -71,20 +75,46 @@ fn small_layer_part(mut p: ModelPart) -> ModelPart {
         (p.pivot.y + GROUND_Y + lift) * s - GROUND_Y,
         p.pivot.z * s,
     );
-    scale_subtree(&mut p, s);
     p
 }
 
-/// Scales a part's cubes and its children's pivots and cubes by `s` around the part's pivot.
-fn scale_subtree(p: &mut ModelPart, s: f32) {
-    for c in &mut p.cubes {
-        c.origin *= s;
-        c.size *= s;
-        c.inflate *= s;
-    }
-    for child in &mut p.children {
-        child.pivot *= s;
-        scale_subtree(child, s);
+/// The small layer's part scale for one root child (vanilla's part scale after the baby
+/// transform: heads 3/4, the rest 1/2), as a matrix about the child's — already
+/// baby-transformed — pivot. Composed between the entity root and the part, it scales the
+/// part's cubes about their pivot exactly like vanilla's `ModelPart` pose scale (a uniform
+/// scale commutes with the part's rotations), while the model's cubes keep vanilla's sizes
+/// and therefore vanilla's UV layout.
+pub(super) fn small_part_scale(part: &ModelPart) -> Mat4 {
+    let s = if part.id == parts::HEAD { 0.75 } else { 0.5 };
+    Mat4::from_translation(part.pivot)
+        * Mat4::from_scale(Vec3::splat(s))
+        * Mat4::from_translation(-part.pivot)
+}
+
+/// Emits a small stand's body model: the root children each through their part scale (see
+/// [`small_part_scale`]), so the model authored with big cubes and small pivots renders at
+/// the small layer's geometry with vanilla's UV layout.
+pub(super) fn emit_small_body(
+    out: &mut Vec<super::EntityVertex>,
+    model: &CubeModel,
+    pose: &haste_core::model::PoseOverrides,
+    root: Mat4,
+    rect: [u32; 4],
+    light: (u8, u8),
+    hurt: f32,
+) {
+    for child in &model.root.children {
+        super::model_parts::emit_part_tinted(
+            out,
+            model,
+            child,
+            pose,
+            root * small_part_scale(child),
+            rect,
+            light,
+            hurt,
+            [1.0; 3],
+        );
     }
 }
 

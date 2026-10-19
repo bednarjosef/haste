@@ -93,14 +93,15 @@ fn small_body_model_is_the_baby_transform() {
         pivot_of(&small, "body"),
         haste_core::Vec3::new(0.0, -12.0, 0.0)
     );
-    // Cubes scale by the same factor (the head 2x7x2 becomes 1.5x5.25x1.5).
+    // Cubes keep their original sizes and UV layout: vanilla's part scale shrinks the
+    // geometry at render time (the renderer applies it about the pivot), not the UVs.
     assert_eq!(
         find_part(&small.root, "head").unwrap().cubes[0].size,
-        haste_core::Vec3::new(1.5, 5.25, 1.5)
+        haste_core::Vec3::new(2.0, 7.0, 2.0)
     );
     assert_eq!(
         find_part(&small.root, "shoulder_stick").unwrap().cubes[0].size,
-        haste_core::Vec3::new(4.0, 1.0, 1.0)
+        haste_core::Vec3::new(8.0, 2.0, 2.0)
     );
     // Texture and layout are shared.
     assert_eq!(small.texture, big.texture);

@@ -88,13 +88,14 @@ fn small_armour_is_the_baby_transform() {
         part_of(&small_legs, "right_leg").pivot,
         Vec3::new(-0.95, -6.5, 0.0)
     );
-    // Cubes scale too, UVs do not.
+    // Cubes keep their original sizes and UV layout — the per-part scale
+    // (`small_part_scale`) applies at emit time, about the pivot.
     assert_eq!(
         part_of(&small, "body").cubes[0].size,
-        Vec3::new(4.0, 6.0, 2.0)
+        Vec3::new(8.0, 12.0, 4.0)
     );
     assert_eq!(part_of(&small, "body").cubes[0].uv, [16, 16]);
-    // The hat follows the head's 3/4.
+    // The hat follows the head's pivot.
     let small_head = armor_for(EquipmentSlot::Head, true);
     assert_eq!(
         part_of(&small_head, "head").pivot,
@@ -102,7 +103,26 @@ fn small_armour_is_the_baby_transform() {
     );
     assert_eq!(
         part_of(&small_head, "hat").cubes[0].size,
-        Vec3::new(6.0, 6.0, 6.0)
+        Vec3::new(8.0, 8.0, 8.0)
+    );
+    // The part scale: heads 3/4 about their pivot, the rest 1/2 (a uniform scale commutes
+    // with the part's rotations, so the emit composes it before the part matrix).
+    let scale_about = |p: &haste_core::model::ModelPart, s: f32| {
+        glam::Mat4::from_translation(p.pivot)
+            * glam::Mat4::from_scale(glam::Vec3::splat(s))
+            * glam::Mat4::from_translation(-p.pivot)
+    };
+    let head = part_of(&small_head, "head");
+    assert_eq!(
+        small_part_scale(head),
+        scale_about(head, 0.75),
+        "the helmet scales 3/4 about its pivot"
+    );
+    let arm = part_of(&small, "right_arm");
+    assert_eq!(
+        small_part_scale(arm),
+        scale_about(arm, 0.5),
+        "the body parts scale 1/2 about their pivot"
     );
 }
 
