@@ -3,6 +3,7 @@ package haste.gui;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import haste.rt.GuiBatch;
 import haste.rt.GuiBlend;
+import haste.rt.Native;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -349,8 +350,9 @@ public final class GfxImpl {
     public static void fakeItem(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) { item(g, s, x, y, seed); }
 
     /**
-     * Stack decorations: the count in the bottom-right corner (white, shadow) and the durability bar (13 px wide,
-     * 2 px high, black under the item's bar colour), as they appear in the game. Cooldown overlays: not yet.
+     * Stack decorations: the count in the bottom-right corner (white, shadow), the durability bar (13 px wide,
+     * 2 px high, black under the item's bar colour) and the cooldown overlay (the white sweep from the top),
+     * as they appear in the game.
      */
     public static void itemDecorations(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y) { itemDecorations(g, f, s, x, y, null); }
     public static void itemDecorations(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y, String text) {
@@ -361,10 +363,33 @@ public final class GfxImpl {
             GuiBatch.op(GuiBatch.FILL, bx, by, bx + 13, by + 2, 0xFF000000);
             GuiBatch.op(GuiBatch.FILL, bx, by, bx + s.getBarWidth(), by + 1, 0xFF000000 | s.getBarColor());
         }
+        // Vanilla GuiGraphicsExtractor.itemCooldown: the percent of the stack's cooldown group at
+        // the frame's partial tick, the white half-transparent sweep down from the top of the
+        // 16x16 icon (floor/ceil of the same split, so top + height stays within the icon).
+        float cooldown = Native.itemCooldown(cooldownGroup(s), Delta.partial);
+        if (cooldown > 0.0F) {
+            int top = y + net.minecraft.util.Mth.floor(16.0F * (1.0F - cooldown));
+            int bottom = top + net.minecraft.util.Mth.ceil(16.0F * cooldown);
+            GuiBatch.op(GuiBatch.FILL, x, top, x + 16, bottom, Integer.MAX_VALUE);
+        }
         int count = s.getCount();
         String label = text != null ? text : (count != 1 ? Integer.toString(count) : null);
         if (label == null) return;
         Text.emit(label, x + 19 - 2 - FontImpl.width(f, label), y + 6 + 3, -1, true);
+    }
+
+    /**
+     * The stack's cooldown group (vanilla {@code ItemCooldowns.getCooldownGroup}): the
+     * {@code minecraft:use_cooldown} component's {@code cooldown_group}, else the item's registry
+     * id, as the string the native resolves the group by.
+     */
+    static String cooldownGroup(ItemStack s) {
+        net.minecraft.world.item.component.UseCooldown useCooldown =
+            s.get(net.minecraft.core.component.DataComponents.USE_COOLDOWN);
+        if (useCooldown != null && useCooldown.cooldownGroup().isPresent()) {
+            return useCooldown.cooldownGroup().get().toString();
+        }
+        return net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(s.getItem()).toString();
     }
 
     // ---- tooltips (deferred to the end of the frame) ----

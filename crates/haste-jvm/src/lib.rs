@@ -16,6 +16,10 @@
 mod error;
 mod gui;
 mod host;
+// Declared here with `#[path]` (not in `proxies.rs`, which is at its recorded size cap): the
+// item cooldowns mirror belongs with the proxies' player state.
+#[path = "proxies/item_cooldowns.rs"]
+pub mod item_cooldowns;
 pub mod keys;
 mod launch_options;
 mod loader;
@@ -25,6 +29,7 @@ mod proxies;
 pub use error::JvmError;
 pub use gui::{GuiPipeline, ScreenKind};
 pub use host::{JvmConfig, JvmHost, StartTimings};
+pub use item_cooldowns::{set_item_cooldowns, ItemCooldownHud, ItemCooldownsHud};
 pub use loader::{ClassLog, ClassSource, ALLOW_CLASSES, ALLOW_PACKAGES, DENY, WARM_CLASSES};
 pub use proxies::{
     decode_stack, empty_stack, encode_stack, AttackStrengthHud, ChatMessage, CreateWorldRequest,

@@ -142,6 +142,7 @@ fn tick_once(
     // spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
     let first_person = view::tick_hand(driver, shared, tick_moved);
     hud::publish_attack_indicator(driver, shared);
+    hud::publish_item_cooldowns(driver);
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);

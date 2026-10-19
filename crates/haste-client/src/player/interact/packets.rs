@@ -1,7 +1,7 @@
 //! Server packets that touch the interaction state (player workstream): the inventory sync
 //! (`ContainerSetContent`/`ContainerSetSlot` for the player inventory menu,
-//! `SetPlayerInventory`), the mob-effect add/remove, and `block_changed_ack` that ends our
-//! block predictions.
+//! `SetPlayerInventory`), the mob-effect add/remove, the item cooldowns (`cooldown`), and
+//! `block_changed_ack` that ends our block predictions.
 
 use haste_core::entity::ItemStackData;
 use haste_protocol::ClientboundPlay;
@@ -62,6 +62,15 @@ impl LocalPlayer {
             }
             P::RemoveMobEffect(e) if e.entity_id == me => {
                 self.int.effects.remove(&e.effect);
+            }
+            P::Cooldown(c) => {
+                // Vanilla `ClientPacketListener.handleItemCooldown`: a zero duration clears
+                // the group's cooldown, anything else (re)starts it.
+                if c.ticks == 0 {
+                    self.int.cooldowns.remove(&c.group);
+                } else {
+                    self.int.cooldowns.add(c.group.clone(), c.ticks);
+                }
             }
             _ => return false,
         }
