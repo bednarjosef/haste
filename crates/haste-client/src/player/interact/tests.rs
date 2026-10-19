@@ -16,6 +16,8 @@ use haste_protocol::ServerboundPlay;
 
 mod click_results;
 mod drop;
+mod placement;
+mod prediction;
 mod use_item;
 
 const ME: EntityId = EntityId(7);
@@ -306,7 +308,7 @@ impl Rig {
             ..Default::default()
         };
         self.p.tick_interact(&input, &self.w, &env, None, &mut out);
-        for (pos, s) in self.p.take_world_edits().collect::<Vec<_>>() {
+        for (pos, s) in self.p.take_world_edits() {
             self.w.set(pos.x, pos.y, pos.z, s);
         }
         // Only the interaction packets.
@@ -502,7 +504,7 @@ fn creative_single_tick_click_destroys_even_while_destroy_delay_counts_down() {
     );
     // Apply the ack's world edit now instead of on the next tick, so the new stone below is
     // not overwritten by it.
-    for (p, s) in r.p.take_world_edits().collect::<Vec<_>>() {
+    for (p, s) in r.p.take_world_edits() {
         r.w.set(p.x, p.y, p.z, s);
     }
     r.w.set(0, -1, 0, STONE);
@@ -649,43 +651,8 @@ fn a_miss_delays_the_start_of_a_break_by_ten_ticks() {
     panic!("never started");
 }
 
-#[test]
-fn server_updates_wait_for_the_ack() {
-    let mut r = Rig::new(GameMode::Creative);
-    r.tick(ATTACK);
-    let pos = BlockPos::new(0, -1, 0);
-    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
-    // A stale server update for the block arrives before the ack: held back.
-    assert!(r.p.defer_block_update(pos, STONE));
-    assert!(r.p.take_world_edits().next().is_none());
-    let mut out = Vec::new();
-    r.p.handle(
-        &ClientboundPlay::BlockChangedAck(
-            haste_protocol::packets::play::clientbound::BlockChangedAck { sequence: 1 },
-        ),
-        &mut out,
-    );
-    assert_eq!(r.p.take_world_edits().collect::<Vec<_>>(), [(pos, STONE)]);
-    // After the ack, updates go straight to the world.
-    assert!(!r.p.defer_block_update(pos, BlockStateId::AIR));
-}
-
-#[test]
-fn a_silently_rejected_break_is_reverted_on_the_ack() {
-    let mut r = Rig::new(GameMode::Creative);
-    r.tick(ATTACK);
-    let pos = BlockPos::new(0, -1, 0);
-    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
-    let mut out = Vec::new();
-    r.p.handle(
-        &ClientboundPlay::BlockChangedAck(
-            haste_protocol::packets::play::clientbound::BlockChangedAck { sequence: 1 },
-        ),
-        &mut out,
-    );
-    // No block update came: the server kept its stone.
-    assert_eq!(r.p.take_world_edits().collect::<Vec<_>>(), [(pos, STONE)]);
-}
+// The prediction tests (break and place, the ack's restore) live in `tests/prediction.rs`
+// since the ack's block restore moved to the net driver (`ClientLevel.syncBlockState`).
 
 #[test]
 fn use_on_block_with_cursor_and_repeat_delay() {

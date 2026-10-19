@@ -25,6 +25,9 @@ use crate::ui::{HudWarmup, Ui};
 /// multiplayer list, whose JVM and UI stay for the whole run); without one the HUD's JVM starts
 /// on its own thread in parallel with joining.
 pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) {
+    // The settle diet (see `settle_diet.rs`): returns the join flood's freed memory to
+    // the OS once the world has been quiet, for this session's lifetime.
+    super::settle_diet::start(Arc::clone(&shared));
     let tick = Duration::from_secs_f64(TICK_SECONDS);
     let mut next = Instant::now();
     let mut gone = Vec::new();
