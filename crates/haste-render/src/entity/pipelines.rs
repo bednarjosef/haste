@@ -134,12 +134,16 @@ impl EntityRenderer {
                 depth_write_enabled: Some(false),
                 // Vanilla's `DepthStencilState(GREATER_THAN_OR_EQUAL, false)` (reverse-Z) is
                 // LessEqual against Haste's depth cleared to 1. The shadow quad is coplanar
-                // with the block top, so a small bias towards the camera replaces vanilla's
-                // `VIEW_OFFSET_Z_LAYERING` polygon offset.
+                // with the block top, and vanilla offsets it a hair towards the camera
+                // (`VIEW_OFFSET_Z_LAYERING`); the terrain's u16 position quantization
+                // (24 blocks over 65536 steps) can land the top up to half a 0.37 mm step
+                // nearer than the shadow's exact plane, so the bias must cover ~6 depth24
+                // units of that quantization noise. -16 does with margin and moves the
+                // shadow at most half a centimetre at the pass's 16-block range.
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: Default::default(),
                 bias: wgpu::DepthBiasState {
-                    constant: -1,
+                    constant: -16,
                     slope_scale: 0.0,
                     clamp: 0.0,
                 },

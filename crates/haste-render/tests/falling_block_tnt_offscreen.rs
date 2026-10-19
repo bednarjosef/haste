@@ -180,9 +180,11 @@ fn falling_blocks_and_tnt_offscreen() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let camera = Camera {
-        pos: glam::DVec3::new(1.0, 2.4, -4.5),
-        yaw: 0.0,
-        pitch: 8.0,
+        // The live comparison camera: looking north (yaw 180) down 15 degrees, like the
+        // falling-ref.png shot, from 4.5 blocks in front of the entities.
+        pos: glam::DVec3::new(1.0, 2.62, 4.5),
+        yaw: 180.0,
+        pitch: 15.0,
         fov_deg: 70.0,
         hand_fov_deg: 70.0,
         roll_deg: 0.0,
