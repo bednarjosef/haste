@@ -147,6 +147,7 @@ pub(crate) fn print_memory(session: &Session, renderer: &Renderer) {
             mib(code),
         );
     }
+    memory::dump_smaps();
     memory::print_top_anon_mappings();
 }
 

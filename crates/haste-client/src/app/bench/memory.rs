@@ -85,6 +85,17 @@ pub(super) fn mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
+/// Debug: dump the full `/proc/self/smaps` to `target/bench-memory-smaps.txt` (relative to
+/// the bench's working directory, the repo root) so an offline pass can attribute the big
+/// anonymous mappings the summary lists (address ranges, neighbours, `VmFlags`). Fails
+/// silently when the path is not writable.
+pub(super) fn dump_smaps() {
+    let Ok(text) = std::fs::read_to_string("/proc/self/smaps") else {
+        return;
+    };
+    let _ = std::fs::write("target/bench-memory-smaps.txt", text);
+}
+
 /// Debug: the anonymous writable mappings from `/proc/self/smaps`, grouped by size, with
 /// their count and summed resident pages, so a runaway pool of mapped buffers shows up as
 /// a heap of same-sized mappings.
