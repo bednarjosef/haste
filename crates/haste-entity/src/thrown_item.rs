@@ -70,6 +70,19 @@ pub fn variant_for_kind(kind: RegistryIndex) -> Option<ThrownItem> {
     crate::registry::entity_type_name(kind).and_then(variant_for_name)
 }
 
+/// Whether an entity type trails smoke every tick
+/// (`AbstractHurtingProjectile.createParticleTrail`/`getTrailParticle`: SMOKE for the
+/// fireball family and the wither skull; the dragon fireball trails dragon breath and the
+/// wind charges nothing).
+pub fn has_smoke_trail(kind: RegistryIndex) -> bool {
+    matches!(
+        crate::registry::entity_type_name(kind),
+        Some("minecraft:fireball")
+            | Some("minecraft:small_fireball")
+            | Some("minecraft:wither_skull")
+    )
+}
+
 /// The render state `ThrownItemRenderer.extractRenderState` collects: the item to draw
 /// (`ItemSupplier.getItem`, the synched stack or the type's default), with the renderer's
 /// scale and full-bright. `None` when no item resolves (an unknown default item draws

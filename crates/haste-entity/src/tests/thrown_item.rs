@@ -139,3 +139,55 @@ fn store_builds_the_thrown_item_instance() {
     // The position is the entity's own, not a hanging centre.
     assert_eq!(out[0].pos, DVec3::new(1.0, 64.0, 1.0));
 }
+
+/// The smoke trail (`AbstractHurtingProjectile.getTrailParticle`): SMOKE for the two
+/// fireballs and the wither skull; nothing for the dragon fireball (dragon breath), the
+/// wind charges or anything that is not a hurting projectile.
+#[test]
+#[ignore = "needs cache/datagen (registries.json; HASTE_CACHE overrides)"]
+fn smoke_trail_follows_the_hurting_projectiles() {
+    for name in [
+        "minecraft:fireball",
+        "minecraft:small_fireball",
+        "minecraft:wither_skull",
+    ] {
+        assert!(
+            thrown_item::has_smoke_trail(kind_of(name)),
+            "{name} trails smoke"
+        );
+    }
+    for name in [
+        "minecraft:dragon_fireball",
+        "minecraft:wind_charge",
+        "minecraft:breeze_wind_charge",
+        "minecraft:snowball",
+        "minecraft:zombie",
+    ] {
+        assert!(
+            !thrown_item::has_smoke_trail(kind_of(name)),
+            "{name} trails nothing"
+        );
+    }
+}
+
+/// The store hands out exactly the trailing entities' positions
+/// (`AbstractHurtingProjectile.createParticleTrail`'s per-tick spawn).
+#[test]
+#[ignore = "needs cache/datagen (registries.json; HASTE_CACHE overrides)"]
+fn store_lists_only_trailing_entities_positions() {
+    let mut s = super::store();
+    let mut sp = super::spawn(1, DVec3::new(1.0, 64.0, 1.0));
+    sp.kind = kind_of("minecraft:small_fireball");
+    s.spawn(&sp);
+    let mut sp = super::spawn(2, DVec3::new(2.0, 64.0, 1.0));
+    sp.kind = kind_of("minecraft:snowball");
+    s.spawn(&sp);
+    let mut sp = super::spawn(3, DVec3::new(3.0, 64.0, 1.0));
+    sp.kind = kind_of("minecraft:fireball");
+    s.spawn(&sp);
+    let pos: Vec<DVec3> = s.smoke_trail_positions().collect();
+    assert_eq!(
+        pos,
+        [DVec3::new(1.0, 64.0, 1.0), DVec3::new(3.0, 64.0, 1.0)]
+    );
+}

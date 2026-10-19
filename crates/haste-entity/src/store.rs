@@ -777,6 +777,17 @@ impl EntityStore {
         self.slot(id).and_then(|i| self.slots[i as usize].as_ref())
     }
 
+    /// The current positions of the entities that trail smoke
+    /// (`AbstractHurtingProjectile.createParticleTrail`), for the client's per-tick particle
+    /// spawn — no allocation, one position per trailing entity.
+    pub fn smoke_trail_positions(&self) -> impl Iterator<Item = DVec3> + '_ {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| crate::thrown_item::has_smoke_trail(slot.kind))
+            .map(|slot| slot.pos)
+    }
+
     pub fn len(&self) -> usize {
         self.by_id.len()
     }

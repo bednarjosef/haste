@@ -173,15 +173,20 @@ fn item_of(data: &haste_data::GameData, name: &str) -> RegistryIndex {
 fn thrown_items_offscreen() {
     let (mut renderer, world, data) = scene();
     // The four projectiles of the brief (NoGravity, hovering): a snowball, an egg, an ender
-    // pearl and a splash potion — scale 1, not full-bright — plus a large fireball at its 3x
-    // scale and a dragon fireball behind them.
+    // pearl and a splash potion — scale 1, not full-bright — plus a burning small fireball
+    // at its 0.75 scale (`AbstractHurtingProjectile` burns and smokes) and a dragon fireball
+    // behind them.
     let dragon = projectile(6, 0.0, RegistryIndex(0), 1.0, false);
+    let mut small_fireball = projectile(5, -3.75, item_of(&data, "fire_charge"), 0.75, true);
+    small_fireball.display_fire = true;
+    small_fireball.width = 0.3125;
+    small_fireball.height = 0.3125;
     let mut entities = vec![
         projectile(1, -2.25, item_of(&data, "snowball"), 1.0, false),
         projectile(2, -0.75, item_of(&data, "egg"), 1.0, false),
         projectile(3, 0.75, item_of(&data, "ender_pearl"), 1.0, false),
         projectile(4, 2.25, item_of(&data, "splash_potion"), 1.0, false),
-        projectile(5, -0.75, item_of(&data, "fire_charge"), 3.0, true),
+        small_fireball,
         EntityInstance {
             decoration: Some(Decoration::DragonFireball),
             pos: DVec3::new(0.75, 1.3, 3.0),
@@ -189,8 +194,8 @@ fn thrown_items_offscreen() {
         },
     ];
     let gui = gui();
-    let frame = frame(&mut entities, &world, &gui);
-    renderer.render(&frame).unwrap();
+    let item_frame = frame(&mut entities, &world, &gui);
+    renderer.render(&item_frame).unwrap();
     let img = renderer.read_back().unwrap();
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
@@ -199,7 +204,7 @@ fn thrown_items_offscreen() {
     // Each sprite covers part of the floor behind it; an empty scene leaves the floor.
     let empty_frame = FrameInput {
         entities: &[],
-        ..frame
+        ..item_frame
     };
     renderer.render(&empty_frame).unwrap();
     let empty = renderer.read_back().unwrap();
@@ -224,6 +229,21 @@ fn thrown_items_offscreen() {
     // The camera-facing sprites sit in one row: the changed span is wide, not tall.
     let (w, h) = (bounds.1 .0 - bounds.0 .0, bounds.1 .1 - bounds.0 .1);
     assert!(w > 3 * h, "a row of camera-facing sprites, {w}x{h}");
+
+    // The burning small fireball (`EntityRenderDispatcher`'s `FlameFeatureRenderer` after
+    // `ThrownItemRenderer.submit`): with `display_fire` the flames add pixels around the
+    // sprite that the same scene without them does not have.
+    let mut calm = entities.clone();
+    calm[4].display_fire = false; // the small fireball, entity id 5
+    let calm_frame = frame(&mut calm, &world, &gui);
+    renderer.render(&calm_frame).unwrap();
+    let calm = renderer.read_back().unwrap();
+    let fire = img
+        .enumerate_pixels()
+        .filter(|(x, y, p)| p.0 != calm.get_pixel(*x, *y).0)
+        .count();
+    eprintln!("fire overlay pixels: {fire}");
+    assert!(fire > 100, "the small fireball burns ({fire} pixels)");
 }
 
 /// The per-frame entity cost of ~50 thrown items (the brief's measurement): this branch's

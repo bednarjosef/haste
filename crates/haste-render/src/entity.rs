@@ -25,6 +25,8 @@ mod dragon_fireball;
 mod equipment;
 mod experience_orb;
 mod flame;
+#[cfg(test)]
+mod flame_tests;
 mod item;
 mod item_frame;
 mod minecart;
@@ -433,6 +435,10 @@ impl EntityRenderer {
             if let Some(item) = &e.item {
                 let start = self.vertices.len();
                 self.emit_dropped_item(e, item, camera, light, assets);
+                // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
+                if e.display_fire {
+                    self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
+                }
                 if self.vertices.len() > start {
                     self.drawn += 1;
                 }
@@ -464,6 +470,12 @@ impl EntityRenderer {
                         orientation,
                         assets,
                     ),
+                }
+                // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer —
+                // a burning small fireball carries its `displayFireAnimation` flames on top
+                // of the thrown-item sprite.
+                if e.display_fire {
+                    self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;
