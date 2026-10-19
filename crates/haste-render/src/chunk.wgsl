@@ -171,25 +171,25 @@ fn finish_vertex(
 
 // ---------------------------------------------------------------------------
 // Quad pulling (`--terrain-format quad`): the vertex shader reads one compact
-// record per quad (or per vertex for the shapes a record cannot express) from
-// the arena's storage buffers (group 3, bound once per arena) and expands the
-// corners itself from `vertex_index`; there is no index buffer. See
+// record per quad from the arena's storage buffers (group 3, bound once per
+// arena) and expands the corners itself from `vertex_index`; the only index
+// buffer is the static corner pattern shared by every draw. See
 // quad_format.rs for the record layouts.
 
 struct QuadIn {
     // Instance-rate, one per draw: the section origin and the span kind
-    // (0 = rect records, 1 = four-vertex quads, 2 = triangle soups). The
-    // span's record base rides the draw's base_vertex: the static index
-    // pattern (0..3 per quad, or sequential for soups) plus base_vertex
-    // makes vertex_index the record index (quad formats: >> 2).
+    // (0 = rect records, 1 = general records). The span's record base rides
+    // the draw's base_vertex: the static index pattern (0..3 per quad) plus
+    // base_vertex makes vertex_index >> 2 the record and vertex_index & 3
+    // the corner.
     @location(0) origin: vec3<i32>,
     @location(1) kind: u32,
 };
 
-@group(3) @binding(0) var<storage, read> quad_records: array<u32>;
-@group(3) @binding(1) var<storage, read> quad_vertices: array<u32>;
+@group(3) @binding(0) var<storage, read> quad_rects: array<u32>;
+@group(3) @binding(1) var<storage, read> quad_generals: array<u32>;
 
-/// A decoded corner, whichever format it came from.
+/// A decoded corner, whichever record kind it came from.
 struct Decoded {
     local: vec3<f32>,
     sprite_uv: vec2<f32>,
@@ -201,28 +201,55 @@ struct Decoded {
     sprite: u32,
 };
 
-/// One `PackedVertex` (20 bytes, five u32 words) from the vertex arena,
-/// decoded to the same values `vs_main` gets from its vertex attributes.
-fn pull_vertex(index: u32) -> Decoded {
-    let w0 = quad_vertices[index * 5u];
-    let w1 = quad_vertices[index * 5u + 1u];
-    let w2 = quad_vertices[index * 5u + 2u];
-    let w3 = quad_vertices[index * 5u + 3u];
-    let w4 = quad_vertices[index * 5u + 4u];
+/// Position component `i` of corner `c` of a `PackedGeneral`: u16 `3*c + i`,
+/// split across the record's first six words.
+fn general_pos_component(base_word: u32, c: u32, i: u32) -> u32 {
+    let idx = c * 3u + i;
+    let w = quad_generals[base_word + idx / 2u];
+    return select(w & 0xFFFFu, w >> 16u, (idx & 1u) == 1u);
+}
+
+/// One `PackedGeneral` (64 bytes, sixteen u32 words) from the general-record
+/// buffer, decoded to corner `c`. Word layout mirrors quad_format.rs: words
+/// 0..6 are the four corner positions (three u16 each), words 6..10 the
+/// corner UVs (two u16 each — one word per corner), words 10..12 the packed
+/// per-corner light, word 12 the sprite and tint's red/green, word 13 the
+/// tint's blue.
+fn pull_general(base_word: u32, c: u32) -> Decoded {
+    let local = vec3<f32>(
+        f32(general_pos_component(base_word, c, 0u)),
+        f32(general_pos_component(base_word, c, 1u)),
+        f32(general_pos_component(base_word, c, 2u)),
+    ) / 65535.0 * POS_RANGE - POS_BIAS;
+    let uv_word = quad_generals[base_word + 6u + c];
+    let uv = vec2<f32>(f32(uv_word & 0xFFFFu), f32(uv_word >> 16u)) / UV_FIXED_SCALE;
+    let w10 = quad_generals[base_word + 10u];
+    let w11 = quad_generals[base_word + 11u];
+    let w12 = quad_generals[base_word + 12u];
+    let w13 = quad_generals[base_word + 13u];
+    var bits = 0u;
+    if (c == 0u) {
+        bits = w10 & 0x7FFFu;
+    } else if (c == 1u) {
+        bits = w10 >> 15u;
+    } else if (c == 2u) {
+        bits = ((w10 >> 30u) | (w11 << 2u)) & 0x7FFFu;
+    } else {
+        bits = (w11 >> 13u) & 0x7FFFu;
+    }
     return Decoded(
-        vec3<f32>(f32(w0 & 0xFFFFu), f32(w0 >> 16u), f32(w1 & 0xFFFFu))
-            / 65535.0 * POS_RANGE - POS_BIAS,
-        vec2<f32>(f32(w2 & 0xFFFFu), f32(w2 >> 16u)) / UV_FIXED_SCALE,
-        w3 & 0xFFu,
-        w4 >> 24u,
-        (w3 >> 8u) & 7u,
-        (w3 >> 11u) & 7u,
+        local,
+        uv,
+        (bits & 0x3Fu) * 4u,
+        ((bits >> 6u) & 0x3Fu) * 4u,
+        (bits >> 12u) & 7u,
+        (w11 >> 28u) & 7u,
         vec3<f32>(
-            f32((w3 >> 16u) & 0xFFu),
-            f32((w3 >> 24u) & 0xFFu),
-            f32((w4 >> 16u) & 0xFFu),
+            f32((w12 >> 16u) & 0xFFu),
+            f32((w12 >> 24u) & 0xFFu),
+            f32(w13 & 0xFFu),
         ) / 255.0,
-        w4 & 0xFFFFu,
+        w12 & 0xFFFFu,
     );
 }
 
@@ -232,14 +259,14 @@ fn pull_vertex(index: u32) -> Decoded {
 /// ring; the light word pair packs 15 bits per corner plus the shade index at
 /// bit 60.
 fn pull_rect(base_word: u32, c: u32) -> Decoded {
-    let w0 = quad_records[base_word];
-    let w1 = quad_records[base_word + 1u];
-    let w2 = quad_records[base_word + 2u];
-    let w3 = quad_records[base_word + 3u];
-    let w4 = quad_records[base_word + 4u];
-    let w5 = quad_records[base_word + 5u];
-    let w6 = quad_records[base_word + 6u];
-    let w7 = quad_records[base_word + 7u];
+    let w0 = quad_rects[base_word];
+    let w1 = quad_rects[base_word + 1u];
+    let w2 = quad_rects[base_word + 2u];
+    let w3 = quad_rects[base_word + 3u];
+    let w4 = quad_rects[base_word + 4u];
+    let w5 = quad_rects[base_word + 5u];
+    let w6 = quad_rects[base_word + 6u];
+    let w7 = quad_rects[base_word + 7u];
     let header = w7 >> 24u;
     let n = header & 3u;
     // The corner ring: grid corner of vertex 0 and the walk direction.
@@ -296,12 +323,9 @@ fn vs_quad(in: QuadIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     if (in.kind == 0u) {
         // Rect records: the index pattern makes vi = 4 * record + corner.
         d = pull_rect((vi >> 2u) * 8u, vi & 3u);
-    } else if (in.kind == 1u) {
-        // Four-vertex quads: vi = 4 * record + corner, record = vi >> 2.
-        d = pull_vertex(vi >> 2u);
     } else {
-        // Triangle soups: sequential indices make vi the record.
-        d = pull_vertex(vi);
+        // General records: vi = 4 * record + corner.
+        d = pull_general((vi >> 2u) * 16u, vi & 3u);
     }
     return finish_vertex(
         d.local, d.sprite_uv, d.sky16, d.block16, d.ao_count, d.shade_index, d.tint, d.sprite,

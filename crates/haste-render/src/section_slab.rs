@@ -18,6 +18,9 @@ pub struct SlabSection {
     /// For `MeshArenas::free` (vertex/index/quad ranges of the whole section).
     pub vertex_count: u32,
     pub base_quad: u32,
+    /// Quad format: the section's general records.
+    pub base_general: u32,
+    pub general_count: u32,
     pub quad_count: u32,
     pub index_start: u32,
     pub index_total: u32,
@@ -150,6 +153,8 @@ impl SectionSlab {
             vertex_count: s.vertex_count,
             base_quad: s.base_quad,
             quad_count: s.quad_count,
+            base_general: s.base_general,
+            general_count: s.general_count,
             index_start: s.index_start,
             index_total: s.index_total,
             layers_len: s.layers.len() as u32,
@@ -177,6 +182,8 @@ impl SectionSlab {
             vertex_count: s.vertex_count,
             base_quad: s.base_quad,
             quad_count: s.quad_count,
+            base_general: s.base_general,
+            general_count: s.general_count,
             index_start: s.index_start,
             index_total: s.index_total,
             layers: Vec::new(),
@@ -256,6 +263,8 @@ mod tests {
             vertex_count: 0,
             base_quad: 0,
             quad_count: 0,
+            base_general: 0,
+            general_count: 0,
             index_start: 0,
             index_total: 0,
             layers: (0..n_layers)

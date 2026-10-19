@@ -222,7 +222,111 @@ fn constant_uv_still_packs() {
 fn span_indexed_draws() {
     // (index count, base vertex): 4 vertices per record before the base.
     assert_eq!(SpanKind::Rect.indexed_draw(7, 3), (18, 28));
-    assert_eq!(SpanKind::Quad.indexed_draw(7, 3), (18, 28));
-    assert_eq!(SpanKind::Tri.indexed_draw(7, 15), (15, 7));
-    assert_eq!(SpanKind::Tri.indexed_draw(0, 0), (0, 0));
+    assert_eq!(SpanKind::General.indexed_draw(7, 3), (18, 28));
+    assert_eq!(SpanKind::Indexed.indexed_draw(0, 15), (15, 0));
+}
+
+/// Decoded corner `i` of a general record.
+fn decode_general(g: &PackedGeneral, i: usize) -> ([f32; 3], [f32; 2], u16, u16, u8) {
+    let dequant = |v: u16| v as f32 / 65535.0 * crate::vertex::POS_RANGE - crate::vertex::POS_BIAS;
+    let pos = [
+        dequant(g.corners[i * 3]),
+        dequant(g.corners[i * 3 + 1]),
+        dequant(g.corners[i * 3 + 2]),
+    ];
+    let uv = [
+        g.uvs[i * 2] as f32 / crate::vertex::TERRAIN_UV_FIXED_SCALE,
+        g.uvs[i * 2 + 1] as f32 / crate::vertex::TERRAIN_UV_FIXED_SCALE,
+    ];
+    let lo = g.light[0] as u64 | (g.light[1] as u64) << 32;
+    let bits = (lo >> (15 * i)) & 0x7FFF;
+    (
+        pos,
+        uv,
+        (bits & 0x3F) as u16 * 4,
+        ((bits >> 6) & 0x3F) as u16 * 4,
+        ((bits >> 12) & 7) as u8,
+    )
+}
+
+/// The general record's corners carry the same values the vertex path packs,
+/// in the AO-flip rotation order.
+#[test]
+fn general_record_corners_match_the_vertex_path() {
+    // A cross plane: no constant axis, so no rect record exists for it.
+    let positions = [
+        [0.146, 0.0, 0.146],
+        [0.854, 0.0, 0.854],
+        [0.854, 1.0, 0.854],
+        [0.146, 1.0, 0.146],
+    ];
+    let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    // ao(0)+ao(2) = 0+0 < ao(1)+ao(3) = 2+2: flipped, order [1, 2, 3, 0].
+    let light = [
+        [128, 1 << 3, 32],
+        [160, 2 | 1 << 3, 48],
+        [128, 1 << 3, 32],
+        [96, 2 | 1 << 3, 16],
+    ];
+    let g = pack_general_quad(&positions, &uvs, &light, 0xAABBCC, 9);
+    assert_eq!(std::mem::size_of::<PackedGeneral>(), 64);
+    let order = [1usize, 2, 3, 0];
+    for (slot, &corner) in order.iter().enumerate() {
+        let (pos, uv, sky, block, ao) = decode_general(&g, slot);
+        let v = crate::vertex::pack_vertex(
+            &crate::vertex::QuadVertex {
+                position: positions[corner],
+                uv: uvs[corner],
+            },
+            9,
+            [light[corner][0], light[corner][1], light[corner][2]],
+            0xAABBCC,
+        );
+        let vp = |k: usize| v.pos[k] as f32 / 65535.0 * 24.0 - 4.0;
+        for (axis, p) in pos.iter().enumerate() {
+            assert_eq!(*p, vp(axis), "corner {slot} axis {axis}");
+        }
+        assert_eq!(
+            uv,
+            [
+                v.uv[0] as f32 / crate::vertex::TERRAIN_UV_FIXED_SCALE,
+                v.uv[1] as f32 / crate::vertex::TERRAIN_UV_FIXED_SCALE,
+            ]
+        );
+        assert_eq!(
+            (sky, block, ao),
+            (
+                light[corner][0] as u16,
+                light[corner][2] as u16,
+                light[corner][1] & 7
+            )
+        );
+    }
+    assert_eq!(g.sprite, 9);
+    assert_eq!(g.tint, [0xAA, 0xBB, 0xCC]);
+}
+
+/// A fan triangle packs with the apex repeated fourth, so the index
+/// pattern's second triangle is degenerate and the first is the fan's.
+#[test]
+fn general_triangle_repeats_the_apex_fourth() {
+    let light = [96, 1 << 3, 16];
+    let g = pack_general_triangle(
+        ([0.0, 1.0, 0.0], [0.0, 0.0]),
+        ([5.0, 1.0, 0.0], [3.0, 0.0]),
+        ([5.0, 1.0, 4.0], [3.0, 2.0]),
+        light,
+        0xFFFFFF,
+        4,
+    );
+    let (p0, uv0, ..) = decode_general(&g, 0);
+    let (p3, uv3, ..) = decode_general(&g, 3);
+    assert_eq!(p0, p3);
+    assert_eq!(uv0, uv3);
+    // Corners 1 and 2 keep their own values (on the position grid).
+    let q = |x: f32| crate::vertex::quantize_coord(x) as f32 / 65535.0 * 24.0 - 4.0;
+    let (p1, ..) = decode_general(&g, 1);
+    let (p2, ..) = decode_general(&g, 2);
+    assert_eq!(p1, [q(5.0), q(1.0), q(0.0)]);
+    assert_eq!(p2, [q(5.0), q(1.0), q(4.0)]);
 }

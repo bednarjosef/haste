@@ -7,19 +7,17 @@
 
 use wgpu::util::DeviceExt;
 
-use crate::quad_format::{QuadInstance, QUADS_PER_SPAN, QUAD_INDEX_PATTERN, TRIS_PER_SPAN};
+use crate::quad_format::{QuadInstance, QUADS_PER_SPAN, QUAD_INDEX_PATTERN};
 
 pub(super) struct QuadPipelines {
-    /// Group 3: the arena's quad records (binding 0) and pulled vertex
-    /// records (binding 1), bound once per arena by the draw loop.
+    /// Group 3: the arena's rect records (binding 0) and general records
+    /// (binding 1), bound once per arena by the draw loop.
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub solid: wgpu::RenderPipeline,
     pub cutout: wgpu::RenderPipeline,
     pub translucent: wgpu::RenderPipeline,
     /// The per-quad corner index pattern, repeated to the span chunk size.
     pub pattern_index: wgpu::Buffer,
-    /// The sequential pattern triangle soups draw through.
-    pub seq_index: wgpu::Buffer,
 }
 
 pub(super) fn make(
@@ -125,18 +123,11 @@ pub(super) fn make(
         contents: bytemuck::cast_slice(&pattern),
         usage: wgpu::BufferUsages::INDEX,
     });
-    let seq: Vec<u32> = (0..TRIS_PER_SPAN * 3).collect();
-    let seq_index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("quad-index-sequential"),
-        contents: bytemuck::cast_slice(&seq),
-        usage: wgpu::BufferUsages::INDEX,
-    });
     QuadPipelines {
         bind_group_layout,
         solid,
         cutout,
         translucent,
         pattern_index,
-        seq_index,
     }
 }

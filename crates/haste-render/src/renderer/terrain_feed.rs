@@ -379,6 +379,8 @@ impl Renderer {
             vertex_count: s.vertex_count,
             base_quad: s.base_quad,
             quad_count: s.quad_count,
+            base_general: s.base_general,
+            general_count: s.general_count,
             index_start: s.index_start,
             index_total: s.index_total,
             layers: Vec::new(),

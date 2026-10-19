@@ -464,13 +464,13 @@ impl Renderer {
             // < Translucent). Section origins come from the instance-rate origin buffer, one
             // instance per draw; buffers are bound once per arena. In the quad format
             // the instance buffer also carries each draw's span kind, the arena's
-            // storage buffers are bound as group 3, and the static index pattern
-            // (quads) or sequential buffer (triangle soups) replaces the arena's
-            // index buffer — the draw's base_vertex carries the record base.
+            // record storage buffers are bound as group 3, and the static index
+            // pattern replaces the arena's index buffer — the draw's base_vertex
+            // carries the record base.
             let quad = crate::quad_format::quad_format_enabled();
-            let mut bound_soup = None;
             if quad {
                 pass.set_vertex_buffer(0, self.quad_instance_buffer.slice(..));
+                pass.set_index_buffer(self.quad_pattern_index.slice(..), wgpu::IndexFormat::Uint32);
             } else {
                 pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
             }
@@ -540,7 +540,7 @@ impl Renderer {
                             pass.set_bind_group(3, bind, &[]);
                         }
                     } else {
-                        pass.set_vertex_buffer(0, a.vertex.slice(..));
+                        pass.set_vertex_buffer(0, a.vertex.as_ref().unwrap().slice(..));
                         pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
                         pass.set_index_buffer(
                             a.index.as_ref().unwrap().slice(..),
@@ -549,37 +549,16 @@ impl Renderer {
                     }
                     bound_arena = d.arena;
                 }
-                // The quad format's index buffer: the static pattern for quad
-                // spans, the sequential buffer for triangle soups.
                 let (quad_count, quad_base) = if quad {
                     d.kind.indexed_draw(d.first_index, d.index_count)
                 } else {
                     (0, 0)
                 };
-                if quad {
-                    let soup = matches!(d.kind, crate::quad_format::SpanKind::Tri);
-                    if bound_soup != Some(soup) {
-                        let buf = if soup {
-                            &self.quad_seq_index
-                        } else {
-                            &self.quad_pattern_index
-                        };
-                        pass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
-                        bound_soup = Some(soup);
-                    }
-                }
                 if self.gpu.multi_draw {
-                    // One call for the run of draws sharing this layer, arena
-                    // and (quad format) index buffer.
+                    // One call for the run of draws sharing this layer and arena.
                     let end = draws[i..]
                         .iter()
-                        .position(|e| {
-                            e.layer != d.layer
-                                || e.arena != d.arena
-                                || (quad
-                                    && matches!(e.kind, crate::quad_format::SpanKind::Tri)
-                                        != matches!(d.kind, crate::quad_format::SpanKind::Tri))
-                        })
+                        .position(|e| e.layer != d.layer || e.arena != d.arena)
                         .map_or(draws.len(), |n| i + n);
                     let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>();
                     pass.multi_draw_indexed_indirect(
