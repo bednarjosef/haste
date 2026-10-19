@@ -8,6 +8,30 @@ use haste_core::view::{BlockView, CollisionShapes};
 use super::{Camera, FrameInput, LightmapFrame, Renderer, SpinWarp};
 
 impl Renderer {
+    /// Assembles the frame's `FrameStats` (the tail of `render`): the render pass's
+    /// outputs, the mesh pipeline's uploads, and the mesh gate's pop-in count.
+    pub(super) fn frame_stats(
+        &self,
+        started: std::time::Instant,
+        drawn: u32,
+        sections_total: u32,
+        indices_drawn: u32,
+        draw_calls: u32,
+    ) -> super::FrameStats {
+        super::FrameStats {
+            frame_ms: started.elapsed().as_secs_f32() * 1000.0,
+            chunk_sections_drawn: drawn,
+            chunk_sections_total: sections_total,
+            meshes_pending: self.meshes_pending() as u32,
+            uploads: self.last_uploads.0,
+            upload_bytes: self.last_uploads.1,
+            indices_drawn,
+            draw_calls,
+            block_entities_drawn: self.block_entities_drawn,
+            visible_unmeshed: self.premesh.visible_unmeshed,
+        }
+    }
+
     /// The game tick animated atlas textures (water, lava, fire, portals) show;
     /// the client calls this once per game tick (20 Hz) and the next `render`
     /// re-uploads every changed sprite region.

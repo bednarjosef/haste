@@ -126,6 +126,7 @@ fn roundtrips_through_toml() {
         menu_background_blurriness: 7,
         max_fps: 60,
         clouds: CloudStatus::Fast,
+        premesh: PremeshMode::Predict,
         cloud_range: 64,
         sound: SoundVolumes {
             master: 0.8,

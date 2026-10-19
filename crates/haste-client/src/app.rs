@@ -55,7 +55,7 @@ mod frame;
 mod menu_background;
 mod world_feed;
 pub use bench::{bench, bench_window};
-use bench::{BenchSample, WindowBench};
+use bench::{bench_camera_turns, BenchPath, BenchSample, WindowBench};
 use frame::{FpsCounter, HitchTrace};
 pub(crate) use world_feed::WorldFeed;
 
@@ -1366,10 +1366,7 @@ fn hotbar_key(code: KeyCode) -> Option<u8> {
     })
 }
 
-fn camera_section(c: &Camera) -> SectionPos {
-    let p = c.pos.floor().as_ivec3();
-    SectionPos::new(p.x >> 4, p.y >> 4, p.z >> 4)
-}
+use world_feed::camera_section;
 
 /// The input half of the client: everything between winit (or a script) and the game. The
 /// windowed client's `App` and the offscreen script runner both drive one `InputRouter`, so
@@ -3027,6 +3024,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         // change in the options screen applies live, like vanilla's Vsync option).
         vsync: args.vsync.unwrap_or(options.vsync),
         vsync_forced: args.vsync,
+        premesh_forced: frame::forced_premesh(args)?,
         options,
         options_version: 0,
         perspective: game::Perspective::default(),
@@ -3092,6 +3090,8 @@ struct App {
     vsync: bool,
     /// `--vsync` forced the mode: a change in the options screen must not override it.
     vsync_forced: Option<bool>,
+    /// `--premesh` forced the pre-mesh mode (None: the saved option decides).
+    premesh_forced: Option<haste_render::PremeshMode>,
     /// The options the game is running with: refreshed from [`Shared::live_options`] whenever
     /// its version changes (not every frame), so a change in a vanilla options screen takes
     /// effect immediately (FOV, GUI scale, mouse sensitivity, fullscreen, vsync).

@@ -12,6 +12,10 @@ step, on a disconnect, or when the join never happens (120 s).
 | `cmd <command>` | send a server command (the player is op on the reference server) |
 | `chat <text>` | send a chat message |
 | `look <yaw> <pitch>` | set the camera client-side (prefer `cmd tp @s ~ ~ ~ <yaw> <pitch>`) |
+| `turn <degrees> <ticks>` | turn smoothly over the ticks (constant speed, interpolated like a mouse turn); the camera motion of Haste's `--bench-window --bench-path turns` |
+| `fly <x> <z> <ticks>` | move x/z blocks per tick for the ticks (spectator flight; lift with a `cmd tp ~ <dy> ~` first) |
+| `frametimes_start` | start the frame-time recorder now (the blocking `frametimes` step holds the camera still; this wraps a motion sequence) |
+| `frametimes_end <name>` | stop the recorder and write `cache/oracle/26.3/bench/<name>.json` |
 | `slot <0-8>` | select a hotbar slot |
 | `hud on\|off` | the game's F1 toggle (off also hides the hand) |
 | `screen none\|inventory\|pause\|chat [text]` | open a screen; `screen use <x> <y> <z>` right-clicks a block (chests) |

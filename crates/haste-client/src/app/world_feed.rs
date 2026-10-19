@@ -24,6 +24,10 @@ const SUBMIT_PER_FRAME: usize = 512;
 /// note): classifying a whole render distance 32 queue (~28k sections) in one frame
 /// would be a visible hitch, so the rest is classified over the next frames.
 const SCAN_PER_FRAME: usize = 4096;
+/// Held-back entries tested against the pre-mesh cone per frame (only while a turn is
+/// predicted): the scan rotates through `waiting`, so the whole list is covered over a
+/// few frames without a hitch.
+const PREMESH_SCAN_PER_FRAME: usize = 2048;
 
 /// What the client knows about a section right now: gone (its chunk is not loaded),
 /// loaded and empty, or loaded with blocks.
@@ -36,6 +40,12 @@ fn section_state(world: &World, pos: SectionPos) -> SectionLoadState {
             Some(_) => SectionLoadState::NonEmpty,
         },
     }
+}
+
+/// The section the camera is in (the feed and the settle test ask for it every frame).
+pub(crate) fn camera_section(c: &haste_render::Camera) -> SectionPos {
+    let p = c.pos.floor().as_ivec3();
+    SectionPos::new(p.x >> 4, p.y >> 4, p.z >> 4)
 }
 
 /// Vanilla `SectionUpdateTracker.hasAllNeighbors`: the eight horizontal neighbour
@@ -93,6 +103,9 @@ pub struct WorldFeed {
     wanted_waiting_version: Option<u64>,
     /// Chunks whose columns the renderer's empty-section map has been told about.
     noted_columns: HashSet<ChunkPos>,
+    /// The rotating cursor of the pre-mesh scan through `waiting` (see
+    /// [`PREMESH_SCAN_PER_FRAME`]).
+    premesh_cursor: usize,
     sort_needed: bool,
     pub(crate) last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
@@ -277,6 +290,50 @@ impl WorldFeed {
                             self.meshed.remove(&pos);
                         }
                         batch.push(pos);
+                    }
+                }
+            }
+            // Pre-mesh (turn prediction): with submit budget left over after the
+            // visible sections, pick held-back sections the renderer's widened cone
+            // wants. Visible sections always go first — this only fills the remainder —
+            // and the same backlog cap and upload budget apply (the sections join the
+            // same batch). A wrong guess only meshes a section early.
+            if renderer.premesh_enabled()
+                && renderer.premesh_active()
+                && batch.len() < SUBMIT_PER_FRAME
+                && !self.waiting.is_empty()
+            {
+                let mut scanned = 0;
+                while batch.len() < SUBMIT_PER_FRAME && scanned < PREMESH_SCAN_PER_FRAME {
+                    if self.premesh_cursor >= self.waiting.len() {
+                        self.premesh_cursor = 0;
+                    }
+                    let pos = self.waiting[self.premesh_cursor];
+                    scanned += 1;
+                    let state = section_state(&world, pos);
+                    renderer.note_section_state(pos, state);
+                    let was_meshed = self.meshed.contains(&pos);
+                    // The same rules as a visible submission (a first build waits for
+                    // every neighbour chunk; an empty section never meshed has nothing
+                    // to draw).
+                    let first_build = !was_meshed
+                        && state == SectionLoadState::NonEmpty
+                        && !has_all_neighbours(&world, pos, camera, view_distance);
+                    let submittable = !first_build
+                        && state != SectionLoadState::Unloaded
+                        && !(state == SectionLoadState::Empty && !was_meshed);
+                    if submittable && renderer.wants_premesh(pos) {
+                        self.waiting.swap_remove(self.premesh_cursor);
+                        self.queued.remove(&pos);
+                        if state == SectionLoadState::NonEmpty {
+                            self.meshed.insert(pos);
+                        } else {
+                            self.meshed.remove(&pos);
+                        }
+                        renderer.note_premeshed(pos);
+                        batch.push(pos);
+                    } else {
+                        self.premesh_cursor += 1;
                     }
                 }
             }
