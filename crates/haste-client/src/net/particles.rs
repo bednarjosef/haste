@@ -70,6 +70,7 @@ impl Session {
         };
         let dust = dust_option(&kind, &p.particle.data);
         let block_state = block_state_option(&kind, &p.particle.data);
+        let color = color_option(&kind, &p.particle.data);
         self.particle_spawns.push(haste_render::ParticleSpawn {
             kind,
             pos: p.pos,
@@ -79,6 +80,7 @@ impl Session {
             randomization: p.randomization.max(0) as u32,
             override_limiter: p.override_limiter,
             dust,
+            color,
             block_state,
         });
     }
@@ -126,4 +128,19 @@ fn block_state_option(kind: &Identifier, data: &[u8]) -> Option<haste_core::Bloc
         }
     }
     None
+}
+
+/// `entity_effect`'s `ColorParticleOption` from a particle's raw data (one ARGB int;
+/// `SpellParticle.MobEffectProvider` tints the particle with its colour); `None` for every
+/// other type and for a malformed payload.
+fn color_option(kind: &Identifier, data: &[u8]) -> Option<[f32; 3]> {
+    if kind.path() != "entity_effect" || data.len() < 4 {
+        return None;
+    }
+    let argb = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    Some([
+        ((argb >> 16) & 0xFF) as f32 / 255.0,
+        ((argb >> 8) & 0xFF) as f32 / 255.0,
+        (argb & 0xFF) as f32 / 255.0,
+    ])
 }

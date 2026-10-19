@@ -3,6 +3,7 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
 pub mod animation;
+pub mod arrow;
 pub mod avatar;
 pub mod decoration;
 pub mod dims;
@@ -16,8 +17,10 @@ pub mod registry;
 pub mod riding;
 pub mod skin;
 pub mod store;
+pub mod swing;
 pub mod using_item;
 pub mod variants;
+pub mod walk_animation;
 
 #[cfg(test)]
 mod skin_tests;

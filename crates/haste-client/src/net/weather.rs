@@ -294,15 +294,9 @@ fn rain_particle(
     particle_y: f64,
     block_z: f64,
 ) -> haste_render::ParticleSpawn {
-    haste_render::ParticleSpawn {
-        kind: haste_core::Identifier::minecraft("rain"),
-        pos: DVec3::new(pos.x as f64 + block_x, particle_y, pos.z as f64 + block_z),
-        offset: [0.0; 3],
-        max_speed: [0.0; 3],
-        count: 0,
-        randomization: 0,
-        override_limiter: false,
-        dust: None,
-        block_state: None,
-    }
+    haste_render::ParticleSpawn::client(
+        haste_core::Identifier::minecraft("rain"),
+        DVec3::new(pos.x as f64 + block_x, particle_y, pos.z as f64 + block_z),
+        [0.0; 3],
+    )
 }

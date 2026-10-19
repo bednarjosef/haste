@@ -198,14 +198,16 @@ pub fn render_center(
     variants: &HashMap<u32, PaintingVariant>,
 ) -> haste_core::DVec3 {
     // The lightning bolt and the experience orb hang on nothing: their render origin is their
-    // own position (the spawn packet's / entity position).
+    // own position (the spawn packet's / entity position). Arrows are the same (their
+    // decoration is built by `crate::arrow`, not from a facing).
     if matches!(
         crate::registry::decoration_kind(kind),
         Some(
             crate::registry::DecorationKind::LightningBolt
                 | crate::registry::DecorationKind::ExperienceOrb
         )
-    ) {
+    ) || crate::arrow::is_arrow(kind)
+    {
         return block_pos;
     }
     let Some(facing) = u8::try_from(data).ok().and_then(Direction::from_ordinal) else {

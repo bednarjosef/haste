@@ -193,6 +193,11 @@ impl Session {
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
+            // Entity status 0 on an arrow is the potion puff of a stuck tipped arrow
+            // reverting (`Arrow.handleEntityEvent`); other entities' status 0 is not ours.
+            P::EntityEvent(e) if e.status == 0 => {
+                entities.arrow_potion_puff(EntityId(e.entity_id), &mut self.arrow_particles)
+            }
             P::SetEntityData(d) => {
                 // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
                 // supply and the screen effects' on-fire and freeze ticks), and `_ if

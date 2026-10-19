@@ -371,6 +371,26 @@ pub enum Decoration {
     Painting(PaintingDecoration),
     Lightning(LightningDecoration),
     ExperienceOrb(ExperienceOrbDecoration),
+    Arrow(ArrowDecoration),
+}
+
+/// The state `ArrowRenderer.extractRenderState` collects for an arrow (vanilla
+/// `ArrowRenderState` plus `TippableArrowRenderState.isTipped`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArrowDecoration {
+    /// `ArrowRenderState.xRot` (`ArrowRenderer.extractRenderState`:
+    /// `entity.getXRot(partialTicks)`).
+    pub x_rot: f32,
+    /// `ArrowRenderState.yRot` (`entity.getYRot(partialTicks)`).
+    pub y_rot: f32,
+    /// `ArrowRenderState.shake`: `entity.shakeTime - partialTicks`, the stuck-in-ground
+    /// shake (`AbstractArrow.shakeTime`, set to 7 by `onSyncedDataUpdated`).
+    pub shake: f32,
+    /// `TippableArrowRenderState.isTipped` (`Arrow.getColor() > 0`): the tipped texture.
+    pub tipped: bool,
+    /// The entity is a `minecraft:spectral_arrow` (`SpectralArrowRenderer`'s own texture,
+    /// never the tipped one).
+    pub spectral: bool,
 }
 
 /// The state `ExperienceOrbRenderer.submit` collects for an experience orb.

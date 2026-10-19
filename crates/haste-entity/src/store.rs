@@ -17,6 +17,8 @@ use crate::dims::EntityDimensions;
 use crate::lerp::{LerpState, LerpTarget};
 use crate::metadata::Metadata;
 use crate::riding::Riding;
+use crate::swing::SwingState;
+use crate::walk_animation::WalkAnimationState;
 
 /// Hurt flash duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TICKS: u32 = 10;
@@ -35,7 +37,7 @@ pub const HEAD_LERP_STEPS: u8 = 3;
 pub const HEALTH_METADATA_INDEX: u8 = 9;
 
 /// `Mth.lerp`.
-fn lerp(delta: f32, start: f32, end: f32) -> f32 {
+pub(crate) fn lerp(delta: f32, start: f32, end: f32) -> f32 {
     start + delta * (end - start)
 }
 
@@ -54,144 +56,6 @@ pub(crate) fn wrap_degrees(mut v: f32) -> f32 {
         v += 360.0;
     }
     v
-}
-
-/// Vanilla `WalkAnimationState`: the smoothed horizontal speed and the position that accumulates
-/// it, which drive the limb swing. `LivingEntity.calculateEntityAnimation` feeds it the per-tick
-/// horizontal distance x 4 (capped at 1) with a 0.4 smoothing factor
-/// (`LivingEntity.updateWalkAnimation`); the renderer reads `position`/`speed` with the partial
-/// tick.
-#[derive(Clone, Copy, Debug)]
-pub struct WalkAnimationState {
-    speed_old: f32,
-    speed: f32,
-    position: f32,
-    position_scale: f32,
-}
-
-impl Default for WalkAnimationState {
-    fn default() -> Self {
-        WalkAnimationState {
-            speed_old: 0.0,
-            speed: 0.0,
-            position: 0.0,
-            position_scale: 1.0,
-        }
-    }
-}
-
-impl WalkAnimationState {
-    /// `WalkAnimationState.update`.
-    pub fn update(&mut self, target_speed: f32, factor: f32, position_scale: f32) {
-        self.speed_old = self.speed;
-        self.speed += (target_speed - self.speed) * factor;
-        self.position += self.speed;
-        self.position_scale = position_scale;
-    }
-
-    /// `WalkAnimationState.stop`.
-    pub fn stop(&mut self) {
-        self.speed_old = 0.0;
-        self.speed = 0.0;
-        self.position = 0.0;
-    }
-
-    /// `WalkAnimationState.speed(partialTicks)`.
-    pub fn speed(&self, partial: f32) -> f32 {
-        lerp(partial, self.speed_old, self.speed).min(1.0)
-    }
-
-    /// `WalkAnimationState.position(partialTicks)`.
-    pub fn position(&self, partial: f32) -> f32 {
-        (self.position - self.speed * (1.0 - partial)) * self.position_scale
-    }
-
-    /// `WalkAnimationState.isMoving`.
-    pub fn is_moving(&self) -> bool {
-        self.speed > 1.0e-5
-    }
-}
-
-/// `LivingEntity.SwingState`: which hand swings, with which animation type and duration, and how
-/// far the swing has progressed. `swing_animation` packets start it
-/// (`ClientPacketListener.handleSwingAnimation` -> `LivingEntity.swing`).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SwingState {
-    pub(crate) active: bool,
-    pub(crate) hand: i32,
-    pub(crate) animation: i32,
-    pub(crate) duration: i32,
-    pub(crate) ticks: i32,
-    pub(crate) progress: f32,
-    pub(crate) old_progress: f32,
-}
-
-impl SwingState {
-    /// `LivingEntity.swing` -> `SwingState.startIfAble`.
-    pub fn start(&mut self, hand: i32, animation: i32, duration: i32) {
-        if self.active && self.ticks > 0 && self.ticks <= self.duration / 2 {
-            return;
-        }
-        if !self.active
-            || self.hand != hand
-            || self.animation != animation
-            || self.duration != duration
-        {
-            self.old_progress = 0.0;
-            self.progress = 0.0;
-        }
-        self.hand = hand;
-        self.animation = animation;
-        self.duration = duration;
-        self.active = true;
-        self.ticks = 0;
-    }
-
-    /// `SwingState.tick`.
-    pub fn tick(&mut self) {
-        self.old_progress = self.progress;
-        if self.active {
-            if self.duration > 0 {
-                self.progress = (self.ticks as f32 / self.duration as f32).min(1.0);
-            }
-            if self.ticks > self.duration {
-                self.active = false;
-                self.progress = 0.0;
-            } else {
-                self.ticks += 1;
-            }
-        } else {
-            self.progress = 0.0;
-        }
-    }
-
-    /// `LivingEntity.getSwingAnimation` -> `SwingState.getAnimation`.
-    pub fn animation(&self, partial: f32) -> f32 {
-        if self.progress >= self.old_progress {
-            lerp(partial, self.old_progress, self.progress)
-        } else {
-            lerp(partial, self.old_progress, self.progress + 1.0)
-        }
-    }
-
-    pub fn is_swinging(&self) -> bool {
-        self.active
-    }
-
-    /// `SwingState.animation` (the raw progress, used by `LivingEntity.tick`'s body yaw).
-    pub fn progress(&self) -> f32 {
-        self.progress
-    }
-
-    /// The swinging hand (0 main, 1 off).
-    pub fn hand(&self) -> i32 {
-        self.hand
-    }
-
-    /// The swing animation type (0 none, 1 whack, 2 stab).
-    pub fn animation_type(&self) -> i32 {
-        self.animation
-    }
 }
 
 /// One tracked entity.
@@ -281,6 +145,13 @@ pub struct Entity {
     pub(crate) is_living: bool,
     /// An item use the server started (`useItem`/`useItemRemaining`; see `using_item`).
     pub using_item: crate::using_item::UsingItem,
+    /// `AbstractArrow.shakeTime`: ticks of stuck-in-ground shake left, arrows only.
+    pub shake_time: u8,
+    /// `AbstractArrow.isInGround` as the client knows it (its own ground detection and the
+    /// server's `IN_GROUND` metadata both set it), arrows only.
+    pub arrow_in_ground: bool,
+    /// `AbstractArrow.inGroundTime`: ticks since the arrow stuck, arrows only.
+    pub in_ground_time: u32,
 }
 
 impl Entity {
@@ -351,6 +222,9 @@ impl Entity {
             cloak: crate::avatar::Cloak::default(),
             is_living: living,
             using_item: crate::using_item::UsingItem::default(),
+            shake_time: 0,
+            arrow_in_ground: false,
+            in_ground_time: 0,
         }
     }
 
@@ -667,6 +541,10 @@ impl EntityStore {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
                 e.velocity = v;
+                // `Projectile.lerpMotion`: a moving arrow leaves the ground it was stuck in.
+                if crate::arrow::is_arrow(e.kind) && v.length_squared() > 0.0 {
+                    e.arrow_in_ground = false;
+                }
             }
         }
     }
@@ -709,6 +587,11 @@ impl EntityStore {
         };
         let old_living = e.metadata.living;
         e.metadata.apply(entries);
+        // `AbstractArrow.onSyncedDataUpdated`: the in-ground flag flipping to true starts the
+        // stuck-in-ground shake (arrows only; other types' index 10 means something else).
+        if crate::arrow::is_arrow(e.kind) {
+            crate::arrow::on_metadata(e, entries);
+        }
         // `onSyncedDataUpdated` for the living-flags byte: a use started or stopped.
         if e.is_living && e.metadata.living != old_living {
             crate::using_item::on_living_flags(e);
@@ -787,12 +670,24 @@ impl EntityStore {
     /// update the walk animation, the body yaw (`LivingEntity.tick` -> `calculateEntityAnimation`
     /// and `tickHeadTurn`) and the swing/swim/chicken timers.
     pub fn tick(&mut self) {
-        self.tick_in_world(&crate::item_entity::NoWorld);
+        self.tick_in_world(
+            &crate::item_entity::NoWorld,
+            &crate::arrow::NoArrowWorld,
+            &mut Vec::new(),
+        );
     }
 
-    /// [`Self::tick`] with a world view for the dropped items (`ItemEntity.tick`).
-    pub fn tick_in_world(&mut self, world: &dyn crate::item_entity::ItemWorld) {
+    /// [`Self::tick`] with a world view for the dropped items (`ItemEntity.tick`) and the
+    /// arrows (`AbstractArrow.tick`); `arrow_particles` collects this tick's particle
+    /// requests (the tipped colour and the crit trail), cleared by the caller.
+    pub fn tick_in_world(
+        &mut self,
+        world: &dyn crate::item_entity::ItemWorld,
+        arrows: &dyn crate::arrow::ArrowWorld,
+        arrow_particles: &mut Vec<crate::arrow::ArrowParticle>,
+    ) {
         self.use_ticks.clear();
+        arrow_particles.clear();
         let EntityStore { slots, riding, .. } = self;
         for slot in slots.iter_mut().flatten() {
             slot.tick_count += 1;
@@ -824,6 +719,11 @@ impl EntityStore {
             // `ItemEntity.tick`: gravity, move, drag, between position packets.
             if slot.is_item {
                 crate::item_entity::tick(slot, world);
+            }
+            // `AbstractArrow.tick`: the client-side flight simulation, between position
+            // packets (arrows are `SERVER_AND_CLIENT` simulated like items).
+            if crate::arrow::is_arrow(slot.kind) {
+                crate::arrow::tick(slot, arrows, arrow_particles);
             }
             // `LivingEntity.tick`'s use step (`updatingUsingItem`), after `super.tick()`
             // like vanilla: the tick is recorded for the client's effects.
@@ -912,14 +812,16 @@ impl EntityStore {
             // Hanging entities (item frames, paintings) are drawn specially, and the client
             // moved them to the bounding-box centre vanilla's `recalculateBoundingBox` computes
             // (the spawn packet carries the block position, not the render origin).
-            let decoration = crate::decoration::build(
-                slot.kind,
-                slot.data,
-                &slot.metadata,
-                &self.painting_variants,
-                slot.id.0,
-                slot.tick_count as f32 + partial_tick,
-            );
+            let decoration = crate::arrow::decoration(slot, partial_tick).or_else(|| {
+                crate::decoration::build(
+                    slot.kind,
+                    slot.data,
+                    &slot.metadata,
+                    &self.painting_variants,
+                    slot.id.0,
+                    slot.tick_count as f32 + partial_tick,
+                )
+            });
             let pos = if decoration.is_some() {
                 crate::decoration::render_center(
                     slot.kind,

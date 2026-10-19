@@ -18,6 +18,9 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
     let requests = std::mem::take(&mut driver.session.block_particle_requests);
     // Item particles: a consumable in use (the eat/drink crumbs in front of the mouth).
     let item_requests = std::mem::take(&mut driver.session.item_particle_requests);
+    // The arrows' own particles (`AbstractArrow.tick` / `Arrow.makeParticle`): the tipped
+    // colour and the crit trail, spawned like the server's would be.
+    let arrow_particles = std::mem::take(&mut driver.session.arrow_particles);
     // The ambient block particles (`ClientLevel.animateTick`, vanilla runs it
     // right before the particle tick): torch flames, fire smoke, campfires, lava,
     // portals. Rain-gated parts (leaf drip) stay dormant until weather is decoded.
@@ -31,6 +34,30 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
         }
         for r in &item_requests {
             particles.spawn_item(r.item, r.pos, r.vel);
+        }
+        for r in &arrow_particles {
+            // The tipped colour is an `entity_effect` `ColorParticleOption` (its colour rides
+            // the spawn request); a crit trail particle is a plain `crit` with the packet's
+            // speed (`addParticle(type, x, y, z, vx, vy, vz)`).
+            let (kind, color, speed) = match r.color {
+                Some(argb) => (
+                    haste_core::Identifier::minecraft("entity_effect"),
+                    Some([
+                        ((argb >> 16) & 0xFF) as f32 / 255.0,
+                        ((argb >> 8) & 0xFF) as f32 / 255.0,
+                        (argb & 0xFF) as f32 / 255.0,
+                    ]),
+                    [0.0; 3],
+                ),
+                None => (
+                    haste_core::Identifier::minecraft("crit"),
+                    None,
+                    [r.vel.x as f32, r.vel.y as f32, r.vel.z as f32],
+                ),
+            };
+            let mut spawn = haste_render::ParticleSpawn::client(kind, r.pos, speed);
+            spawn.color = color;
+            particles.spawn(&spawn, camera, None);
         }
         driver.session.particle_spawned = spawns.len();
         let state_count = data.blocks.len();

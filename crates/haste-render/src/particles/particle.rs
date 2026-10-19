@@ -66,4 +66,8 @@ pub(super) enum Motion {
     /// The jittered velocity damped to `keep`, with a fixed `lift` on y: `HeartParticle`
     /// (0.01, +0.1) and `NoteParticle` (0.01, +0.2).
     Damped { keep: f32, lift: f32 },
+    /// `SpellParticle` (`entity_effect`): the x and z speeds the caller asked for are
+    /// replaced by a ±0.5 drift (y is kept) before the speed constructor jitters them, y is
+    /// then damped to 20 %, and a zero x and z packet speed damps the drift to 10 %.
+    Spell,
 }

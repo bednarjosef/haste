@@ -9,8 +9,8 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
-    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
-    ModelPart, PaintingDecoration, PoseOverrides,
+    ArrowDecoration, BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance,
+    ItemFrameDecoration, ModelPart, PaintingDecoration, PoseOverrides,
 };
 use haste_core::parts::{self, PartId};
 use haste_core::view::BlockView;
@@ -18,6 +18,7 @@ use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;
 
+mod arrow;
 mod atlas;
 mod block_entities;
 mod cape;
@@ -411,7 +412,14 @@ impl EntityRenderer {
             let (size, half) = model_extents(&e.model.root);
             let rel = e.pos - camera;
             let dist2 = rel.length_squared();
-            if !should_render_at_sqr_distance(size, e.scale, dist2, view_scale) {
+            // `AbstractArrow.shouldRenderAtSqrDistance` overrides the generic limit with the
+            // bounding box diagonal times ten, so arrows stay visible much farther out.
+            let visible = if matches!(&e.decoration, Some(Decoration::Arrow(_))) {
+                arrow::arrow_should_render(dist2, e.width, e.height, view_scale)
+            } else {
+                should_render_at_sqr_distance(size, e.scale, dist2, view_scale)
+            };
+            if !visible {
                 continue;
             }
             if !aabb_in_frustum(frustum, rel, half + 0.5) {
@@ -447,6 +455,7 @@ impl EntityRenderer {
                         orientation,
                         assets,
                     ),
+                    Decoration::Arrow(a) => self.emit_arrow(e, a, camera, light, assets),
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;

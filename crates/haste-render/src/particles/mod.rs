@@ -87,11 +87,34 @@ pub struct ParticleSpawn {
     /// `minecraft:dust` option data: ARGB colour and size scale (vanilla's
     /// `DustParticleOptions`), the one particle option whose payload we read.
     pub dust: Option<DustOption>,
+    /// `entity_effect`'s `ColorParticleOption` (linear RGB): the colour the particle is
+    /// tinted with instead of the type's own, from the client's own spawns (a tipped arrow's
+    /// trail, `Arrow.makeParticle`).
+    pub color: Option<[f32; 3]>,
     /// `BlockParticleOption`: the block state a `minecraft:block` (or
     /// `block_marker`/`falling_dust`/`dust_pillar`/`block_crumble`) particle is
     /// made of — its sprite and tint replace the type's (vanilla
     /// `TerrainParticle.createTerrainParticle`).
     pub block_state: Option<BlockStateId>,
+}
+
+impl ParticleSpawn {
+    /// A client-side spawn of one particle at `pos` moving at `offset` blocks a tick
+    /// (`ClientLevel.addParticle`: count 0, no options, the 32-block limiter applies).
+    pub fn client(kind: Identifier, pos: DVec3, offset: [f32; 3]) -> ParticleSpawn {
+        ParticleSpawn {
+            kind,
+            pos,
+            offset,
+            max_speed: [1.0, 1.0, 1.0],
+            count: 0,
+            randomization: 0,
+            override_limiter: false,
+            dust: None,
+            color: None,
+            block_state: None,
+        }
+    }
 }
 
 /// `DustParticleOptions`: the colour `DustParticle` tints its quad with, and the size scale

@@ -167,6 +167,10 @@ pub struct Session {
     /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
     /// the pool by the game thread.
     pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
+    /// The arrows' own particle requests since the last tick (the tipped colour and the crit
+    /// trail, `AbstractArrow.tick` / `Arrow.makeParticle`), drained by the game thread into
+    /// the shared pool.
+    pub arrow_particles: Vec<haste_entity::arrow::ArrowParticle>,
     /// Particle spawns the game thread took over the whole session (counters).
     pub particle_spawned: usize,
     /// `minecraft:particle_type` names by protocol id (the static registry the packet's
@@ -283,6 +287,7 @@ impl Session {
             block_particle_requests: Vec::new(),
             item_particle_requests: Vec::new(),
             ambient_spawns: Vec::new(),
+            arrow_particles: Vec::new(),
             particle_spawned: 0,
             particle_names,
             lightmap: LightmapState::default(),
@@ -527,6 +532,7 @@ impl Session {
 }
 
 pub mod account;
+mod arrow_world;
 mod block_entity_types;
 mod block_events;
 mod chat;

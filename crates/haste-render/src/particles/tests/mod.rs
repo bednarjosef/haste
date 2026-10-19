@@ -46,6 +46,7 @@ fn spawn_request(kind: &str, count: i32) -> ParticleSpawn {
         randomization: 0,
         override_limiter: false,
         dust: None,
+        color: None,
         block_state: None,
     }
 }
