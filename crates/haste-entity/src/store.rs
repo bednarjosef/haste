@@ -836,98 +836,12 @@ impl EntityStore {
             } else {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             };
-            let (model, has_head, overlays) = if slot.is_player_type {
-                (crate::models::humanoid(false), true, Default::default())
-            } else {
-                // Registry table first (shared per type, head flag precomputed), then the box.
-                // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
-                // Variant mobs (cat/wolf/frog/pig/cow/chicken) instead resolve their look from
-                // the synced variant registry through the entity's metadata, falling back to
-                // the table's default row when the variant is unknown or absent.
-                let baby = crate::registry::is_baby(&slot.metadata);
-                let variant =
-                    crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby)
-                        .or_else(|| {
-                            // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/
-                            // parrot/fox/bee/strider/mooshroom): the same layer, the variant's
-                            // texture.
-                            crate::variants::metadata_model_for(
-                                slot.kind,
-                                &slot.metadata,
-                                baby,
-                                slot.metadata.custom_name_plain(),
-                                self.world_age,
-                            )
-                        });
-                // The tropical fish's shape follows its packed pattern; the shulker's base
-                // texture follows its colour byte. Both are plain model swaps, and both
-                // must be gated on the entity's own type: their metadata slots (17, 18)
-                // collide with other mobs' fields (e.g. a sheep's wool byte sits where a
-                // shulker's colour byte would).
-                let type_name = crate::registry::entity_type_name(slot.kind);
-                // Boats (`AbstractBoatRenderer`): the dumped boat layer with the trailing yaw
-                // baked into its root, the water patch overlay when it floats (a raft has
-                // none), no head part (the whole hull follows the entity yaw). The spawn-time
-                // family flag keeps the table lookup off every other entity's path; a boat
-                // type the table does not name (a mod's) falls through to the generic path.
-                let boat = slot
-                    .is_boat
-                    .then(|| type_name.and_then(crate::boat::entry_for_name))
-                    .flatten();
-                if let Some(boat) = boat {
-                    let model = crate::boat::model(boat).unwrap_or_else(|| {
-                        crate::models::box_for(slot.dimensions.0, slot.dimensions.1)
-                    });
-                    let overlays = match crate::boat::water_patch_overlay(boat, &slot.boat) {
-                        Some(patch) => [Some(patch), None],
-                        None => [None, None],
-                    };
-                    (model, false, overlays)
-                } else {
-                    let variant = variant.or_else(|| {
-                        if type_name == Some("minecraft:tropical_fish") {
-                            crate::variants::tropical_fish_model(&slot.metadata)
-                        } else {
-                            None
-                        }
-                    });
-                    let variant = match type_name {
-                        Some("minecraft:shulker") => {
-                            match crate::variants::shulker_texture(&slot.metadata) {
-                                // The colour texture swap is cached per texture (the model is cloned
-                                // once per colour, never per frame).
-                                Some(texture) => crate::variants::shulker_model_for(&texture),
-                                None => variant,
-                            }
-                        }
-                        _ => variant,
-                    };
-                    let entry = crate::registry::model_entry(slot.kind);
-                    let overlays = crate::variants::overlays_for(slot.kind, &slot.metadata, baby);
-                    match (variant, entry) {
-                        // Minecarts draw through `AbstractMinecartRenderer` with the one
-                        // `MinecartModel` layer every minecart type bakes (`MinecartModel
-                        // .createBodyLayer`); cargo and track pose come from the decoration.
-                        _ if minecart_variant.is_some() => {
-                            (crate::minecart::model(), false, Default::default())
-                        }
-                        // A variant model (already the baby's when `baby`); all six variant mobs
-                        // have a head part, so the head aim stays on.
-                        (Some(v), _) => (v, true, overlays),
-                        (None, Some((head, m))) => {
-                            let baby_model = type_name
-                                .filter(|_| baby)
-                                .and_then(crate::registry::baby_model_for_name);
-                            (baby_model.unwrap_or(m), head, overlays)
-                        }
-                        (None, None) => (
-                            crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
-                            false,
-                            overlays,
-                        ),
-                    }
-                }
-            };
+            let (model, has_head, overlays) = crate::models::model_for_entity(
+                slot,
+                minecart_variant.is_some(),
+                &self.mob_variants,
+                self.world_age,
+            );
             let is_passenger = self.riding.vehicle_of(slot.id).is_some();
             // `AbstractBoatModel.setupAnim` for boats (the paddles); the generic `setupAnim`
             // for everything else. A player-typed entity is never posed as a boat (its kind
