@@ -108,9 +108,8 @@ impl Session {
         // `ParticleEngine.tick` runs after `tickEntities`/`level.tick`), so their target is the
         // collector's position at the end of the tick.
         self.tick_pickup_particles(entities);
-        // The drain holds the player's borrow, so the edits apply from a collected copy.
-        let edits: Vec<_> = self.player.take_world_edits().collect();
-        for (pos, state) in edits {
+        // The edits are taken out first: the loop below borrows the session.
+        for (pos, state) in self.player.take_world_edits() {
             self.set_block_with_block_entities(world, pos, state);
             self.lids.remove(&pos);
             self.bells.remove(&pos);

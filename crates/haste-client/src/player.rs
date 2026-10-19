@@ -817,9 +817,8 @@ impl LocalPlayer {
         );
     }
 
-    /// One 20 Hz tick with the interactions set by [`LocalPlayer::set_interact`] first (hotbar,
-    /// attack/break, use/place, pick block), then movement, as a vanilla client orders them.
-    /// `vehicle` is the pose of the vehicle we ride, if any, this tick.
+    /// One 20 Hz tick: interactions first (hotbar, attack/break, use/place, pick block),
+    /// then movement, as a vanilla client orders them. `vehicle`: this tick's vehicle.
     pub fn tick_interact(
         &mut self,
         input: &InputState,
@@ -828,10 +827,13 @@ impl LocalPlayer {
         vehicle: Option<VehiclePose>,
         out: &mut Vec<ServerboundPlay>,
     ) {
+        // This tick's predicted blocks are part of the world the movement sees (vanilla:
+        // `handleKeybinds`' setBlock precedes the player tick; see prediction.rs).
+        let predicted = self.int.prediction.view(world);
         self.tick_inner(
             input,
             &TickCtx {
-                world,
+                world: &predicted,
                 shapes: &env.data.shapes,
                 blocks: env.data,
                 env: Some(env),
@@ -892,8 +894,7 @@ impl LocalPlayer {
         }
 
         // 0. `gameMode.tick` (`Minecraft.tick` runs it before `handleKeybinds`):
-        // `ensureHasSentCarriedItem` echoes the selected hotbar slot when it changed — our own
-        // pick or the server's `set_held_slot`.
+        // `ensureHasSentCarriedItem` echoes the hotbar slot when it changed.
         self.ensure_carried_item(out);
 
         // Hotbar, crosshair target and interactions (vanilla handles key bindings before

@@ -510,7 +510,7 @@ impl LocalPlayer {
 
     /// Predicted block changes to apply to the world now (breaking and placing), and
     /// server states released by `block_changed_ack`.
-    pub fn take_world_edits(&mut self) -> std::vec::Drain<'_, (BlockPos, BlockStateId)> {
+    pub fn take_world_edits(&mut self) -> Vec<(BlockPos, BlockStateId)> {
         self.int.prediction.take_world_edits()
     }
 

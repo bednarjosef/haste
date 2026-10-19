@@ -94,7 +94,7 @@ fn rig(
         .set_predicted(1, pos, retained, predicted_at, predicted);
     // The tick's own edit application took the predicted state into the world already
     // (the view below holds it); nothing of it is left to drain at the ack.
-    let _ = session.player.take_world_edits().count();
+    let _ = session.player.take_world_edits();
     session.player.state.pos = now_at;
     session.player.prev_pos = now_at;
     let mut world = SyncWorld {

@@ -308,7 +308,7 @@ impl Rig {
             ..Default::default()
         };
         self.p.tick_interact(&input, &self.w, &env, None, &mut out);
-        for (pos, s) in self.p.take_world_edits().collect::<Vec<_>>() {
+        for (pos, s) in self.p.take_world_edits() {
             self.w.set(pos.x, pos.y, pos.z, s);
         }
         // Only the interaction packets.
@@ -504,7 +504,7 @@ fn creative_single_tick_click_destroys_even_while_destroy_delay_counts_down() {
     );
     // Apply the ack's world edit now instead of on the next tick, so the new stone below is
     // not overwritten by it.
-    for (p, s) in r.p.take_world_edits().collect::<Vec<_>>() {
+    for (p, s) in r.p.take_world_edits() {
         r.w.set(p.x, p.y, p.z, s);
     }
     r.w.set(0, -1, 0, STONE);

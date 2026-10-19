@@ -21,7 +21,8 @@
 //! releases.
 
 use glam::DVec3;
-use haste_core::{BlockPos, BlockStateId};
+use haste_core::view::BlockView;
+use haste_core::{BlockPos, BlockStateId, ChunkPos};
 
 use super::super::LocalPlayer;
 
@@ -52,6 +53,84 @@ pub(crate) struct Sync {
     pub(crate) player_pos: Option<DVec3>,
 }
 
+/// The predicted blocks of the open tick, shared with the world view the player's
+/// physics reads (see [`PredictedView`]): predictions push here as they are made, the
+/// same tick's collision reads them, and the driver applies them to the real world and
+/// drains the slot after the tick. Cloning shares the slot (one `Arc` bump, no
+/// allocation); every user is the game thread, the lock only satisfies the spawned
+/// thread's `Send` bound.
+#[derive(Clone, Default)]
+pub(crate) struct PredictedBlocks(
+    #[allow(clippy::type_complexity)]
+    std::sync::Arc<std::sync::RwLock<Vec<(BlockPos, BlockStateId)>>>,
+);
+
+impl PredictedBlocks {
+    fn push(&self, pos: BlockPos, state: BlockStateId) {
+        self.0
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((pos, state));
+    }
+
+    /// The pending predicted state at `pos`, the newest prediction first. Called per
+    /// collision query of a tick: one uncontended read lock and a linear scan over the
+    /// (at most a few) edits of this tick, no allocation.
+    fn at(&self, pos: BlockPos) -> Option<BlockStateId> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .rev()
+            .find(|e| e.0 == pos)
+            .map(|e| e.1)
+    }
+
+    /// Takes every pending edit (an empty tick allocates nothing).
+    fn take(&self) -> Vec<(BlockPos, BlockStateId)> {
+        std::mem::take(&mut *self.0.write().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn clear(&self) {
+        self.0.write().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+/// The world the player's tick reads, with this tick's predicted blocks overlaid on the
+/// real world: what a placement or break predicts is already there for the same tick's
+/// movement. Vanilla gets this for free — `handleKeybinds` (the use click and the
+/// predicted `ClientLevel.setBlock`) runs before the player tick, so the same tick's
+/// collision sees the new block — while our predicted edits are applied to the world by
+/// the driver only after the tick; this view closes that one-tick gap. Light is not
+/// overlaid: it spreads over ticks anyway.
+pub(crate) struct PredictedView<'a> {
+    world: &'a dyn BlockView,
+    predicted: PredictedBlocks,
+}
+
+impl BlockView for PredictedView<'_> {
+    fn block_state(&self, pos: BlockPos) -> BlockStateId {
+        self.predicted
+            .at(pos)
+            .unwrap_or_else(|| self.world.block_state(pos))
+    }
+    fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {
+        self.world.is_chunk_loaded(pos)
+    }
+    fn sky_light(&self, pos: BlockPos) -> u8 {
+        self.world.sky_light(pos)
+    }
+    fn block_light(&self, pos: BlockPos) -> u8 {
+        self.world.block_light(pos)
+    }
+    fn min_y(&self) -> i32 {
+        self.world.min_y()
+    }
+    fn height(&self) -> i32 {
+        self.world.height()
+    }
+}
+
 /// Vanilla `BlockStatePredictionHandler`: the client-side block predictions and the
 /// server states they hold back. One retained state per predicted position (vanilla keys
 /// its map by `BlockPos.asLong`); a new prediction for the same block only bumps its
@@ -68,10 +147,11 @@ pub struct BlockStatePrediction {
     /// prediction is made, a server update arrives for one, or an ack releases some —
     /// nothing here runs per tick.
     retained: Vec<(BlockPos, VerifiedState)>,
-    /// Predicted blocks to apply to the client world now (the local half of a
-    /// prediction; vanilla's `ClientLevel.setBlock` under `startPredicting`). Drained by
-    /// the driver each tick (`take_world_edits`).
-    world_edits: Vec<(BlockPos, BlockStateId)>,
+    /// The predicted blocks of the open tick (the local half of a prediction; vanilla's
+    /// `ClientLevel.setBlock` under `startPredicting`): pushed as they are made, read by
+    /// the same tick's physics through [`PredictedView`], applied to the world and
+    /// drained by the driver after the tick.
+    edits: PredictedBlocks,
     /// Syncs released by the last `block_changed_ack` and not yet applied.
     pending_syncs: Vec<Sync>,
 }
@@ -131,7 +211,18 @@ impl BlockStatePrediction {
         predicted: BlockStateId,
     ) {
         self.retain(seq, pos, server_state, player_pos);
-        self.world_edits.push((pos, predicted));
+        self.edits.push(pos, predicted);
+    }
+
+    /// The world the player's tick should read: `world` with this tick's predicted
+    /// blocks overlaid (see [`PredictedView`]). The slot is shared, so the pushes the
+    /// interaction step of this very tick makes are visible to the movement that
+    /// follows it, like vanilla's `handleKeybinds`-before-the-player-tick order.
+    pub(crate) fn view<'a>(&self, world: &'a dyn BlockView) -> PredictedView<'a> {
+        PredictedView {
+            world,
+            predicted: self.edits.clone(),
+        }
     }
 
     /// `updateKnownServerState`: a server block update for a predicted position only
@@ -179,9 +270,10 @@ impl BlockStatePrediction {
         self.last_teleport_sequence = self.sequence;
     }
 
-    /// The predicted blocks to apply to the world now (drained by the driver).
-    pub fn take_world_edits(&mut self) -> std::vec::Drain<'_, (BlockPos, BlockStateId)> {
-        self.world_edits.drain(..)
+    /// The predicted blocks to apply to the world now (taken by the driver after the
+    /// tick; empty when nothing was predicted).
+    pub fn take_world_edits(&mut self) -> Vec<(BlockPos, BlockStateId)> {
+        self.edits.take()
     }
 
     /// The syncs the last `block_changed_ack` released, for the driver's
@@ -194,7 +286,7 @@ impl BlockStatePrediction {
     /// prediction survives one.
     pub(crate) fn clear(&mut self) {
         self.retained.clear();
-        self.world_edits.clear();
+        self.edits.clear();
         self.pending_syncs.clear();
     }
 }

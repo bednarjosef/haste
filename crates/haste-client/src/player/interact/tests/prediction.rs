@@ -47,7 +47,7 @@ fn tick_pitch_45(r: &mut Rig, i: InteractInput) -> Vec<ServerboundPlay> {
         ..Default::default()
     };
     r.p.tick_interact(&input, &r.w, &env, None, &mut out);
-    for (pos, s) in r.p.take_world_edits().collect::<Vec<_>>() {
+    for (pos, s) in r.p.take_world_edits() {
         r.w.set(pos.x, pos.y, pos.z, s);
     }
     out
@@ -77,7 +77,7 @@ fn a_breaks_server_updates_wait_for_the_ack() {
     // A stale server update for the broken block arrives before the ack: held back,
     // only recorded.
     assert!(r.p.defer_block_update(pos, STONE));
-    assert!(r.p.take_world_edits().next().is_none());
+    assert!(r.p.take_world_edits().is_empty());
     assert_eq!(ack(&mut r, 1), [(pos, STONE, true)]);
     // After the ack, updates go straight to the world again.
     assert!(!r.p.defer_block_update(pos, BlockStateId::AIR));
@@ -116,7 +116,7 @@ fn a_place_predicts_the_block_until_the_ack() {
     assert_eq!(r.w.block_state(BESIDE), DIRT);
     // A server update for the predicted cell is held back, not applied.
     assert!(r.p.defer_block_update(BESIDE, STONE));
-    assert!(r.p.take_world_edits().next().is_none());
+    assert!(r.p.take_world_edits().is_empty());
     // The ack releases the server's state and offers the snap-back position (we stood
     // at the rig's spawn when the prediction was made).
     let syncs = ack(&mut r, seq);
@@ -198,4 +198,50 @@ fn the_use_item_on_precedes_the_movements_of_its_tick() {
         })
         .expect("the tick sent a movement packet");
     assert!(use_at < move_at, "{out:?}");
+}
+
+/// The block predicted this tick is part of the world this tick's movement collides
+/// with (vanilla's order: `handleKeybinds`' predicted `setBlock` runs before the player
+/// tick). A player falling onto the cell it fills this tick lands on it in this very
+/// tick — the user's speed-bridging case: without the prediction the movement falls
+/// through the cell the server already has a block in, and the server corrects the
+/// player back onto it.
+#[test]
+fn a_block_predicted_this_tick_carries_the_falling_player() {
+    if !dirt_is_covered() {
+        eprintln!("no block_classes.json in the oracle dir: placement is not predicted");
+        return;
+    }
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = item(DIRT_ITEM);
+    // Mid-air over the floor, one tick of fall away from the cell the use fills (the
+    // rig looks straight down at it: the falling box does not reach the cell, so the
+    // placement is not obstructed by the player itself).
+    r.p.handle(
+        &ClientboundPlay::PlayerPosition(
+            haste_protocol::packets::play::clientbound::PlayerPosition {
+                teleport_id: 9,
+                pos: glam::DVec3::new(0.5, 1.05, 0.5),
+                velocity: glam::DVec3::new(0.0, -0.2, 0.0),
+                yaw: 0.0,
+                pitch: 90.0,
+                flags: 0,
+            },
+        ),
+        &mut Vec::new(),
+    );
+    let out = r.tick(USE);
+    assert!(
+        out.iter()
+            .any(|p| matches!(p, ServerboundPlay::UseItemOn(_))),
+        "the falling use placed: {out:?}"
+    );
+    // The block the use predicted is in the rig's world (the rig applied the edit),
+    // and the same tick's physics already landed on it: on its top, on ground.
+    assert_eq!(
+        r.p.state.pos,
+        glam::DVec3::new(0.5, 1.0, 0.5),
+        "landed on the predicted block"
+    );
+    assert!(r.p.state.on_ground, "the fall stopped on the block");
 }
