@@ -9,7 +9,12 @@ use haste_core::{ChunkPos, SectionPos};
 use crate::arena::ResidentSection;
 use crate::mesher::SectionMesh;
 
-use super::Renderer;
+use super::{Renderer, WorkBudgetMode};
+
+/// Cap on finished meshes held back by the adaptive budget's visible-first ordering
+/// (sections the gate no longer wants, awaiting the budget's remainder). Bounded so the
+/// pipeline's RAM stays near [`MESH_BACKLOG_CAP`]'s: past it the meshes upload in place.
+const PREMESH_HOLD_CAP: usize = 512;
 
 /// What the client knows about a section's blocks, reported as dirty sections are
 /// examined (vanilla: `ClientChunkCache` reports its empty sections to
@@ -161,28 +166,43 @@ impl Renderer {
         self.last_uploads = self.upload_finished();
     }
 
-    /// Uploads finished meshes; returns (sections uploaded, bytes written). The budget is
-    /// 2 ms of the frame, extended to 8 ms while a backlog stands (a heavy load's frames
-    /// are warm-up — the alternative is the backlog's mesh bytes staying in RAM until the
-    /// 2 ms slices drain it). The staging belt's copy commands go into one encoder that is
-    /// submitted at the end of the batch (before this frame's render pass reads the arenas).
+    /// Uploads finished meshes; returns (sections uploaded, bytes written). The budget
+    /// comes from the work budget (`--work-budget`, `renderer/work_budget.rs`): `fixed`
+    /// is 2 ms of the frame, extended to 8 ms while a backlog stands (a heavy load's
+    /// frames are warm-up — the alternative is the backlog's mesh bytes staying in RAM
+    /// until the 2 ms slices drain it); `adaptive` predicts the next frame's cost and
+    /// uploads the sections the gate wants first, holding the rest (pre-meshed or
+    /// turned away from) for the budget's remainder. The staging belt's copy commands
+    /// go into one encoder that is submitted at the end of the batch (before this
+    /// frame's render pass reads the arenas).
     fn upload_finished(&mut self) -> (u32, u64) {
         let started = std::time::Instant::now();
-        let budget = if self.mesher.pending_len() > 1024 {
-            std::time::Duration::from_millis(8)
-        } else {
-            std::time::Duration::from_millis(2)
-        };
+        let budget_ms = self.work_budget.budget_ms(self.mesher.pending_len());
+        let elapsed_ms = || started.elapsed().as_secs_f32() * 1000.0;
+        let adaptive = self.work_budget.mode() == WorkBudgetMode::Adaptive;
         let mut uploads = 0;
         let mut bytes = 0;
         let mut batch = std::mem::take(&mut self.drain_buf);
         let mut encoder: Option<wgpu::CommandEncoder> = None;
-        while started.elapsed() < budget {
+        while elapsed_ms() < budget_ms {
             self.mesher.drain(16, &mut batch);
             if batch.is_empty() {
                 break;
             }
             for mesh in batch.drain(..) {
+                // Visible sections first: a finished mesh the gate no longer wants
+                // (pre-meshed ahead of the turn, or the camera turned away since it
+                // was submitted) waits in the hold, oldest first, for the budget's
+                // remainder. Removals always run (they free arenas); a full hold
+                // drains in place so the RAM stays bounded.
+                if adaptive
+                    && !mesh.is_removal()
+                    && self.premesh_hold.len() < PREMESH_HOLD_CAP
+                    && !self.wants_section(mesh.pos)
+                {
+                    self.premesh_hold.push_back(mesh);
+                    continue;
+                }
                 bytes += mesh.vertex_bytes() + mesh.index_bytes();
                 let encoder = encoder.get_or_insert_with(|| {
                     self.gpu
@@ -194,6 +214,32 @@ impl Renderer {
                 self.upload_mesh(mesh, encoder);
                 uploads += 1;
             }
+        }
+        // The pre-mesh (held-back) uploads: whatever budget remains after the visible
+        // sections. A held mesh the gate wants again (the turn arrived where the cone
+        // pointed) is visible and goes first; the rest rotate to the back, keeping their
+        // order, so nothing starves behind newer guesses. A wrong pre-mesh guess only
+        // meshed a section early.
+        let mut examined = 0;
+        while elapsed_ms() < budget_ms && examined < self.premesh_hold.len() {
+            let Some(mesh) = self.premesh_hold.pop_front() else {
+                break;
+            };
+            examined += 1;
+            if !self.wants_section(mesh.pos) {
+                self.premesh_hold.push_back(mesh);
+                continue;
+            }
+            bytes += mesh.vertex_bytes() + mesh.index_bytes();
+            let encoder = encoder.get_or_insert_with(|| {
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("mesh-upload"),
+                    })
+            });
+            self.upload_mesh(mesh, encoder);
+            uploads += 1;
         }
         self.drain_buf = batch;
         if let Some(encoder) = encoder {

@@ -417,6 +417,8 @@ impl Renderer {
             want_look: None,
             want_frustum: None,
             premesh: super::premesh::Premesh::new(),
+            work_budget: super::work_budget::WorkBudget::new(),
+            premesh_hold: std::collections::VecDeque::new(),
             camera_spectator: false,
             cull_sections: true,
             visible_for: None,
