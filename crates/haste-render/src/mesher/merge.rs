@@ -6,6 +6,11 @@ use super::lighting::face_axes;
 use super::sink::{layer_from_index, MeshSink};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod junction;
+
+pub(super) use junction::JunctionScratch;
+use junction::{ring_uv, EdgeLine, MAX_SPLITS};
+
 /// Debug switch for the merged-quad crack tests: greedy merging off, so every
 /// face meshes as vanilla does (one quad per block face) and the two meshes
 /// can be rendered and compared pixel by pixel. Read per quad at staging time
@@ -208,7 +213,11 @@ fn dir_of(dir: u8) -> haste_assets::Direction {
     haste_assets::Direction::from_index(dir as usize)
 }
 
-pub(super) fn flush_staged(staged: &mut [StagedQuad], sink: &mut MeshSink) {
+pub(super) fn flush_staged(
+    staged: &mut [StagedQuad],
+    sink: &mut MeshSink,
+    junction: &mut JunctionScratch,
+) {
     // Fast path: nothing mergeable (a section of shapes, or all-AO corners).
     if !staged.iter().any(|q| matches!(q, StagedQuad::Merge(_))) {
         for q in staged.iter() {
@@ -314,6 +323,9 @@ pub(super) fn flush_staged(staged: &mut [StagedQuad], sink: &mut MeshSink) {
         });
         i += len_v as usize;
     }
+    // Where the neighbours' corners are: every rectangle edge looks up its
+    // line's marks (junction.rs) to place its split vertices.
+    junction.collect(&rects, staged);
     // Emit: each rectangle at its first member's staged index, direct quads at
     // their own. `rect_at[i]` says which rectangle staged index i emits.
     let mut rect_at: Vec<Option<usize>> = vec![None; staged.len()];
@@ -347,36 +359,38 @@ pub(super) fn flush_staged(staged: &mut [StagedQuad], sink: &mut MeshSink) {
                     }
                     emitted_rects[ri] = true;
                     let r = &rects[ri];
-                    emit_rect(r, sink);
+                    emit_rect(r, junction, sink);
                 }
             }
         }
     }
 }
 
-/// The largest boundary ring a merged rectangle can have: 2*(16+16) vertices
-/// at every unit boundary of its edges (a section is 16 cells wide).
-const MAX_RING: usize = 64;
-
 /// Emits one merged rectangle as a triangle fan over its boundary ring. The
-/// ring carries a vertex at every unit boundary the rectangle's edges cross:
-/// the quads next to an edge (unmerged unit faces, other rectangles, the
-/// neighbouring section's rectangles across a section boundary) all have
-/// their corners at unit boundaries, so no edge of the rectangle forms a
-/// T-junction with them — a T-junction's two sides rasterize the shared line
-/// from different vertex pairs, and the floating-point difference can open
-/// single-pixel cracks showing the background, which vanilla (one quad per
-/// block face, every edge one unit at most) never draws. A model quad with
-/// fractional corners (stairs, snow layers' sides) can still put a vertex
-/// strictly inside one unit segment of the ring — the same T-junction
-/// vanilla itself has between such a quad and a unit face, at the same
-/// one-unit scale, so nothing new is visible.
+/// ring's corners are the rectangle's quad corners; between them, an edge
+/// gets a vertex only where the quads sharing its line have a corner (a
+/// T-junction there is what cracks: the two sides rasterize the shared line
+/// from different vertex pairs, and the floating-point difference opens
+/// single-pixel gaps showing the background, which vanilla — one quad per
+/// block face, every edge one unit at most — never draws). Interior edges
+/// look up their line's junction marks (every staged quad's and rectangle's
+/// corners, bit-exact); an edge lying on a section boundary instead carries
+/// a vertex at every unit boundary, which the section across the line also
+/// does deterministically, so those edges stay watertight without knowing
+/// the neighbour's layout. A rectangle whose neighbours merge the same way
+/// keeps a plain four-vertex quad.
+///
+/// A model quad with fractional corners (stairs, snow layers' sides) files
+/// its marks at those exact positions, so they split the edge there too; a
+/// fractional corner across a section boundary can still land inside one
+/// unit segment — the same T-junction vanilla itself has between such a quad
+/// and a unit face, at the same one-unit scale, so nothing new is visible.
 ///
 /// The vertices' UVs repeat the sprite (the fragment shader wraps
-/// sprite-local UVs with `fract`, so each block of the rectangle samples the
-/// same texels as the unit face did): a UV component that follows the u signs
-/// is `k` (or `len_u - k` when flipped) at integer offset `k` along u.
-fn emit_rect(r: &MergeRect, sink: &mut MeshSink) {
+/// sprite-local UVs with `fract`, so each block of the rectangle samples
+/// the same texels as the unit face did): a UV component that follows the u
+/// signs is the offset along u (or `len_u - offset` when flipped).
+fn emit_rect(r: &MergeRect, junction: &mut JunctionScratch, sink: &mut MeshSink) {
     let f = &r.key.face;
     let (ua, va) = (f.u_axis as usize, f.v_axis as usize);
     let n_axis = 3 - ua - va;
@@ -384,73 +398,119 @@ fn emit_rect(r: &MergeRect, sink: &mut MeshSink) {
     // `base` carries): a full block's positive faces sit at 1.0, a snow
     // layer's top at 2/16, and so on.
     let height = f32::from_bits(f.plane).fract();
-    // The ring, as integer offsets (ku, kv) along the tangent axes from the
-    // rectangle's low corner: the four corners of the quad's vertex order
-    // with the unit offsets between them. Consecutive corners of a quad
-    // differ on one tangent axis; the offsets between their signs on that
-    // axis are the unit boundaries the edge crosses.
-    let mut ring = [(0i32, 0i32); MAX_RING];
-    let mut n = 0;
-    let push = |ring: &mut [(i32, i32); MAX_RING], n: &mut usize, ku: i32, kv: i32| {
-        if *n < MAX_RING {
-            ring[*n] = (ku, kv);
-            *n += 1;
-        }
+    let (marks, ring) = junction.split();
+    ring.clear();
+    // A quad corner in absolute section-local coordinates, with its
+    // tangent-axis offsets (the UVs follow the offsets).
+    let corner = |su: i32, sv: i32| {
+        let mut pos = [0f32; 3];
+        pos[ua] = (r.base[ua] + su * r.len_u) as f32;
+        pos[va] = (r.base[va] + sv * r.len_v) as f32;
+        pos[n_axis] = r.base[n_axis] as f32 + height;
+        (
+            pos,
+            [su as f32 * r.len_u as f32, sv as f32 * r.len_v as f32],
+        )
+    };
+    let push = |ring: &mut Vec<([f32; 3], [f32; 2])>, pos: [f32; 3], off: [f32; 2]| {
+        ring.push((pos, ring_uv(f, off[0], off[1], r.len_u, r.len_v)));
     };
     for ci in 0..4 {
         let (su, sv) = (f.corners[ci][0] as i32, f.corners[ci][1] as i32);
-        push(&mut ring, &mut n, su * r.len_u, sv * r.len_v);
+        let (cpos, coff) = corner(su, sv);
+        push(ring, cpos, coff);
         let (tu, tv) = (
             f.corners[(ci + 1) % 4][0] as i32,
             f.corners[(ci + 1) % 4][1] as i32,
         );
+        // Consecutive corners of a quad differ on one tangent axis (both
+        // differing would be a crossed quad, not a face; `merge_face` only
+        // sees real face quads). The edge between them runs along that axis
+        // at the fixed tangent coordinate of the other; splits go strictly
+        // between the corners, in walk order.
         if su != tu && sv == tv {
-            // Along u: every unit offset strictly between the two corners.
-            let step = if tu > su { 1 } else { -1 };
-            let mut k = su * r.len_u + step;
-            while k != tu * r.len_u {
-                push(&mut ring, &mut n, k, sv * r.len_v);
-                k += step;
+            // Along u at fixed v. On a section boundary (v = 0 or 16) the
+            // neighbour is another section: split at every unit. Interior:
+            // split at the marks on the edge's line, in this edge only.
+            let fixed_v = (r.base[va] + sv * r.len_v) as f32;
+            let lo = (r.base[ua] + su.min(tu) * r.len_u) as f32;
+            let hi = (r.base[ua] + su.max(tu) * r.len_u) as f32;
+            let split = |ring: &mut _, p: f32| {
+                let mut pos = cpos;
+                pos[ua] = p;
+                push(ring, pos, [p - r.base[ua] as f32, coff[1]]);
+            };
+            if fixed_v == 0.0 || fixed_v == 16.0 {
+                let step = if tu > su { 1 } else { -1 };
+                let mut k = su * r.len_u + step;
+                while k != tu * r.len_u {
+                    split(ring, (r.base[ua] + k) as f32);
+                    k += step;
+                }
+            } else {
+                let mut splits = [0f32; MAX_SPLITS];
+                let line = EdgeLine {
+                    d: ua,
+                    t_axis: va,
+                    t_val: fixed_v as i32,
+                    n_axis,
+                    plane: cpos[n_axis],
+                };
+                let n = marks.splits_in(&line, lo, hi, r.len_u < 2, &mut splits);
+                if tu > su {
+                    for &p in &splits[..n] {
+                        split(ring, p);
+                    }
+                } else {
+                    for &p in splits[..n].iter().rev() {
+                        split(ring, p);
+                    }
+                }
             }
         } else if sv != tv && su == tu {
-            let step = if tv > sv { 1 } else { -1 };
-            let mut k = sv * r.len_v + step;
-            while k != tv * r.len_v {
-                push(&mut ring, &mut n, su * r.len_u, k);
-                k += step;
+            // Along v at fixed u, mirrored.
+            let fixed_u = (r.base[ua] + su * r.len_u) as f32;
+            let lo = (r.base[va] + sv.min(tv) * r.len_v) as f32;
+            let hi = (r.base[va] + sv.max(tv) * r.len_v) as f32;
+            let split = |ring: &mut _, p: f32| {
+                let mut pos = cpos;
+                pos[va] = p;
+                push(ring, pos, [coff[0], p - r.base[va] as f32]);
+            };
+            if fixed_u == 0.0 || fixed_u == 16.0 {
+                let step = if tv > sv { 1 } else { -1 };
+                let mut k = sv * r.len_v + step;
+                while k != tv * r.len_v {
+                    split(ring, (r.base[va] + k) as f32);
+                    k += step;
+                }
+            } else {
+                let mut splits = [0f32; MAX_SPLITS];
+                let line = EdgeLine {
+                    d: va,
+                    t_axis: ua,
+                    t_val: fixed_u as i32,
+                    n_axis,
+                    plane: cpos[n_axis],
+                };
+                let n = marks.splits_in(&line, lo, hi, r.len_v < 2, &mut splits);
+                if tv > sv {
+                    for &p in &splits[..n] {
+                        split(ring, p);
+                    }
+                } else {
+                    for &p in splits[..n].iter().rev() {
+                        split(ring, p);
+                    }
+                }
             }
-        }
-        // Corners differing on both axes would be a crossed quad, not a
-        // face; `merge_face` only sees real face quads, so this does not
-        // happen (and the corner itself is still pushed).
-    }
-    let mut positions = [[0f32; 3]; MAX_RING];
-    let mut uvs = [[0f32; 2]; MAX_RING];
-    for (i, &(ku, kv)) in ring.iter().take(n).enumerate() {
-        let mut pos = r.base;
-        pos[ua] += ku;
-        pos[va] += kv;
-        positions[i] = pos.map(|c| c as f32);
-        positions[i][n_axis] += height;
-        for (uv_c, [src, flip]) in uvs[i].iter_mut().zip(f.uv_map) {
-            let (k, len) = if src == 0 {
-                (ku, r.len_u)
-            } else {
-                (kv, r.len_v)
-            };
-            *uv_c = if flip == 0 {
-                k as f32
-            } else {
-                (len - k) as f32
-            };
         }
     }
     let light = [r.key.light[0], r.key.light[1], r.key.light[2]];
     sink.push_fan(
         layer_from_index(r.key.layer as usize),
         haste_assets::Direction::from_index(r.key.dir as usize),
-        &positions[..n],
-        &uvs[..n],
+        ring,
         light,
         r.key.tint,
         r.key.sprite,

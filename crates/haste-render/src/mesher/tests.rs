@@ -211,18 +211,23 @@ fn jar_mesh_flat_stone_section() {
     );
     // Greedy merge: unmerged this scene would draw 256 top + 256 bottom +
     // 256 side + 256 overlay quads (1024). The uniform-light faces merge: top
-    // and bottom to one rectangle each (a 2*(16+16)-vertex fan ring, 62
-    // triangles = 31 quads each, merge.rs's T-junction fix), and each edge's
-    // y=1..3 side and overlay faces to one 16x3 rect (their face-adjacent
-    // cells are lit, so vanilla LightCoordsUtil.smoothBlend's dark-neighbour
-    // substitution makes their light uniform — the y=0 row below them is
-    // sky-0 in FlatWorld; a 2*(16+3)-vertex ring is 36 triangles = 18 quads).
-    // Only the y=0 side faces are light-graded — their face-adjacent cells
-    // sit at sky 0 with lit cells one row up, so the corner blend differs per
-    // vertex — and stay per block: 31*2 + 4 edges * 2 * 18 + 4 edges * 16 * 2
-    // = 334.
+    // and bottom to one rectangle each (all four edges on the section
+    // boundary, so the fan ring carries every unit: 62 triangles = 31 quads
+    // each, merge.rs's T-junction fix), and each edge's y=1..3 side and
+    // overlay faces to one 16x3 rect (their face-adjacent cells are lit, so
+    // vanilla LightCoordsUtil.smoothBlend's dark-neighbour substitution makes
+    // their light uniform — the y=0 row below them is sky-0 in FlatWorld).
+    // The merged rect's y=1 edge splits at every unit (the graded y=0 faces
+    // below it are per block, so their corners mark each unit boundary: 15
+    // splits), its y=4 edge stays one segment (the 16-wide top rectangle
+    // covers the whole line, no corner inside), and its x=0/16 edges lie on
+    // the section boundary (every unit: 2 splits each): a 23-vertex ring,
+    // 21 triangles. Only the y=0 side faces are light-graded — their
+    // face-adjacent cells sit at sky 0 with lit cells one row up, so the
+    // corner blend differs per vertex — and stay per block:
+    // 31*2 + 8 merged rects * 21 triangles + 4 edges * 16 * 2 = 274.
     assert_eq!(
-        quads, 334,
+        quads, 274,
         "uniform-light faces merge, graded side faces stay per block"
     );
 }

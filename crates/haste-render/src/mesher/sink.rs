@@ -129,34 +129,32 @@ impl MeshSink {
     }
 
     /// Emits one merged rectangle as a triangle fan over its boundary ring
-    /// (see `merge.rs`): the ring carries a vertex at every unit boundary the
-    /// rectangle's edges cross, so an edge never runs past a corner of the
-    /// quads next to it (a T-junction, whose floating-point rasterization can
-    /// open single-pixel cracks). All vertices share the rectangle's uniform
-    /// light, tint and sprite, so there is no diagonal choice to make.
-    #[allow(clippy::too_many_arguments)]
+    /// (see `merge.rs`): the ring carries a vertex wherever the quads next to
+    /// an edge have a corner (a T-junction, whose floating-point
+    /// rasterization can open single-pixel cracks). All vertices share the
+    /// rectangle's uniform light, tint and sprite, so there is no diagonal
+    /// choice to make.
     pub(super) fn push_fan(
         &mut self,
         layer: RenderLayer,
         dir: Direction,
-        positions: &[[f32; 3]],
-        uvs: &[[f32; 2]],
+        ring: &[([f32; 3], [f32; 2])],
         light: [u8; 3],
         tint: u32,
         sprite: u16,
     ) {
         let base = self.vertices.len() as u32;
-        for i in 0..positions.len() {
+        for (pos, uv) in ring {
             self.vertices
-                .push(pack_vertex_raw(positions[i], uvs[i], light, tint, sprite));
-            self.note_position(positions[i]);
+                .push(pack_vertex_raw(*pos, *uv, light, tint, sprite));
+            self.note_position(*pos);
         }
         let indices: &mut Vec<u32> = if layer == RenderLayer::Translucent {
             &mut self.translucent
         } else {
             &mut self.dirs[layer_index(layer) * 6 + dir.index()]
         };
-        for i in 1..positions.len() - 1 {
+        for i in 1..ring.len() - 1 {
             indices.extend_from_slice(&[base, base + i as u32, base + i as u32 + 1]);
         }
     }
