@@ -107,6 +107,11 @@ impl Particles {
         };
         out.reserve(self.pool.len());
         for p in &self.pool {
+            if p.behaviour.no_render {
+                // NoRenderParticle subclasses (the explosion emitter seed): the pool
+                // entry drives the tick that spawns the visible particles.
+                continue;
+            }
             let block = BlockPos::new(
                 p.pos.x.floor() as i32,
                 p.pos.y.floor() as i32,

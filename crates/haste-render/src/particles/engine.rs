@@ -60,6 +60,13 @@ pub struct Particles {
     /// them white, which only headless runs without a pool ever see).
     pub(super) biome_colors: Option<crate::tint::BiomeColors>,
     pub(super) rng: Rng,
+    /// The camera the seed particles' children are limiter-checked against (vanilla
+    /// `ClientLevel.doAddParticle` reads the game camera; set at the tick's start).
+    pub(super) camera: DVec3,
+    /// The `NoRenderParticle` seeds' children this tick (vanilla queues adds during the
+    /// tick in `particlesToAdd` and appends them after it). Reused, so a tick without a
+    /// seed allocates nothing.
+    pub(super) seed_children: Vec<ParticleSpawn>,
 }
 
 impl Particles {
@@ -71,6 +78,8 @@ impl Particles {
             unknown: Vec::new(),
             biome_colors: None,
             rng: Rng(0x853C_49E6_748F_EA9B),
+            camera: DVec3::ZERO,
+            seed_children: Vec::new(),
         }
     }
 
@@ -120,14 +129,24 @@ impl Particles {
         let kind = if terrain.is_some() {
             None
         } else {
-            match types.index(&s.kind) {
-                Some(k) => Some(k),
-                None => {
-                    if !self.unknown.contains(&s.kind) {
-                        self.unknown.push(s.kind.clone());
-                        tracing::warn!("particle type {} has no atlas sprites; skipped", s.kind);
+            // A NoRenderParticle type (`HugeExplosionSeedParticle`) has no sprites and no
+            // provider sprite set in vanilla either; the sentinel index is never read
+            // (the snapshot skips no-render particles before it looks anything up).
+            if ParticleBehaviour::of(&s.kind).no_render {
+                Some(u32::MAX)
+            } else {
+                match types.index(&s.kind) {
+                    Some(k) => Some(k),
+                    None => {
+                        if !self.unknown.contains(&s.kind) {
+                            self.unknown.push(s.kind.clone());
+                            tracing::warn!(
+                                "particle type {} has no atlas sprites; skipped",
+                                s.kind
+                            );
+                        }
+                        return;
                     }
-                    return;
                 }
             }
         };
@@ -310,8 +329,10 @@ impl Particles {
     /// One 20 Hz step: expire, then move. The renderer interpolates between `prev_pos` and
     /// `pos` within the tick. Vanilla's `Particle.tick` order: `yd -= 0.04 * gravity`, move,
     /// then `velocity *= friction`; `BubbleParticle`/`WaterDropParticle`/`SuspendedTownParticle`
-    /// override that with their own orders, modelled here by `behaviour`.
-    pub fn tick(&mut self) {
+    /// override that with their own orders, modelled here by `behaviour`. `camera` is the
+    /// eye position the seed particles' children are limiter-checked against.
+    pub fn tick(&mut self, camera: DVec3) {
+        self.camera = camera;
         let mut i = 0;
         while i < self.pool.len() {
             if self.tick_one(i) {
@@ -322,6 +343,16 @@ impl Particles {
                 self.pool.swap(i, last);
                 self.pool.truncate(last);
             }
+        }
+        // The seed particles' children, appended after the tick loop like vanilla's
+        // `particlesToAdd` (they are not stepped this tick).
+        if !self.seed_children.is_empty() {
+            let mut children = std::mem::take(&mut self.seed_children);
+            for child in &children {
+                self.spawn(child, self.camera, None);
+            }
+            children.clear();
+            self.seed_children = children;
         }
     }
 
@@ -334,6 +365,32 @@ impl Particles {
         }
         p.prev_pos = p.pos;
         let b = p.behaviour;
+        if b.no_render {
+            // HugeExplosionSeedParticle.tick: six `explosion` particles per tick at ±4
+            // around the seed, each one's size this tick's age/lifetime (0-based, the
+            // increment above undone). They are queued and appended after the tick loop,
+            // like vanilla's `particlesToAdd`.
+            let (x, y, z) = (p.pos.x, p.pos.y, p.pos.z);
+            let size = (p.age - 1.0) / p.lifetime;
+            for _ in 0..6 {
+                self.seed_children.push(ParticleSpawn {
+                    kind: Identifier::minecraft("explosion"),
+                    pos: DVec3::new(
+                        x as f64 + (self.rng.next_f64() - self.rng.next_f64()) * 4.0,
+                        y as f64 + (self.rng.next_f64() - self.rng.next_f64()) * 4.0,
+                        z as f64 + (self.rng.next_f64() - self.rng.next_f64()) * 4.0,
+                    ),
+                    offset: [size, 0.0, 0.0],
+                    max_speed: [1.0, 0.0, 0.0],
+                    count: 0,
+                    randomization: 0,
+                    override_limiter: false,
+                    dust: None,
+                    block_state: None,
+                });
+            }
+            return true;
+        }
         if b.portal_motion {
             // PortalParticle.tick: pos = start + vel * (-p + 2p²) with p = age/lifetime,
             // and y lifted by the remaining fraction; no gravity, no friction.

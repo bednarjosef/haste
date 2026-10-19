@@ -171,6 +171,12 @@ pub struct Session {
     /// Item particles queued since the last tick (a consumable in use: the eat/drink
     /// crumbs), drained by the game thread into the shared pool.
     pub item_particle_requests: Vec<crate::item_particles::ItemParticleRequest>,
+    /// The `explode` packets' block particles (vanilla `ClientExplosionTracker`), ticked
+    /// in `end_tick` into the particle queue.
+    explosions: explosion_tracker::ExplosionTracker,
+    /// The explosion sound's pitch and seed random (vanilla draws them from the level's
+    /// `RandomSource`).
+    explosion_rng: haste_audio::random::LegacyRandom,
     /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
     /// the pool by the game thread.
     pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
@@ -292,6 +298,13 @@ impl Session {
             particle_spawns: Vec::new(),
             block_particle_requests: Vec::new(),
             item_particle_requests: Vec::new(),
+            explosions: explosion_tracker::ExplosionTracker::default(),
+            explosion_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
             ambient_spawns: Vec::new(),
             particle_spawned: 0,
             particle_names,
@@ -520,6 +533,9 @@ impl Session {
         let Some(p) = self.apply_particles(p, world, regs) else {
             return;
         };
+        let Some(p) = self.apply_explosion(p) else {
+            return;
+        };
         let Some(p) = self.apply_effects(p, own) else {
             return;
         };
@@ -549,6 +565,8 @@ pub(crate) mod damage;
 mod driver;
 mod effects;
 mod entities;
+mod explosion;
+mod explosion_tracker;
 mod fov;
 mod item_world;
 mod lightmap;
