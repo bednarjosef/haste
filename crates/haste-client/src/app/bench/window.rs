@@ -147,6 +147,7 @@ pub(crate) fn print_memory(session: &Session, renderer: &Renderer) {
             mib(code),
         );
     }
+    memory::dump_smaps();
     memory::print_top_anon_mappings();
 }
 
@@ -180,6 +181,9 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
     // `--premesh` overrides the saved option for the run (the comparisons run one
     // binary with the mode switched).
     let premesh_forced = crate::app::frame::forced_premesh(args)?;
+    // `--work-budget` rides on the feed (its uploads are the budgeted work).
+    let feed = crate::app::frame::work_feed(args)?;
+
     let mut app = App {
         username: args.username.clone(),
         render_distance: args.render_distance,
@@ -197,7 +201,7 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
         perspective: game::Perspective::FirstPerson,
         window: None,
         renderer: None,
-        feed: WorldFeed::default(),
+        feed,
         ui: None,
         gui: GuiFrame::default(),
         input: InputRouter::default(),
@@ -271,6 +275,13 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
             .as_ref()
             .map_or((0, 0, 0), |r| r.premesh_summary()),
     );
+    // The average upload budget the run's feeds worked to (`--work-budget`).
+    let budget_avg_ms = bench
+        .samples
+        .iter()
+        .map(|s| s.upload_budget_ms)
+        .sum::<f32>()
+        / bench.samples.len().max(1) as f32;
     println!("windowed bench at {}, {}", meta.width, meta.height);
     println!("{}", summary.text(&meta));
     let [i_avg, i_p50, i_p90, i_p99, i_p999, i_worst] = interval_stats(&bench.intervals);
@@ -294,6 +305,7 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "interval_p99_ms": i_p99,
             "interval_p999_ms": i_p999,
             "interval_worst_ms": i_worst,
+            "upload_budget_ms": budget_avg_ms,
             "sections_drawn": summary.sections_drawn,
             "sections_total": summary.sections_total,
             "draw_calls": summary.draw_calls,
@@ -327,6 +339,14 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
                 haste_render::PremeshMode::Off => "off",
                 haste_render::PremeshMode::Cone => "cone",
                 haste_render::PremeshMode::Predict => "predict",
+            })
+            .into();
+        json["work_budget"] = app
+            .renderer
+            .as_ref()
+            .map_or("fixed", |r| match r.work_budget_mode() {
+                haste_render::WorkBudgetMode::Fixed => "fixed",
+                haste_render::WorkBudgetMode::Adaptive => "adaptive",
             })
             .into();
         json["popin_episodes"] = popin.0.into();

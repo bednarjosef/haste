@@ -55,6 +55,7 @@ pub use quad_format::{set_terrain_format_quad, PackedQuad, QuadInstance, SpanKin
 pub use renderer::SectionLoadState;
 pub use renderer::{
     Camera, FrameInput, FrameStats, LightmapFrame, PremeshMode, Renderer, SkyState, ViewBob,
+    WorkBudgetMode,
 };
 pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;

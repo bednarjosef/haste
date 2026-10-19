@@ -112,6 +112,12 @@ pub struct Args {
     /// straight flight leg — the same motion every run, for the pre-mesh comparison.
     #[arg(long, default_value = "still")]
     pub bench_path: String,
+    /// The background-work budget: `fixed` (default) is the historical 2 ms / 8 ms mesh
+    /// upload budgets; `adaptive` predicts the next frame's cost from the recent frames
+    /// and gives the uploads the time left to the frame-time target, visible sections
+    /// first, so a burst of work no longer lands on whichever frame it arrived in.
+    #[arg(long)]
+    pub work_budget: Option<String>,
     /// Render distance in chunks, overriding the saved option (like `--vsync`).
     #[arg(long)]
     pub render_distance: Option<u8>,
