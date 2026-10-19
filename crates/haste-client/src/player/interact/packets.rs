@@ -65,7 +65,9 @@ impl LocalPlayer {
             }
             P::Cooldown(c) => {
                 // Vanilla `ClientPacketListener.handleItemCooldown`: a zero duration clears
-                // the group's cooldown, anything else (re)starts it.
+                // the group's cooldown, anything else (re)starts it. Logged at debug, the
+                // in-game check's evidence (`RUST_LOG=haste=debug`).
+                tracing::debug!("item cooldown {} for {} ticks", c.group, c.ticks);
                 if c.ticks == 0 {
                     self.int.cooldowns.remove(&c.group);
                 } else {

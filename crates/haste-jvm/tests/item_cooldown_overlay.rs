@@ -10,6 +10,10 @@ use haste_core::gui::GuiCommand;
 use haste_core::{game::GameMode, Identifier};
 use haste_jvm::{ItemCooldownHud, ItemCooldownsHud, JvmConfig, JvmHost};
 
+/// The process's one JVM is shared by the tests of this file (like `jvm.rs`'s `GUI` lock):
+/// they render through the same pipeline and publish the same cooldown snapshot.
+static GUI: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn cache() -> PathBuf {
     let local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
     if local.join("versions").is_dir() {
@@ -80,8 +84,15 @@ const SLOT: (i32, i32) = (160 - 90 + 2, 240 - 16 - 3);
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
 fn the_hotbar_item_gets_its_cooldown_sweep() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
+    // A clean slate: the other test of this file leaves its whole hotbar filled (the tests
+    // share the process's one JVM, and the order is not fixed).
+    for slot in 0..haste_jvm::INVENTORY_SIZE {
+        gui.set_inventory_slot(slot as i32, &haste_jvm::empty_stack())
+            .unwrap();
+    }
     gui.set_inventory_slot(0, &stack("minecraft:ender_pearl", 4))
         .unwrap();
     gui.with_state(|s| {
@@ -155,4 +166,73 @@ fn pearl_id() -> u32 {
     v["minecraft:item"]["entries"]["minecraft:ender_pearl"]["protocol_id"]
         .as_u64()
         .unwrap() as u32
+}
+
+/// The overlay's per-frame cost (the frame-path rule's before/after, measured as an A/B in
+/// one build — the offscreen bench renders an empty GUI, so the HUD is the only frame path
+/// this touches): a whole hotbar of stacks on cooldown versus the same hotbar without, the
+/// delta being the ten `itemCooldown` natives (the group strings and the snapshot lookups)
+/// and the ten batched fills per frame.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn the_overlay_costs_little_per_frame() {
+    use std::time::Instant;
+
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    for slot in 0..9 {
+        gui.set_inventory_slot(slot, &stack("minecraft:ender_pearl", 4))
+            .unwrap();
+    }
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.selected_slot = 0;
+        s.game_mode = GameMode::Survival;
+    });
+    gui.tick();
+    let frames = 200;
+    let cooldown = ItemCooldownsHud {
+        tick_count: 100,
+        cooldowns: [(
+            Identifier::minecraft("ender_pearl"),
+            ItemCooldownHud {
+                start_tick: 90,
+                end_tick: 110,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    // Warm both paths (JIT), then measure plain frames and swept frames.
+    haste_jvm::set_item_cooldowns(ItemCooldownsHud::default());
+    for _ in 0..50 {
+        let _ = render(&h);
+    }
+    let t = Instant::now();
+    for _ in 0..frames {
+        let _ = render(&h);
+    }
+    let plain = t.elapsed().as_secs_f64() / frames as f64;
+    haste_jvm::set_item_cooldowns(cooldown);
+    for _ in 0..50 {
+        let _ = render(&h);
+    }
+    let t = Instant::now();
+    for _ in 0..frames {
+        let _ = render(&h);
+    }
+    let swept = t.elapsed().as_secs_f64() / frames as f64;
+    println!(
+        "HUD frame: {:.1} us plain, {:.1} us with the sweep on all ten stacks ({:+.1} us)",
+        plain * 1e6,
+        swept * 1e6,
+        (swept - plain) * 1e6
+    );
+    assert!(
+        (swept - plain) < 1.0e-3,
+        "the sweep adds {:.3} ms per frame",
+        (swept - plain) * 1e3
+    );
+    haste_jvm::set_item_cooldowns(ItemCooldownsHud::default());
 }

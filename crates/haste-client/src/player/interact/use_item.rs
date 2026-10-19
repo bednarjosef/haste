@@ -383,6 +383,9 @@ impl LocalPlayer {
                         // `itemStack.use` — no screen opens and no use starts locally; the
                         // Pass falls through to the other hand.
                         if self.int.is_on_cooldown(&stack, env.data) {
+                            tracing::debug!(
+                                "use on cooldown: the packet went out, the client-side use is skipped"
+                            );
                             continue;
                         }
                         // `WritableBookItem.use`: SUCCESS — swing, itemUsed, its editor.
