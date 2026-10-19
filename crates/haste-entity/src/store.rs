@@ -608,16 +608,24 @@ impl EntityStore {
         }
         // A dropped item entity's stack: `ItemEntity.DATA_ITEM`, the first slot after
         // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
-        // clears the drop.
+        // clears the drop. Thrown projectiles carry their item in the same slot
+        // (`ThrowableItemProjectile.DATA_ITEM_STACK`): it feeds their sprite decoration
+        // (`crate::thrown_item`), never the dropped-item path.
+        let thrown = crate::registry::entity_type_name(e.kind)
+            .is_some_and(|n| crate::thrown_item::variant_for_name(n).is_some());
         if let Some(entry) = e.metadata.get(8) {
-            if matches!(entry.value, MetadataValue::ItemStack(_)) {
+            if matches!(entry.value, MetadataValue::ItemStack(_)) && !thrown {
                 // Only `ItemEntity` defines an item stack at this slot, so it also confirms the
                 // type when the registry name was unavailable at spawn (no cache).
                 e.is_item = true;
             }
-            e.item = match &entry.value {
-                MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
-                _ => None,
+            e.item = if thrown {
+                None
+            } else {
+                match &entry.value {
+                    MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                }
             };
         }
         if let Some(pose) = e.metadata.pose {
@@ -787,6 +795,17 @@ impl EntityStore {
         self.slot(id).and_then(|i| self.slots[i as usize].as_ref())
     }
 
+    /// The current positions of the entities that trail smoke
+    /// (`AbstractHurtingProjectile.createParticleTrail`), for the client's per-tick particle
+    /// spawn — no allocation, one position per trailing entity.
+    pub fn smoke_trail_positions(&self) -> impl Iterator<Item = DVec3> + '_ {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| crate::thrown_item::has_smoke_trail(slot.kind))
+            .map(|slot| slot.pos)
+    }
+
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
@@ -806,13 +825,25 @@ impl EntityStore {
             // Hanging entities (item frames, paintings) are drawn specially, and the client
             // moved them to the bounding-box centre vanilla's `recalculateBoundingBox` computes
             // (the spawn packet carries the block position, not the render origin). Minecarts
-            // draw through their own renderer as well (`AbstractMinecartRenderer`), but keep
-            // the entity's own interpolated position.
+            // and thrown projectiles draw through their own renderers as well
+            // (`AbstractMinecartRenderer`, `ThrownItemRenderer`, `DragonFireballRenderer`),
+            // but keep the entity's own interpolated position.
             let minecart_variant = crate::minecart::variant_for_kind(slot.kind);
             let minecart = minecart_variant
                 .map(|v| crate::minecart::decoration(&slot.metadata, v, partial_tick));
+            let thrown = crate::thrown_item::variant_for_kind(slot.kind);
+            let dragon_fireball = crate::dragon_fireball::is_dragon_fireball(slot.kind);
+            let non_hanging = minecart_variant.is_some() || thrown.is_some() || dragon_fireball;
             let decoration = minecart
                 .map(haste_core::model::Decoration::Minecart)
+                .or_else(|| {
+                    thrown
+                        .and_then(|t| crate::thrown_item::decoration(&t, &slot.metadata))
+                        .map(haste_core::model::Decoration::ThrownItem)
+                })
+                .or_else(|| {
+                    dragon_fireball.then_some(haste_core::model::Decoration::DragonFireball)
+                })
                 .or_else(|| {
                     crate::decoration::build(
                         slot.kind,
@@ -823,7 +854,7 @@ impl EntityStore {
                         slot.tick_count as f32 + partial_tick,
                     )
                 });
-            let pos = if minecart_variant.is_some() {
+            let pos = if non_hanging {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             } else if decoration.is_some() {
                 crate::decoration::render_center(
