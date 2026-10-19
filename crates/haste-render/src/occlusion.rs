@@ -225,7 +225,8 @@ pub struct VisibleMask {
     h: i32,
     columns: Vec<u32>,
     /// Node index per reached section, in BFS pop order: for a grid of
-    /// `(2r+1)^2` columns x `h` sections, `((dx * w + dz) * h + si)`.
+    /// `(2r+1)^2` columns x `h` sections, `((dx * w + dz) * h + si)`. The
+    /// background walk drops the known-empty sections (`retain_order`).
     order: Vec<u32>,
 }
 
@@ -252,6 +253,13 @@ impl VisibleMask {
             let (col, si) = ((n / h as u32) as i32, (n % h as u32) as i32);
             (ChunkPos::new(cx + col / w - r, cz + col % w - r), si)
         })
+    }
+
+    /// Keeps only the nodes of `order` that `keep` accepts (by node index); the
+    /// column bits stay, so `column` still answers "was it reached".
+    pub(crate) fn retain_order(&mut self, keep: impl FnMut(u32) -> bool) {
+        let mut keep = keep;
+        self.order.retain(|&n| keep(n));
     }
 
     /// HashMap-style lookup (tests).

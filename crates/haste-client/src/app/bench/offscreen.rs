@@ -18,6 +18,9 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    // The offscreen bench reports the per-pass GPU split; the windowed bench (the one
+    // compared with vanilla) leaves it off unless HASTE_GPU_BREAKDOWN is set.
+    renderer.set_gpu_breakdown(true);
     renderer.set_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
