@@ -214,3 +214,91 @@ fn boats_offscreen() {
         "the boats covered only {changed} pixels of the 640x480 frame"
     );
 }
+
+/// Compares Haste's live shot of the lead's fixed boat scene against the vanilla reference
+/// (`cache/oracle/26.3/screenshots/boats-ref.png`, recorded by the real 26.3 client at
+/// 1408x828, spectator, feet 3003.5 200.5 3000.0, yaw 0, pitch 30, HUD off; Haste's shot is
+/// `target/shots/script-boats-haste.png` from the same camera). Prints the overall match and
+/// a per-region table over the three boats (oak at x 3000.5, chest boat at 3003.5, raft at
+/// 3006.5 - left, centre and right of the frame), and saves the red-highlighted diff to
+/// `target/render-checks/boats-ref-diff.png`.
+#[test]
+#[ignore = "needs the vanilla reference screenshot and target/shots/script-boats-haste.png (dev evidence)"]
+fn boats_match_the_vanilla_reference() {
+    let reference = haste_core::paths::oracle_dir().join("screenshots/boats-ref.png");
+    let shot = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/shots/script-boats-haste.png");
+    let reference = image::open(&reference)
+        .unwrap_or_else(|e| {
+            panic!(
+                "opening the vanilla reference: {e} (path: {})",
+                reference.display()
+            )
+        })
+        .to_rgba8();
+    let haste = image::open(&shot)
+        .unwrap_or_else(|e| panic!("opening Haste's shot: {e} (path: {})", shot.display()))
+        .to_rgba8();
+    assert_eq!(
+        reference.dimensions(),
+        haste.dimensions(),
+        "both shots must be 1408x828"
+    );
+    let (w, h) = reference.dimensions();
+
+    // Per-pixel channel error, and the fraction of a region beyond tolerance 24 (vanilla
+    // and Haste shade and fog slightly differently; a real mismatch lights a boat's whole
+    // region up).
+    const TOLERANCE: u8 = 24;
+    let err = |a: &image::Rgba<u8>, b: &image::Rgba<u8>| -> u8 {
+        (0..4)
+            .map(|i| (a[i] as i32 - b[i] as i32).unsigned_abs())
+            .max()
+            .unwrap_or(0) as u8
+    };
+    let region = |x0: u32, x1: u32, y0: u32, y1: u32| -> (f64, f64) {
+        let (mut differing, mut sum, mut n) = (0u64, 0u64, 0u64);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let e = err(reference.get_pixel(x, y), haste.get_pixel(x, y));
+                sum += e as u64;
+                n += 1;
+                if e > TOLERANCE {
+                    differing += 1;
+                }
+            }
+        }
+        (differing as f64 / n as f64, sum as f64 / n as f64)
+    };
+    let (frac, mean) = region(0, w, 0, h);
+    eprintln!("overall: {frac:.1}% beyond tolerance {TOLERANCE}, mean error {mean:.2}/255");
+    // The three boats from the fixed camera (yaw 0, pitch 30): left, centre, right thirds of
+    // the lower half; the top is sky, which only the fog and sun position can move.
+    for (name, x0, x1) in [
+        ("oak (left)", 60, 480),
+        ("chest (centre)", 480, 930),
+        ("raft (right)", 930, 1350),
+    ] {
+        let (frac, mean) = region(x0, x1, h / 3, h);
+        eprintln!("{name}: {frac:.1}% beyond tolerance, mean error {mean:.2}");
+    }
+    let (frac, mean) = region(0, w, 0, h / 3);
+    eprintln!("sky (top third): {frac:.1}% beyond tolerance, mean error {mean:.2}");
+
+    // Save the diff (white within tolerance, red beyond) for the lead's eyes.
+    let mut diff = image::RgbaImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let e = err(reference.get_pixel(x, y), haste.get_pixel(x, y));
+            let c = if e > TOLERANCE {
+                [255, 0, 0, 255]
+            } else {
+                [e, e, e, 255]
+            };
+            diff.put_pixel(x, y, image::Rgba(c));
+        }
+    }
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    diff.save(out.join("boats-ref-diff.png")).unwrap();
+}
