@@ -60,6 +60,15 @@ impl Renderer {
         self.gpu.view_formats
     }
 
+    /// Writes the GPU sub-pass timestamps (the opaque/cutout/translucent/... breakdown)
+    /// every 64th frame. Off by default: each sampled frame costs ~2.5 ms more GPU time
+    /// on RADV, which would show in every p99.
+    pub fn set_gpu_breakdown(&mut self, on: bool) {
+        if let Some(t) = &mut self.timer {
+            t.sample_subpasses |= on;
+        }
+    }
+
     /// CPU phase and GPU pass timings of the last frame.
     pub fn timings(&self) -> crate::timing::FrameTimings {
         self.timings
