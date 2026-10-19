@@ -72,28 +72,29 @@ fn staged_quads() -> Vec<StagedQuad> {
     staged
 }
 
-/// Runs `flush_staged` on `staged` and returns the emitted quads as a sorted
-/// multiset of (layer, the quad's four packed vertices) — the merge result,
-/// independent of emission order.
-fn flushed_quads(staged: &mut [StagedQuad]) -> Vec<(u8, Vec<u8>)> {
+/// Runs `flush_staged` on `staged` and returns the emitted triangles as a
+/// sorted multiset of (layer, the triangle's three packed vertices, sorted) —
+/// the merge result, independent of emission order. Merged rectangles are
+/// triangle fans over a boundary ring (merge.rs), so triangles, not quads,
+/// are what the sink emits.
+fn flushed_triangles(staged: &mut [StagedQuad]) -> Vec<(u8, Vec<Vec<u8>>)> {
     let mut sink = MeshSink::new();
-    flush_staged(staged, &mut sink);
+    let mut junction = JunctionScratch::new();
+    flush_staged(staged, &mut sink, &mut junction);
     let (vertices, layers) = sink.take_layers();
-    let mut quads = Vec::new();
+    let mut tris = Vec::new();
     for layer in &layers {
-        for indices in layer.indices.as_chunks::<6>().0 {
-            // The six indices are two triangles over one quad's four
-            // consecutive vertices; the lowest index is the quad's base.
-            let base = *indices.iter().min().unwrap() as usize;
-            let mut bytes = Vec::with_capacity(4 * std::mem::size_of::<PackedVertex>());
-            for v in &vertices[base..base + 4] {
-                bytes.extend_from_slice(bytemuck::bytes_of(v));
-            }
-            quads.push((layer_index(layer.layer) as u8, bytes));
+        for tri in layer.indices.as_chunks::<3>().0 {
+            let mut verts: Vec<Vec<u8>> = tri
+                .iter()
+                .map(|&i| bytemuck::bytes_of(&vertices[i as usize]).to_vec())
+                .collect();
+            verts.sort();
+            tris.push((layer_index(layer.layer) as u8, verts));
         }
     }
-    quads.sort();
-    quads
+    tris.sort();
+    tris
 }
 
 #[test]
@@ -101,17 +102,19 @@ fn greedy_merge_is_order_independent() {
     let staged = staged_quads();
     // The hole splits the 6x5 grid into four rectangles (6x3, 6x1, 3x1, 2x1),
     // the second sprite's run is one more, and the three direct quads stay.
-    let expect_quads = 4 + 1 + 3;
-    let reference = flushed_quads(&mut staged.clone());
+    // Emitted as boundary-ring fans with a split vertex at each neighbouring
+    // corner: 11 + 2 + 2 + 4 + 4 triangles plus 3 direct quads' 2 each.
+    let expect_tris = 11 + 2 + 2 + 4 + 4 + 3 * 2;
+    let reference = flushed_triangles(&mut staged.clone());
     assert_eq!(
         reference.len(),
-        expect_quads,
-        "29 unit faces + a 3-run must merge into 5 quads plus 3 direct quads"
+        expect_tris,
+        "29 unit faces + a 3-run must merge into 5 rectangles (29 triangles) plus 3 direct quads"
     );
 
     // Permutations of the same staged quads: reversed, rotations, and a
     // stride shuffle (deterministic; no RNG needed). All must flush to the
-    // same multiset of quads.
+    // same multiset of triangles.
     let mut permutations: Vec<Vec<StagedQuad>> =
         vec![staged.iter().rev().cloned().collect(), staged.clone()];
     for r in [1usize, 7, 17] {
@@ -131,7 +134,7 @@ fn greedy_merge_is_order_independent() {
     );
     for p in permutations {
         assert_eq!(
-            flushed_quads(&mut p.clone()),
+            flushed_triangles(&mut p.clone()),
             reference,
             "staging the same quads in a different order changed the merge result"
         );

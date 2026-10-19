@@ -4,10 +4,9 @@
 // back-face culling (`RenderPipelines.FLAT_CLOUDS` is the clouds pipeline with
 // `withCull(false)`), so the plane is visible from below and above alike.
 
-use super::mesh::{encode_face, Dir};
-use super::CloudVertex;
+use super::mesh::{pack_face, Dir};
 
 /// Vanilla `buildFlatCell`: one `Direction.DOWN` face carrying `FLAG_USE_TOP_COLOR`.
-pub(super) fn build_flat_cell(out: &mut Vec<CloudVertex>, x: i32, z: i32) {
-    encode_face(out, x, z, Dir::Down, true, false);
+pub(super) fn build_flat_cell(out: &mut Vec<u32>, x: i32, z: i32) {
+    out.push(pack_face(x, z, Dir::Down, true, false));
 }

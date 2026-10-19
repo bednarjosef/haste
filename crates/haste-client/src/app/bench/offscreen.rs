@@ -22,6 +22,17 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
+    // `--premesh` over the saved option, like the windowed bench.
+    if let Some(mode) = args
+        .premesh
+        .as_deref()
+        .map(crate::app::frame::parse_premesh)
+        .transpose()?
+    {
+        renderer.set_premesh(mode);
+    } else {
+        renderer.set_premesh(crate::app::frame::premesh_mode(session.options.premesh));
+    }
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     // The render thread's weather extraction buffer and per-tick column cache (both
@@ -81,6 +92,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_cloud_status(crate::app::frame::cloud_status(session.options.clouds));
+        renderer.set_cloud_range(session.options.cloud_range);
         {
             let snapshot = shared
                 .particle_snapshots
@@ -261,6 +273,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_cloud_status(crate::app::frame::cloud_status(session.options.clouds));
+        renderer.set_cloud_range(session.options.cloud_range);
         {
             let snapshot = shared
                 .particle_snapshots
@@ -282,6 +295,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             upload_bytes: stats.upload_bytes,
             indices_drawn: stats.indices_drawn,
             index: samples.len() as u32,
+            visible_unmeshed: 0,
         });
         if shared.is_closed() {
             anyhow::bail!(
@@ -290,7 +304,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             );
         }
     }
-    let summary = bench_summary(&samples);
+    let summary = bench_summary(&samples, renderer.premesh_summary());
     println!("{}", summary.text(&meta));
     print_slowest_frames(&samples);
     if let Some(out) = &args.bench_out {
