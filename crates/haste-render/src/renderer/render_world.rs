@@ -189,7 +189,8 @@ impl Renderer {
             line_width: 0.0,
             aspect,
             game_time: game_time_uniform,
-            _pad: [0.0; 2],
+            hw_srgb: f32::from(self.hw_srgb),
+            _pad: 0.0,
         };
         // Vanilla's outline width (Window.getAppropriateLineWidth): scales with the
         // framebuffer so it covers the same fraction of the screen at any resolution.
@@ -229,7 +230,8 @@ impl Renderer {
                 line_width: 0.0,
                 aspect,
                 game_time: game_time_uniform,
-                _pad: [0.0; 2],
+                hw_srgb: f32::from(self.hw_srgb),
+                _pad: 0.0,
             };
             self.gpu.queue.write_buffer(
                 &self.hand_camera_uniform,
@@ -276,27 +278,22 @@ impl Renderer {
         let capture_frame = self.capture_pending && self.offscreen.is_none();
         let mut held_surface_texture: Option<wgpu::SurfaceTexture> = None;
         let mut capture_color: Option<wgpu::Texture> = None;
-        let (color_view, depth_view, gui_view) = if capture_frame && !self.surface_copy {
+        // The one colour view every pass of the frame renders through: the non-sRGB view of
+        // the target, so the stored bytes are the shaders' sRGB-encoded values and the
+        // translucent blends act on them like vanilla's plain UNORM main target.
+        let (target_view, depth_view) = if capture_frame && !self.surface_copy {
             let cap = Self::make_offscreen(
                 &self.gpu.device,
                 self.size,
                 self.surface_format,
                 Self::gui_format_for(&self.gpu, self.surface_format),
             )?;
-            let views = (
-                cap.color_view.clone(),
-                cap.depth_view.clone(),
-                cap.gui_view.clone(),
-            );
+            let views = (cap.target_view.clone(), cap.depth_view.clone());
             capture_color = Some(cap.color);
             views
         } else {
             match (&self.offscreen, &self.depth) {
-                (Some(off), _) => (
-                    off.color_view.clone(),
-                    off.depth_view.clone(),
-                    off.gui_view.clone(),
-                ),
+                (Some(off), _) => (off.target_view.clone(), off.depth_view.clone()),
                 (None, Some(d)) => {
                     let surface = self.surface.as_ref().context("no surface")?;
                     let frame_tex = match surface.get_current_texture() {
@@ -315,12 +312,11 @@ impl Renderer {
                     held_surface_texture = Some(frame_tex);
                     let tex = held_surface_texture.as_ref().unwrap();
                     (
-                        tex.texture.create_view(&Default::default()),
-                        d.clone(),
                         tex.texture.create_view(&wgpu::TextureViewDescriptor {
                             format: Some(Self::gui_format_for(&self.gpu, self.surface_format)),
                             ..Default::default()
                         }),
+                        d.clone(),
                     )
                 }
                 _ => anyhow::bail!("no render target"),
@@ -547,13 +543,17 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
+                    view: &target_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
+                        // The clear is the fog colour's sRGB-encoded bytes: the view is
+                        // non-sRGB, so no hardware conversion happens and the raw value is
+                        // what lands in the target (an sRGB view would have encoded the
+                        // linear colour itself).
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: fog_color[0] as f64,
-                            g: fog_color[1] as f64,
-                            b: fog_color[2] as f64,
+                            r: fog_srgb[0] as f64,
+                            g: fog_srgb[1] as f64,
+                            b: fog_srgb[2] as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -697,7 +697,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hand"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
+                    view: &target_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -722,11 +722,11 @@ impl Renderer {
             draw_calls += self.entity.draw_hand(&mut pass);
         }
 
-        // GUI on top (see `gui_pass`).
+        // GUI on top (see `gui_pass`): the same non-sRGB view of the target.
         if let Some(n) = self.encode_gui(
             &mut encoder,
             frame,
-            &gui_view,
+            &target_view,
             held_surface_texture.as_ref(),
             capture_color.as_ref(),
         ) {

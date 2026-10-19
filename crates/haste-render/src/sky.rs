@@ -45,16 +45,15 @@ struct SkyUniforms {
     fog_color: [f32; 4],
     sunrise_color: [f32; 4],
     sunrise_dir: [f32; 4],
-    /// x: the sky kind (0 overworld, 1 none, 2 end); the other slots are unused.
+    /// w: the sky kind (0 overworld, 1 none, 2 end); y: 1 when the target view is sRGB
+    /// (GL fallback — hardware encodes; see sky.wgsl `target_color`).
     params: [f32; 4],
-    /// Vanilla fog bands for the sky dome (0..sky_end on both distances) and the weather
-    /// columns (the terrain bands): env start/end, rd start/end, sky end, cloud end.
+    /// Vanilla fog bands for the sky dome and the weather columns: env start/end, rd start/end, sky end, cloud end.
     fog_bands: [f32; 4],
     fog_bands2: [f32; 4],
     /// The sunrise/sunset fan's rotation (camera rotation frame).
     sunrise_matrix: [[f32; 4]; 4],
-    /// The End flash (vanilla `SkyRenderer.renderEndFlash`): intensity in x (0 = none),
-    /// the x/y direction angles in degrees in y/z.
+    /// The End flash (vanilla `SkyRenderer.renderEndFlash`): intensity in x (0 = none), angles in y/z.
     end_flash: [f32; 4],
     /// The End flash quad's pose (camera rotation frame).
     end_flash_matrix: [[f32; 4]; 4],
@@ -266,14 +265,13 @@ pub struct SkyRenderer {
     device: Arc<wgpu::Device>,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    /// The environment atlas's view (sun, moons, clouds, rain, snow, end sky), lent to the
-    /// weather pass at startup.
+    /// The environment atlas's view (sun, moons, clouds, rain, snow, end sky), lent to the weather pass.
     atlas_view: wgpu::TextureView,
     background: wgpu::RenderPipeline,
     celestial: wgpu::RenderPipeline,
     /// The sky disc fan (vanilla `SkyRenderer.renderSkyDisc`).
     disc: wgpu::RenderPipeline,
-    /// The sunrise/sunset fan (vanilla `renderSunriseAndSunset`).
+    /// The sunrise/sunset fan (`renderSunriseAndSunset`).
     sunrise: wgpu::RenderPipeline,
     /// The black bottom fan (vanilla `renderDarkDisc`), drawn while `dark_disc` is set.
     dark_disc_pipeline: wgpu::RenderPipeline,
@@ -291,14 +289,15 @@ pub struct SkyRenderer {
     /// Sun + moon vertex count at the start of `vertices` (the End flash in the End).
     celestial_count: u32,
     /// The End flash (vanilla `SkyRenderer.renderEndFlash`, driven by the client's
-    /// `EndFlashState`): intensity and the two direction angles in degrees. Zero (no
-    /// flash) until `set_end_flash` is called.
+    /// `EndFlashState`): intensity, the two direction angles in degrees; zero until set.
     end_flash: (f32, f32, f32),
     /// The End flash quad (vanilla `renderEndFlash`, `END_FLASH_HEIGHT`/`END_FLASH_SCALE`).
     end_flash_pipeline: wgpu::RenderPipeline,
     rects: AtlasRects,
     pub kind: SkyKind,
     pub colors: SkyColors,
+    /// Whether the target view is sRGB and the hardware encodes (GL fallback).
+    hw_srgb: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -611,6 +610,7 @@ impl SkyRenderer {
             vertices: Vec::new(),
             celestial_count: 0,
             rects,
+            hw_srgb: target_format.is_srgb(),
             kind: SkyKind::Overworld,
             colors: sky_colors(
                 &SkyState {
@@ -746,7 +746,7 @@ impl SkyRenderer {
             sunrise_dir: [colors.sunrise_side, 0.0, 0.0, colors.star_brightness],
             params: [
                 0.0,
-                0.0,
+                f32::from(self.hw_srgb),
                 0.0,
                 match kind {
                     SkyKind::Overworld => 0.0,

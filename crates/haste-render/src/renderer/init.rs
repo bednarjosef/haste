@@ -195,6 +195,11 @@ impl Renderer {
             .as_ref()
             .map(|(_, f)| *f)
             .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb);
+        // The main pass renders through the non-sRGB view of the target, like the GUI pass:
+        // vanilla's main target is a plain UNORM buffer whose translucent blends act on the
+        // stored sRGB bytes, so the shaders write those bytes raw (see each shader's
+        // `hw_srgb` flag for the GL fallback that has no non-sRGB view).
+        let main_format = Self::gui_format_for(&gpu, surface_format);
         let make_pipeline = |label: &str, fragment: &str, blend: Option<wgpu::BlendState>| {
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -224,7 +229,7 @@ impl Renderer {
                         entry_point: Some(fragment),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
-                            format: surface_format,
+                            format: main_format,
                             blend,
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
@@ -328,7 +333,7 @@ impl Renderer {
         let entity = crate::entity::EntityRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
-            surface_format,
+            main_format,
             &camera_bind_group_layout,
             &lightmap_bind_group_layout,
             font.clone(),
@@ -337,20 +342,20 @@ impl Renderer {
         let sky = crate::sky::SkyRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
-            surface_format,
+            main_format,
             assets,
         );
         let clouds = crate::clouds::CloudRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
-            surface_format,
+            main_format,
             assets,
         );
         let (rain_rect, snow_rect) = sky.weather_rects();
         let mut weather = crate::weather::WeatherRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
-            surface_format,
+            main_format,
             rain_rect,
             snow_rect,
         );
@@ -363,14 +368,14 @@ impl Renderer {
         let overlay = crate::overlay::OverlayRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
-            surface_format,
+            main_format,
             &camera_bind_group_layout,
             assets,
         );
         let particles = crate::particles::ParticleRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
-            surface_format,
+            main_format,
             &camera_bind_group_layout,
             &lightmap_bind_group_layout,
         );
@@ -399,6 +404,7 @@ impl Renderer {
             gpu,
             surface: surface.map(|(s, _)| s),
             surface_format,
+            hw_srgb: main_format.is_srgb(),
             surface_state: None,
             offscreen,
             atlas,

@@ -223,11 +223,15 @@ struct CameraUniform {
     /// Vanilla `Globals.GameTime`: `(gameTime % 24000 + partial) / 24000`, the end portal's
     /// layer scroll (0 when the frame carries no game time, e.g. the menu).
     game_time: f32,
+    /// 1 when the main pass's colour view is an sRGB format the hardware encodes on store
+    /// (the GL fallback with no non-sRGB view): the shaders then emit linear colour. 0
+    /// with the normal non-sRGB view, where they write vanilla's sRGB-encoded bytes raw.
+    hw_srgb: f32,
     /// WGSL rounds a uniform struct's size up to its alignment (16): the Rust struct must
     /// be 144 bytes (36 floats), one pad float more than the WGSL fields spell out, or the
     /// buffer binds 4 bytes short of what the shader expects. The assertion below keeps
     /// Rust and WGSL agreeing.
-    _pad: [f32; 2],
+    _pad: f32,
 }
 
 const _: () = assert!(
@@ -256,6 +260,9 @@ pub struct Renderer {
     gpu: Gpu,
     surface: Option<wgpu::Surface<'static>>,
     surface_format: wgpu::TextureFormat,
+    /// Whether the main pass's colour view is sRGB (hardware encodes, shaders emit linear):
+    /// true only on the GL fallback without non-sRGB views.
+    hw_srgb: bool,
     surface_state: Option<(u32, u32, wgpu::SurfaceConfiguration)>,
     offscreen: Option<Offscreen>,
     atlas: Arc<haste_assets::AtlasBuilder>,

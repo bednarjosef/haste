@@ -17,7 +17,8 @@ struct Camera {
     line_width: f32,
     aspect: f32,
     game_time: f32,
-    _pad: f32,
+    // 1 when the target view is sRGB and the hardware encodes (GL fallback); see entity.wgsl.
+    hw_srgb: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -161,5 +162,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let c = textureLoad(end_portal, texel, 0).rgb;
         color = color + c * COLORS[i];
     }
-    return vec4<f32>(mix(color, camera.fog_color.rgb, in.fog), 1.0);
+    // Encoded for the non-sRGB view like entity.wgsl; the GL fallback's sRGB view gets
+    // the linear value.
+    let rgb = mix(color, camera.fog_color.rgb, in.fog);
+    return vec4<f32>(select(srgb_encode(rgb), rgb, camera.hw_srgb == 1.0), 1.0);
+}
+
+// The sRGB transfer function (IEC 61966-2-1), the one the sRGB texture formats apply.
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3<f32>(0.0));
+    return select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3<f32>(0.0031308));
 }

@@ -36,9 +36,11 @@ impl winit::raw_window_handle::HasDisplayHandle for DisplayHandleWrapper {
 #[allow(dead_code)]
 pub(crate) struct Offscreen {
     pub(crate) color: wgpu::Texture,
-    pub(crate) color_view: wgpu::TextureView,
-    /// Non-sRGB view of `color` for the GUI pass.
-    pub(crate) gui_view: wgpu::TextureView,
+    /// The one colour view both the main and the GUI pass render through: the non-sRGB
+    /// view of `color` where views are supported, so the stored bytes are the shaders'
+    /// sRGB-encoded values and translucent blends act on them like vanilla's UNORM
+    /// target. On the GL fallback it is `color`'s own sRGB view (hardware encodes).
+    pub(crate) target_view: wgpu::TextureView,
     depth: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
     pub(crate) width: u32,
@@ -156,11 +158,10 @@ impl Renderer {
             view_formats: &[],
         });
         Ok(Offscreen {
-            gui_view: color.create_view(&wgpu::TextureViewDescriptor {
+            target_view: color.create_view(&wgpu::TextureViewDescriptor {
                 format: Some(gui_format),
                 ..Default::default()
             }),
-            color_view: color.create_view(&Default::default()),
             depth_view: depth.create_view(&Default::default()),
             color,
             depth,

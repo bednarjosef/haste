@@ -25,7 +25,11 @@ struct Camera {
     aspect: f32,
     // Vanilla `Globals.GameTime` (the end portal layers scroll with it; see endportal.wgsl).
     game_time: f32,
-    _pad: f32,
+    // 1 when the target view is sRGB and the hardware encodes on store (the GL fallback
+    // without non-sRGB views): the fragment then emits linear colour like it used to.
+    // 0 with the normal non-sRGB view: the fragment writes vanilla's sRGB-encoded bytes
+    // raw, so the translucent blends act on them like vanilla's plain UNORM target.
+    hw_srgb: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -199,13 +203,15 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     // AO and face shade) * lightmap texel, then the fog mix with the encoded fog colour.
     // The atlas here is an UNORM texture like vanilla's (`TextureAtlas.createTexture`),
     // so the sample is already the encoded texel (and the GPU filters encoded values,
-    // like vanilla's); the target is sRGB (the output is re-encoded), so the result is
-    // decoded for the target. Doing the multiplies on linear values instead lifts every
+    // like vanilla's). The target view is non-sRGB, so the encoded result is written raw
+    // and the translucent blend acts on the encoded bytes exactly like vanilla's; on the
+    // GL fallback's sRGB view the hardware would encode, so the linear value goes out
+    // there instead. Doing the multiplies on linear values instead lifts every
     // factor below 1 to roughly its 1/2.4th power (a 0.6 side face or a two-occluder AO
     // corner draws ~25% too bright).
     let lit = color.rgb * in.tint * in.light;
     let fogged = mix(lit, srgb_encode(camera.fog_color.rgb), in.fog);
-    return vec4<f32>(srgb_decode(fogged), color.a);
+    return vec4<f32>(select(fogged, srgb_decode(fogged), camera.hw_srgb == 1.0), color.a);
 }
 
 // The sRGB transfer function (IEC 61966-2-1), the one the sRGB texture formats apply.
