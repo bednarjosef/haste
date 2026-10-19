@@ -20,10 +20,12 @@ use crate::gui::Shelf;
 
 mod atlas;
 mod block_entities;
+mod boat;
 mod cape;
 mod dragon_fireball;
 mod equipment;
 mod experience_orb;
+mod first_person;
 mod flame;
 #[cfg(test)]
 mod flame_tests;
@@ -253,60 +255,9 @@ impl TickPair {
     }
 }
 
-/// What the first-person view holds: the local player's skin and arm model, the item in the
-/// main hand (the arm is drawn only when the hand is empty, like vanilla), the light at the
-/// camera, and this tick's hand animation (swing, equip progress and bob).
-///
-/// Everything animated lives here as the two ends of the last tick; the renderer lerps them by
-/// partial tick and applies vanilla's transforms, so all per-tick state stays in the client.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FirstPerson {
-    pub skin: Option<Identifier>,
-    pub slim: bool,
-    /// `AvatarRenderState.showRightSleeve`: the arm draws its sleeve layer.
-    pub sleeve: bool,
-    pub item: Option<haste_core::RegistryIndex>,
-    pub light: (u8, u8),
-    /// The main hand is using an item with the EAT or DRINK animation and ticks left
-    /// (`FirstPersonHandsAndItemsRenderState`: `isUsingItem && useItemRemainingTicks > 0 &&
-    /// useItemHand == MAIN_HAND`): the eat/drink transform replaces the swing.
-    pub use_eat: bool,
-    /// `FirstPersonHandsAndItemsRenderState.useItemRemainingTicks` (`getUseItemRemainingTicks`).
-    pub use_remaining: i32,
-    /// `FirstPersonHandsAndItemsRenderState.mainHandUseDuration` (`Item.getUseDuration`, a
-    /// consumable's `consume_ticks`).
-    pub use_duration: i32,
-    /// Swing progress 0..1 while the main hand swings, 0 when it does not
-    /// (`FirstPersonHandsAndItemsRenderState`'s `attackValue`).
-    pub attack: TickPair,
-    /// Equip progress: 1 when the item is fully held, 0 while it switches
-    /// (`FirstPersonHandsAndItems.mainHandHeight`, the inverse of vanilla's `inverseArmHeight`).
-    pub equip: TickPair,
-    /// Hand lag behind the camera turn, in degrees (`LocalPlayer.xBob`/`xBobO`).
-    pub x_bob: TickPair,
-    /// Hand lag behind the camera turn, in degrees (`LocalPlayer.yBob`/`yBobO`).
-    pub y_bob: TickPair,
-}
-
-impl Default for FirstPerson {
-    /// The empty hand at rest: fully equipped, no swing, no use, no bob, full block light.
-    fn default() -> Self {
-        FirstPerson {
-            skin: None,
-            slim: false,
-            sleeve: true,
-            item: None,
-            light: (15, 0),
-            use_eat: false,
-            use_remaining: 0,
-            use_duration: 0,
-            attack: TickPair::fixed(0.0),
-            equip: TickPair::fixed(1.0),
-            x_bob: TickPair::fixed(0.0),
-            y_bob: TickPair::fixed(0.0),
-        }
-    }
-}
+/// What the first-person view holds (vanilla `FirstPersonHandsAndItemsRenderState`): see
+/// [`first_person`](self::first_person).
+pub use first_person::FirstPerson;
 
 /// A name tag to draw: world anchor (above the head) and the text.
 #[derive(Clone, Debug)]
@@ -375,6 +326,12 @@ pub struct EntityRenderer {
     /// or while scoping, else distance / 96), set per frame by the renderer.
     beam_radius_scale: f32,
     view_scale: f32,
+    /// The boats' water patches (vanilla `water_mask`): depth-only triangles that cull the
+    /// water inside a floating hull ([`boat`](self::boat)).
+    mask_vertices: Vec<crate::entity::boat::MaskVertex>,
+    mask_buffer: wgpu::Buffer,
+    mask_capacity: usize,
+    water_mask_pipeline: wgpu::RenderPipeline,
     /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
     pub beams: crate::blockentity::BeamPipelines,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
@@ -410,6 +367,7 @@ impl EntityRenderer {
     ) {
         let view_scale = self.view_scale;
         self.vertices.clear();
+        self.mask_vertices.clear();
         self.nametags.clear();
         self.drawn = 0;
         for e in entities {
@@ -528,6 +486,12 @@ impl EntityRenderer {
                 // Overlay layers: the same transform and pose, each with its own texture and
                 // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
                 for overlay in e.overlays.iter().flatten() {
+                    // The water patch is not a coloured layer: its triangles go to the
+                    // depth-only mask buffer (`BoatRenderer.submitTypeAdditions`).
+                    if boat::is_water_patch(&overlay.model) {
+                        self.emit_water_mask(&overlay.model, root);
+                        continue;
+                    }
                     let Some((oroot, hurt)) = self.overlay_root(e, &overlay.model, root, assets)
                     else {
                         continue;
@@ -578,6 +542,17 @@ impl EntityRenderer {
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         }
+        if self.mask_vertices.len() > self.mask_capacity {
+            self.mask_capacity = self.mask_vertices.len().next_power_of_two();
+            self.mask_buffer = boat::make_mask_buffer(&self.device, self.mask_capacity);
+        }
+        if !self.mask_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.mask_buffer,
+                0,
+                bytemuck::cast_slice(&self.mask_vertices),
+            );
+        }
     }
     /// Item registry names by protocol id (for the held item).
     pub fn set_item_names(&mut self, names: Vec<Identifier>) {
@@ -585,15 +560,20 @@ impl EntityRenderer {
         self.item_models.clear();
     }
 
-    /// Draws into the main pass; the camera bind group must be set at group 0.
+    /// Draws into the main pass (camera bind group at group 0); the boats' water masks ride
+    /// along after the models (vanilla submits the patch inside the boat's own submission).
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
-        if self.vertices.is_empty() {
+        if self.vertices.is_empty() && self.mask_vertices.is_empty() {
             return 0;
         }
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(1, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..self.vertices.len() as u32, 0..1);
-        1
+        let mut calls = 0;
+        if !self.vertices.is_empty() {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(1, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.draw(0..self.vertices.len() as u32, 0..1);
+            calls += 1;
+        }
+        calls + boat::draw_masks(self, pass)
     }
 }

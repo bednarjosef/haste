@@ -4,6 +4,7 @@
 
 pub mod animation;
 pub mod avatar;
+pub mod boat;
 pub mod decoration;
 pub mod dims;
 pub mod dragon_fireball;
