@@ -347,6 +347,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "cull_ms": summary.cull_ms,
             "encode_ms": summary.encode_ms,
             "submit_ms": summary.submit_ms,
+            "feed_ms": summary.feed_ms,
             "present_ms": summary.present_ms,
             "gpu_main_ms": summary.gpu_ms[0],
             "gpu_hand_ms": summary.gpu_ms[1],
