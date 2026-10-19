@@ -30,6 +30,7 @@ mod hud;
 mod input;
 pub(crate) mod item_uses;
 mod level;
+mod maps;
 mod particles;
 pub(crate) mod pickup;
 mod player_model;
@@ -105,6 +106,8 @@ fn tick_once(
     let tick_moved = level::tick(driver, shared, &input)?;
     // The pickup particles the tick produced or advanced, published to the render thread.
     pickup::publish(driver, shared);
+    // The maps' data, published when a map's packets changed it.
+    maps::publish(driver, shared);
     // The player's own block sounds this tick (footsteps, mining, placing), played through
     // the same output the packets went through above.
     sound::play_own_sounds(driver, shared);

@@ -192,6 +192,8 @@ fn held_item_draws_the_item_model_not_the_block_model() {
             slim: false,
             sleeve: true,
             item: Some(item_index(&data, name)),
+            map: None,
+            offhand_empty: true,
             light: (15, 0),
             use_eat: false,
             use_remaining: 0,

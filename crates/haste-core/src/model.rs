@@ -447,6 +447,9 @@ pub struct ItemFrameDecoration {
     pub glow: bool,
     /// The framed item (`DATA_ITEM`), by item registry index.
     pub item: Option<crate::RegistryIndex>,
+    /// The framed stack's `minecraft:map_id` component (`ItemFrame.getFramedMapId`): the map
+    /// whose contents the frame draws instead of the item model, when its data has arrived.
+    pub map_id: Option<i32>,
 }
 
 /// The state `PaintingRenderer.extractRenderState` collects for a painting.

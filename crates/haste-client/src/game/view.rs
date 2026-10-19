@@ -162,6 +162,11 @@ impl ViewState {
 pub struct FirstPersonView {
     /// The main-hand stack's item (`None` draws the bare arm).
     pub item: Option<RegistryIndex>,
+    /// The shown stack's `minecraft:map_id`: the hand draws the map renderer's view
+    /// instead of the item model.
+    pub map: Option<i32>,
+    /// Whether the off hand is empty (the one- or two-handed map pose's choice).
+    pub offhand_empty: bool,
     /// (sky light, block light) at the eye position, `FirstPerson::light`'s order.
     pub light: (u8, u8),
     /// The main hand is using an EAT/DRINK consumable with ticks left
@@ -200,6 +205,8 @@ impl FirstPersonView {
         let block_light = if on_fire { 15 } else { world.block_light(p) };
         FirstPersonView {
             item,
+            map: None,
+            offhand_empty: true,
             light: (world.sky_light(p), block_light),
             use_eat: false,
             use_remaining: 0,
@@ -214,6 +221,7 @@ impl FirstPersonView {
     /// This tick's hand animation from the player's [`crate::hand::Hand`].
     pub fn with_hand(&mut self, hand: &crate::hand::Hand) {
         self.item = hand.shown_item();
+        self.map = hand.shown_map();
         self.attack = hand.attack();
         self.equip = hand.equip();
         self.x_bob = hand.x_bob();
@@ -233,6 +241,8 @@ impl FirstPersonView {
             slim: skin.model.is_slim(),
             sleeve,
             item: self.item,
+            map: self.map,
+            offhand_empty: self.offhand_empty,
             light: self.light,
             use_eat: self.use_eat,
             use_remaining: self.use_remaining,
@@ -282,6 +292,9 @@ pub(super) fn tick_hand(
         let mut fp =
             FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item(), on_fire);
         fp.with_hand(hand);
+        // The map pose's one- or two-handed choice reads the off hand (`renderOneHandedMap`
+        // needs `state.offHandItem.isEmpty()`).
+        fp.offhand_empty = p.int.offhand.is_empty();
         // `FirstPersonHandsAndItems.extractRenderState`: the use state the EAT/DRINK
         // transform reads. Only the main hand is modelled, so an off-hand use is not
         // distinguished (a later task).

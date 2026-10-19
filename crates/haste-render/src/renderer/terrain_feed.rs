@@ -248,7 +248,7 @@ impl Renderer {
                     self.premesh_hold.push_back(mesh);
                     continue;
                 }
-                bytes += mesh.vertex_bytes() + mesh.index_bytes();
+                bytes += mesh.vertex_bytes() + mesh.index_bytes() + mesh.quad_bytes();
                 let encoder = encoder.get_or_insert_with(|| {
                     self.gpu
                         .device
@@ -286,7 +286,7 @@ impl Renderer {
                 break;
             }
             let before = elapsed_ms();
-            bytes += mesh.vertex_bytes() + mesh.index_bytes();
+            bytes += mesh.vertex_bytes() + mesh.index_bytes() + mesh.quad_bytes();
             let encoder = encoder.get_or_insert_with(|| {
                 self.gpu
                     .device
@@ -377,6 +377,8 @@ impl Renderer {
             arena: s.arena,
             base_vertex: s.base_vertex,
             vertex_count: s.vertex_count,
+            base_quad: s.base_quad,
+            quad_count: s.quad_count,
             index_start: s.index_start,
             index_total: s.index_total,
             layers: Vec::new(),
