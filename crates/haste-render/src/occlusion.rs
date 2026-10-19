@@ -216,6 +216,10 @@ pub fn compute_visibility(opaque: impl Fn(usize, usize, usize) -> bool) -> Visib
     })
 }
 
+/// A cached ray march: whether it was blocked, and the unvisited section that
+/// blocked it.
+type RayVerdict = (bool, (i32, i32, i32));
+
 /// Vanilla advanced-culling thresholds (Pomme's constants).
 const ADV_CULL_SECTION_DIST: i32 = 3;
 const CEILED_SECTION_DIAGONAL: f64 = 28.0;
@@ -377,7 +381,7 @@ pub fn compute_visible_mask(
         // only accumulate during the pop, so a cached "blocked at section q" stays
         // blocked while q is unvisited, and a cached "clear" stays clear; if q was
         // reached in between, re-march.
-        let mut ray: [Option<(bool, (i32, i32, i32))>; 3] = [None; 3];
+        let mut ray: [Option<RayVerdict>; 3] = [None; 3];
         for face in Face::ALL {
             // Don't walk back the way we came (limits the search to a cone).
             if cone & face.opposite().bit() != 0 {

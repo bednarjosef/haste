@@ -156,6 +156,7 @@ fn solid_wall_hides_sections_behind_it() {
 /// 6-iteration `any` sightline check and `/16.0` section indexing. The
 /// optimized walk must produce the identical mask; this reference is the
 /// oracle the differential test compares against.
+#[allow(clippy::too_many_arguments)]
 fn reference_visible_mask(
     section_vis: &HashMap<(ChunkPos, i32), VisibilitySet>,
     cam_col: ChunkPos,
@@ -259,6 +260,7 @@ fn reference_visible_mask(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reference_ray_occluded(
     cone: &[u8],
     idx: &impl Fn(i32, i32, i32) -> Option<usize>,
