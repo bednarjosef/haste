@@ -18,6 +18,7 @@ pub mod skin;
 pub mod store;
 pub mod using_item;
 pub mod variants;
+pub mod walk;
 
 #[cfg(test)]
 mod skin_tests;
@@ -31,3 +32,4 @@ pub use metadata::{Metadata, MobFlags, SharedFlags};
 pub use riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 pub use store::{Entity, EntityStore};
 pub use variants::{MobVariants, VariantAssets, VariantModel, VARIANT_REGISTRIES};
+pub use walk::WalkAnimationState;
