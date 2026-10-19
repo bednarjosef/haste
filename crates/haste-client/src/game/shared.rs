@@ -241,6 +241,9 @@ impl Shared {
                 .unwrap_or(haste_core::BlockStateId::AIR),
         );
         let has_sky = world.dimension().has_skylight;
+        // The per-item arm-pose inputs (`AvatarRenderer.getArmPose`'s item questions),
+        // resolved from the game data once; the render path reads the installed table.
+        haste_entity::animation::set_item_uses(crate::game::item_uses::build(&data));
         Self {
             data,
             world: RwLock::new(world),

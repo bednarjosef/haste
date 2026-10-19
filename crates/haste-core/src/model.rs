@@ -373,6 +373,9 @@ pub enum Decoration {
     ExperienceOrb(ExperienceOrbDecoration),
     FallingBlock(FallingBlockDecoration),
     PrimedTnt(PrimedTntDecoration),
+    Minecart(MinecartDecoration),
+    ThrownItem(ThrownItemDecoration),
+    DragonFireball,
 }
 
 /// The state `FallingBlockRenderer.extractRenderState` collects for a falling block.
@@ -397,6 +400,42 @@ pub struct PrimedTntDecoration {
     pub fuse: f32,
 }
 
+/// A minecart's display block (`AbstractMinecart.getDisplayBlockState`), resolved to the block
+/// and its properties once, when the synched data or the fuel flag changes; the renderer bakes
+/// its quads once per state id.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockDisplay {
+    /// The block state id (the renderer's quad-cache key, and air's check).
+    pub state: crate::BlockStateId,
+    /// The state's block.
+    pub block: Identifier,
+    /// The state's properties, for the blockstate file's variant choice.
+    pub props: Vec<(String, String)>,
+}
+
+/// The state `AbstractMinecartRenderer.extractRenderState` collects for a minecart
+/// (`MinecartRenderState`), old-behavior rendering only (the new-style track packet is a
+/// separate task).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MinecartDecoration {
+    /// The display block, `None` for air (nothing is drawn in the cart).
+    pub display: Option<std::sync::Arc<BlockDisplay>>,
+    /// `AbstractMinecart.getDisplayOffset` (the custom offset when the synched data set one).
+    pub display_offset: i32,
+    /// `getHurtTime() - partialTicks` (0 when unhurt).
+    pub hurt_time: f32,
+    /// `getHurtDir()` (1 or -1).
+    pub hurt_dir: f32,
+    /// `max(getDamage() - partialTicks, 0)`.
+    pub damage_time: f32,
+    /// The TNT cart's `getFuse() - partialTicks + 1`, or -1 when not primed.
+    pub fuse: f32,
+    /// `OldMinecartBehavior.getPos`/`getPosOffs`: the rail-snapped position plus the points
+    /// 0.3 blocks front and back the cart's rotation is derived from, filled per frame from
+    /// the world; `None` off the rails.
+    pub rail: Option<(glam::DVec3, glam::DVec3, glam::DVec3)>,
+}
+
 /// The state `ExperienceOrbRenderer.submit` collects for an experience orb.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExperienceOrbDecoration {
@@ -404,6 +443,21 @@ pub struct ExperienceOrbDecoration {
     pub value: i32,
     /// The orb's age in ticks (plus the partial tick), driving the colour cycle.
     pub age: f32,
+}
+
+/// The state `ThrownItemRenderer` draws: which item (from `ItemSupplier.getItem`, the
+/// synched stack or the type's default), at which scale, and whether the renderer lights it
+/// full-bright (`ThrownItemRenderer`'s constructor arguments and
+/// `ThrownItemRenderState`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThrownItemDecoration {
+    pub item: RegistryIndex,
+    /// The renderer's `scale` constructor argument (1.0 for most, 3.0 for the large fireball,
+    /// 0.75 for the small one).
+    pub scale: f32,
+    /// `ThrownItemRenderer.getBlockLightLevel` returns 15 for the eye of ender and the
+    /// fireballs.
+    pub full_bright: bool,
 }
 
 /// The state `ItemFrameRenderer.extractRenderState` collects for an item frame.

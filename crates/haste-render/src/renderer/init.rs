@@ -27,10 +27,13 @@ impl Renderer {
         let mut atlas = haste_assets::AtlasBuilder::build(assets, &[], false)?;
         let baked = haste_assets::BakedBlockModels::bake(assets, states, &mut atlas)?;
         let baked = Arc::new(baked);
-        let atlas = Arc::new(atlas);
 
         let (atlas_texture, view, sampler, sprite_rects, _len) =
             upload_atlas(&gpu.device, &gpu.queue, &atlas)?;
+        // The GPU owns the pixels now; a resource-pack reload rebuilds the atlas from
+        // the assets, so the CPU-side mip chain is released here.
+        atlas.drop_uploaded_pixels();
+        let atlas = Arc::new(atlas);
         let animation = crate::animation::SpriteAnimator::new(
             atlas.clone(),
             gpu.queue.clone(),
@@ -416,6 +419,8 @@ impl Renderer {
             want_look: None,
             want_frustum: None,
             premesh: super::premesh::Premesh::new(),
+            work_budget: super::work_budget::WorkBudget::new(),
+            premesh_hold: std::collections::VecDeque::new(),
             camera_spectator: false,
             cull_sections: true,
             visible_for: None,

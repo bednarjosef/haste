@@ -79,8 +79,11 @@ impl EntityRenderer {
         if !e.display_fire {
             return;
         }
-        let rect0 = self.texture_rect(fire_0_id(), assets);
-        let rect1 = self.texture_rect(fire_1_id(), assets);
+        // `FlameFeatureRenderer` samples the animated fire sprites' current frame; the
+        // entity atlas has no animation ticker, so the fire draws its first frame (the
+        // same rule the fluid and particle atlases use), not the whole animation sheet.
+        let rect0 = self.texture_rect_first_frame(fire_0_id(), assets);
+        let rect1 = self.texture_rect_first_frame(fire_1_id(), assets);
         // `LightCoordsUtil.withBlock(state.lightCoords, 15)`: sky light kept, block light forced to 15.
         let light = (15u8, e.light.0);
         let (yaw, _, _) = orientation.to_euler(glam::EulerRot::YXZ);

@@ -26,12 +26,40 @@ const GROUND_Y: f32 = 24.0;
 /// The dump's format version this loader understands.
 const KNOWN_VERSION: u32 = 1;
 
-/// Layers whose vanilla `MeshDefinition` was built `.transformed(p -> p.translated(0, 24, 0))`:
-/// dump v1 records only the root's children, so the root's own PartPose translation is lost,
-/// and their pivots are already relative to the ground (vanilla
-/// `CopperGolemModel.createBodyLayer` is the only such main layer in 26.3). For these the
-/// `GROUND_Y` shift is skipped - applying it would float the model 1.5 blocks up.
-const ROOT_TRANSLATED_LAYERS: &[&str] = &["minecraft:copper_golem#main"];
+/// Layers whose parts' pivots are already relative to the render origin, so the `GROUND_Y`
+/// shift must not apply (applying it would sink or float the model 1.5 blocks):
+/// - those whose vanilla `MeshDefinition` was built `.transformed(p -> p.translated(0, 24, 0))`
+///   (dump v1 records only the root's children, so the root's own PartPose translation is
+///   lost; vanilla `CopperGolemModel.createBodyLayer` is the only such main layer in 26.3);
+/// - the boats', whose renderer does not sit them on the ground plane at all
+///   (`AbstractBoatRenderer.submit` lifts them 0.375 blocks instead of
+///   `LivingEntityRenderer`'s -1.501, so their `PartPose` values are already relative to that
+///   origin; see `crate::boat`).
+const UNSHIFTED_LAYERS: &[&str] = &[
+    "minecraft:copper_golem#main",
+    "minecraft:boat/acacia#main",
+    "minecraft:chest_boat/acacia#main",
+    "minecraft:boat/bamboo#main",
+    "minecraft:chest_boat/bamboo#main",
+    "minecraft:boat/birch#main",
+    "minecraft:chest_boat/birch#main",
+    "minecraft:boat/cherry#main",
+    "minecraft:chest_boat/cherry#main",
+    "minecraft:boat/dark_oak#main",
+    "minecraft:chest_boat/dark_oak#main",
+    "minecraft:boat/jungle#main",
+    "minecraft:chest_boat/jungle#main",
+    "minecraft:boat/mangrove#main",
+    "minecraft:chest_boat/mangrove#main",
+    "minecraft:boat/oak#main",
+    "minecraft:chest_boat/oak#main",
+    "minecraft:boat/pale_oak#main",
+    "minecraft:chest_boat/pale_oak#main",
+    "minecraft:boat/poplar#main",
+    "minecraft:chest_boat/poplar#main",
+    "minecraft:boat/spruce#main",
+    "minecraft:chest_boat/spruce#main",
+];
 
 #[derive(Deserialize)]
 struct DumpFile {
@@ -105,10 +133,10 @@ impl ModelLibrary {
         }
         let mut layers = AHashMap::with_capacity(file.layers.len());
         for l in file.layers {
-            // Layers whose vanilla mesh was built with a translated root PartPose (dump v1
-            // records only the root's children, so the translation is lost): their pivots are
-            // already ground-relative, and the shift is skipped (see ROOT_TRANSLATED_LAYERS).
-            let skip_ground_shift = ROOT_TRANSLATED_LAYERS.contains(&l.layer.as_str());
+            // Layers whose parts' pivots are already relative to the render origin (a
+            // translated root PartPose, or a renderer that does not sit on the ground
+            // plane): the shift is skipped (see UNSHIFTED_LAYERS).
+            let skip_ground_shift = UNSHIFTED_LAYERS.contains(&l.layer.as_str());
             let model = CubeModel {
                 texture: Identifier::new("haste", "entity_box"),
                 tex_width: l.texture_width.max(1),

@@ -245,6 +245,15 @@ impl AtlasBuilder {
         n
     }
 
+    /// Drops the concatenated mip chain after the texture upload (the renderer's
+    /// `upload_atlas`): the GPU texture owns the pixels from then on, and a
+    /// resource-pack reload rebuilds the whole atlas from the assets, so retaining the
+    /// chain is pure memory. The animated sprites' own frames stay (the sprite
+    /// animator uploads them per tick); `pixel_bytes` reflects the drop.
+    pub fn drop_uploaded_pixels(&mut self) {
+        self.pixels = Vec::new();
+    }
+
     pub fn mip_levels(&self) -> u32 {
         self.mip_levels
     }

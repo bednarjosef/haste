@@ -30,6 +30,9 @@ fn shadow_eligible(e: &EntityInstance) -> bool {
 /// stored bytes come out as `1 - (1 - a)^(1/2.2)` of darkening, roughly half of vanilla's.
 /// Pre-distorting `a -> 1 - (1 - a)^2.2` makes the linear blend land on vanilla's bytes
 /// (within the sRGB curve's small linear toe).
+///
+/// The srgb-translucent-blend task plans to move the main target to byte-space blending,
+/// which would make this pre-distortion unnecessary — remove it then.
 pub fn srgb_shadow_alpha(alpha: f32) -> f32 {
     1.0 - (1.0 - alpha).powf(2.2)
 }

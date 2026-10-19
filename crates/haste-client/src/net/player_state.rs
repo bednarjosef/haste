@@ -73,11 +73,14 @@ impl Session {
                     .set_vehicle(None, SeatPoint::ZERO, None, None, None);
             }
             P::PlayerPosition(p) => {
-                tracing::debug!(
-                    "player_position: teleport to ({:.1}, {:.1}, {:.1})",
+                // The server's position corrections a player feels as rubber-banding;
+                // info (with the tick) so a scripted run can count them.
+                tracing::info!(
+                    "player_position: teleport to ({:.1}, {:.1}, {:.1}) at tick {}",
                     p.pos.x,
                     p.pos.y,
-                    p.pos.z
+                    p.pos.z,
+                    self.tick
                 );
                 self.counters.teleports += 1;
             }

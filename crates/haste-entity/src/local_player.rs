@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::dims::EntityDimensions;
 use crate::store::{Entity, DEATH_TICKS};
-use crate::swing::SwingState;
+use crate::walk_swing::SwingState;
 
 impl Entity {
     /// The local player's model state, created at join with the login's entity id and profile

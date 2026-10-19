@@ -106,6 +106,22 @@ pub struct Metadata {
     /// `PrimedTnt.DATA_BLOCK_STATE_ID` (index 9): the block the TNT renders as; `None` when
     /// the server sent none (the TNT block's default state).
     pub tnt_block_state: Option<haste_core::BlockStateId>,
+    /// Minecart state, interpreted in `crate::minecart` (only minecart entities read it).
+    /// `VehicleEntity.DATA_ID_HURT` (index 8, an int: `Entity`'s eight slots come first),
+    /// ticked down client-side by `AbstractMinecart.tick`.
+    pub minecart_hurt_time: i32,
+    /// `VehicleEntity.DATA_ID_HURTDIR` (index 9, an int; 1 or -1).
+    pub minecart_hurt_dir: i32,
+    /// `VehicleEntity.DATA_ID_DAMAGE` (index 10, a float), ticked down client-side.
+    pub minecart_damage: f32,
+    /// `AbstractMinecart.DATA_ID_CUSTOM_DISPLAY_BLOCK` (index 11, an optional block state):
+    /// the block a minecart shows instead of its type's default, `None` when unset.
+    pub minecart_custom_display: Option<haste_core::BlockStateId>,
+    /// `MinecartFurnace.DATA_ID_FUEL` (index 13, a bool): a lit furnace cart.
+    pub minecart_fuel: bool,
+    /// The TNT cart's fuse (`MinecartTNT.fuse`, started by entity event 70 at 80 ticks and
+    /// ticked down client-side; `None` when not primed, vanilla's -1).
+    pub minecart_fuse: Option<i32>,
     /// All entries (including the shared ones), kept so later consumers can read the rest.
     entries: std::vec::Vec<MetadataEntry>,
 }
@@ -133,11 +149,18 @@ impl Metadata {
                 (6, MetadataValue::Pose(p)) => self.pose = Some(*p),
                 // Index 8 is `LivingEntity`'s flags byte; `ItemEntity`'s stack sits on the
                 // same index as an ItemStack, so the wire type tells them apart. `PrimedTnt`
-                // (not a living entity) puts its fuse int on the same slot.
+                // (not a living entity) puts its fuse int on the same slot, and a minecart
+                // its hurt time (`VehicleEntity.DATA_ID_HURT`) — the entity's type decides
+                // which field is read.
                 (8, MetadataValue::Byte(b)) => self.living = LivingFlags::from_byte(*b),
-                (8, MetadataValue::VarInt(v)) => self.tnt_fuse = *v,
-                // Index 9: `PrimedTnt.DATA_BLOCK_STATE_ID`.
+                (8, MetadataValue::VarInt(v)) => {
+                    self.tnt_fuse = *v;
+                    self.minecart_hurt_time = *v;
+                }
+                // Index 9: `PrimedTnt.DATA_BLOCK_STATE_ID` or `VehicleEntity`'s hurt
+                // direction, by wire type.
                 (9, MetadataValue::BlockState(s)) => self.tnt_block_state = Some(*s),
+                (9, MetadataValue::VarInt(v)) => self.minecart_hurt_dir = *v,
                 (15, MetadataValue::Byte(b)) => self.mob = MobFlags::from_byte(*b),
                 // Index 16 is `Creeper.DATA_SWELL_DIR` (int); `AgeableMob`'s baby flag at 16 is a
                 // bool, so the wire type keeps the two apart.
@@ -146,6 +169,11 @@ impl Metadata {
                 // counter (int).
                 (18, MetadataValue::Boolean(b)) => self.creeper_ignited = *b,
                 (18, MetadataValue::VarInt(v)) => self.villager_unhappy = *v > 0,
+                // `VehicleEntity`'s damage slot (10) and `AbstractMinecart`'s (11) and
+                // `MinecartFurnace`'s (13): interpreted in `crate::minecart`.
+                (10, MetadataValue::Float(v)) => self.minecart_damage = *v,
+                (11, MetadataValue::OptionalBlockState(s)) => self.minecart_custom_display = *s,
+                (13, MetadataValue::Boolean(b)) => self.minecart_fuel = *b,
                 _ => {}
             }
         }
@@ -198,6 +226,12 @@ impl Default for Metadata {
             villager_unhappy: false,
             tnt_fuse: DEFAULT_TNT_FUSE,
             tnt_block_state: None,
+            minecart_hurt_time: 0,
+            minecart_hurt_dir: 0,
+            minecart_damage: 0.0,
+            minecart_custom_display: None,
+            minecart_fuel: false,
+            minecart_fuse: None,
             entries: Vec::new(),
         }
     }
