@@ -5,38 +5,61 @@ use super::*;
 
 mod use_anim;
 
-/// The arm model of a first-person hand: the player model's `right_arm` with its
-/// `right_sleeve` child (vanilla `HumanoidModel.createMesh` + `PlayerModel.createMesh`), in
-/// model pixels. `slim` picks the 3 px arm. Built once and cached, so the hand pass allocates
-/// nothing per frame.
-pub(crate) fn arm_model(slim: bool, sleeve: bool) -> CubeModel {
-    // Wide: (-3, -2, -2) + (4, 12, 4); slim: (-2, -2, -2) + (3, 12, 4).
-    let origin_x = if slim { -2.0 } else { -3.0 };
+/// The arm model of a first-person hand: the player model's arm with its sleeve child
+/// (vanilla `HumanoidModel.createMesh` + `PlayerModel.createMesh`), in model pixels. `slim`
+/// picks the 3 px arm, `left` the mirrored left arm (`AvatarRenderer.renderLeftHand`).
+/// Built once and cached, so the hand pass allocates nothing per frame.
+pub(crate) fn arm_model(slim: bool, sleeve: bool, left: bool) -> CubeModel {
+    // Wide: (-3, -2, -2) + (4, 12, 4); slim: (-2, -2, -2) + (3, 12, 4); the left arm is the
+    // mirror around its pivot (`addBox(-1, ...)` with `mirror()`).
+    let origin_x = if left {
+        -1.0
+    } else if slim {
+        -2.0
+    } else {
+        -3.0
+    };
     let w = if slim { 3.0 } else { 4.0 };
     let cube = |uv: [u32; 2], inflate: f32| haste_core::model::Cube {
         origin: Vec3::new(origin_x, -2.0, -2.0),
         size: Vec3::new(w, 12.0, 4.0),
         inflate,
         uv,
-        mirror: false,
+        mirror: left,
     };
     CubeModel {
         texture: Identifier::minecraft("entity/player/wide/steve"),
         tex_width: 64,
         tex_height: 64,
         root: ModelPart {
-            // `PartPose.offset(-5, 2, 0)` of the model's right_arm.
-            name: "right_arm".into(),
-            id: parts::RIGHT_ARM,
-            pivot: Vec3::new(-5.0, 2.0, 0.0),
-            // `AvatarRenderer.renderHand`: `rightArm.zRot = 0.1`.
-            rotation: Vec3::new(0.0, 0.0, 0.1),
+            // `PartPose.offset(±5, 2, 0)` of the model's arm.
+            name: if left {
+                "left_arm".into()
+            } else {
+                "right_arm".into()
+            },
+            id: if left {
+                parts::LEFT_ARM
+            } else {
+                parts::RIGHT_ARM
+            },
+            pivot: Vec3::new(if left { 5.0 } else { -5.0 }, 2.0, 0.0),
+            // `AvatarRenderer.renderHand`: the arm's small z tilt (0.1, mirrored -0.1).
+            rotation: Vec3::new(0.0, 0.0, if left { -0.1 } else { 0.1 }),
             visible: true,
             cubes: vec![cube([40, 16], 0.0)],
-            // `AvatarRenderer.renderHand`: the sleeve shows with the right-sleeve part.
+            // `AvatarRenderer.renderHand`: the sleeve shows with the sleeve part.
             children: vec![ModelPart {
-                name: "right_sleeve".into(),
-                id: parts::RIGHT_SLEEVE,
+                name: if left {
+                    "left_sleeve".into()
+                } else {
+                    "right_sleeve".into()
+                },
+                id: if left {
+                    parts::LEFT_SLEEVE
+                } else {
+                    parts::RIGHT_SLEEVE
+                },
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
                 visible: sleeve,
@@ -149,9 +172,21 @@ pub(crate) fn item_arm_matrix(fp: &FirstPerson, partial: f32) -> Mat4 {
 
 impl EntityRenderer {
     /// The empty hand's arm model for the skin's arm width, built once (no per-frame work).
-    fn arm_model(&mut self, slim: bool, sleeve: bool) -> Arc<CubeModel> {
-        let slot = &mut self.arm_models[usize::from(slim) * 2 + usize::from(sleeve)];
-        slot.get_or_insert_with(|| Arc::new(arm_model(slim, sleeve)))
+    pub(super) fn arm_model(&mut self, slim: bool, sleeve: bool) -> Arc<CubeModel> {
+        self.arm_model_side(slim, sleeve, false)
+    }
+
+    /// [`Self::arm_model`], plus the mirrored left arm the two-handed map pose holds
+    /// (`renderMapHand`).
+    pub(super) fn arm_model_side(
+        &mut self,
+        slim: bool,
+        sleeve: bool,
+        left: bool,
+    ) -> Arc<CubeModel> {
+        let slot = &mut self.arm_models
+            [usize::from(left) * 4 + usize::from(slim) * 2 + usize::from(sleeve)];
+        slot.get_or_insert_with(|| Arc::new(arm_model(slim, sleeve, left)))
             .clone()
     }
 
@@ -191,37 +226,43 @@ impl EntityRenderer {
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
         let mut out = std::mem::take(&mut self.hand);
         let root = Mat4::from_mat3(inv_view) * prefix * hand_root_matrix(fp, view, partial);
-        match item {
-            Some(model) => {
-                let root = root * item_arm_matrix(fp, partial);
-                self.emit_item(
-                    &mut out,
-                    &model,
-                    root,
-                    light,
-                    ItemDisplay::FirstPerson,
-                    assets,
-                );
-            }
-            None => {
-                let steve = Identifier::minecraft("entity/player/wide/steve");
-                let skin = fp.skin.as_ref().unwrap_or(&steve);
-                let rect = self.texture_rect(skin, assets);
-                let model = self.arm_model(fp.slim, fp.sleeve);
-                // Vanilla's `ModelPart` scales its pivot by 1/16 (the model is in pixels), and
-                // `AvatarRenderer.renderHand` gives the right arm its 0.1 rad z tilt.
-                let m = root * arm_matrix(fp, partial) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
-                emit_part_tinted(
-                    &mut out,
-                    &model,
-                    &model.root,
-                    &PoseOverrides::default(),
-                    m,
-                    rect,
-                    light,
-                    0.0,
-                    [1.0; 3],
-                );
+        // A held map replaces the item model (`submitArmWithItem`'s MAP_ID branch).
+        if fp.map.is_some() {
+            self.emit_held_map(&mut out, root, fp, view, partial, light, assets);
+        } else {
+            match item {
+                Some(model) => {
+                    let root = root * item_arm_matrix(fp, partial);
+                    self.emit_item(
+                        &mut out,
+                        &model,
+                        root,
+                        light,
+                        ItemDisplay::FirstPerson,
+                        assets,
+                    );
+                }
+                None => {
+                    let steve = Identifier::minecraft("entity/player/wide/steve");
+                    let skin = fp.skin.as_ref().unwrap_or(&steve);
+                    let rect = self.texture_rect(skin, assets);
+                    let model = self.arm_model(fp.slim, fp.sleeve);
+                    // Vanilla's `ModelPart` scales its pivot by 1/16 (the model is in pixels), and
+                    // `AvatarRenderer.renderHand` gives the right arm its 0.1 rad z tilt.
+                    let m =
+                        root * arm_matrix(fp, partial) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
+                    emit_part_tinted(
+                        &mut out,
+                        &model,
+                        &model.root,
+                        &PoseOverrides::default(),
+                        m,
+                        rect,
+                        light,
+                        0.0,
+                        [1.0; 3],
+                    );
+                }
             }
         }
         let to_view = inv_view.transpose();

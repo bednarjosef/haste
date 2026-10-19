@@ -17,6 +17,13 @@ pub struct FirstPerson {
     /// `AvatarRenderState.showRightSleeve`: the arm draws its sleeve layer.
     pub sleeve: bool,
     pub item: Option<haste_core::RegistryIndex>,
+    /// The held stack's `minecraft:map_id` (`ItemStack.has(DataComponents.MAP_ID)`): the
+    /// hand draws the map renderer's view instead of the item model, with vanilla's
+    /// one-handed pose (off-hand occupied) or the two-handed one.
+    pub map: Option<i32>,
+    /// Whether the off hand is empty, the one- or two-handed map pose's choice
+    /// (`renderTwoHandedMap` needs `state.offHandItem.isEmpty()`).
+    pub offhand_empty: bool,
     pub light: (u8, u8),
     /// The main hand is using an item with the EAT or DRINK animation and ticks left
     /// (`FirstPersonHandsAndItemsRenderState`: `isUsingItem && useItemRemainingTicks > 0 &&
@@ -47,6 +54,8 @@ impl Default for FirstPerson {
             slim: false,
             sleeve: true,
             item: None,
+            map: None,
+            offhand_empty: true,
             light: (15, 0),
             use_eat: false,
             use_remaining: 0,

@@ -430,7 +430,7 @@ impl EntityRenderer {
             hand: Vec::new(),
             item_names: Vec::new(),
             item_models: HashMap::new(),
-            arm_models: [None, None, None, None],
+            arm_models: [None, None, None, None, None, None, None, None],
             frame_models: HashMap::new(),
             piston_quads: ahash::AHashMap::new(),
             minecart_quads: ahash::AHashMap::new(),
@@ -457,6 +457,10 @@ impl EntityRenderer {
             },
             font,
             equipment_infos: HashMap::new(),
+            maps: Arc::new(HashMap::new()),
+            map_textures: HashMap::new(),
+            map_decoration_rects: HashMap::new(),
+            map_decoration_names: Vec::new(),
             drawn: 0,
         }
     }

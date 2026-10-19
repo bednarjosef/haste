@@ -196,4 +196,10 @@ impl EntityRenderer {
             }
         }
     }
+
+    /// Item registry names by protocol id (for the held item), clearing the model cache.
+    pub fn set_item_names(&mut self, names: Vec<Identifier>) {
+        self.item_names = names;
+        self.item_models.clear();
+    }
 }
