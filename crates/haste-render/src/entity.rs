@@ -10,7 +10,7 @@ use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
     BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
-    ModelPart, PaintingDecoration, PoseOverrides,
+    ModelPart, PaintingDecoration, PoseOverrides, ThrownItemDecoration,
 };
 use haste_core::parts::{self, PartId};
 use haste_core::view::BlockView;
@@ -21,6 +21,7 @@ use crate::gui::Shelf;
 mod atlas;
 mod block_entities;
 mod cape;
+mod dragon_fireball;
 mod equipment;
 mod experience_orb;
 mod flame;
@@ -36,6 +37,9 @@ mod shadow;
 mod sign;
 #[cfg(test)]
 mod tests;
+mod thrown_item;
+#[cfg(test)]
+mod thrown_item_tests;
 
 mod hand;
 mod humanoid;
@@ -445,6 +449,12 @@ impl EntityRenderer {
                     // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
                     Decoration::Lightning(_) => {}
                     Decoration::Minecart(c) => self.emit_minecart(e, c, camera, light, assets),
+                    Decoration::ThrownItem(t) => {
+                        self.emit_thrown_item(e, t, camera, orientation, light, assets)
+                    }
+                    Decoration::DragonFireball => {
+                        self.emit_dragon_fireball(e, camera, orientation, light, assets)
+                    }
                     Decoration::ExperienceOrb(o) => self.emit_experience_orb(
                         e,
                         o.value,
