@@ -197,6 +197,18 @@ impl SectionSlab {
         self.slots[slot as usize].as_ref()
     }
 
+    /// The record at `pos` with its slot index (stable while the section stays
+    /// resident; the GPU occlusion culling keys its visibility by it).
+    pub fn get_with_slot(&self, pos: SectionPos) -> Option<(u32, &SlabSection)> {
+        let &slot = self.index.get(&key(pos))?;
+        Some((slot, self.slots[slot as usize].as_ref()?))
+    }
+
+    /// One past the highest slot index in use.
+    pub fn slot_capacity(&self) -> usize {
+        self.slots.len()
+    }
+
     /// The record at `pos`, mutably (to set the bonus flag).
     pub fn get_mut(&mut self, pos: SectionPos) -> Option<&mut SlabSection> {
         let &slot = self.index.get(&key(pos))?;

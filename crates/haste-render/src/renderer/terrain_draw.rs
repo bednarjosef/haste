@@ -5,17 +5,32 @@
 
 use super::{Renderer, SectionDraw};
 
+/// Which part of the terrain a `draw_terrain` call draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum TerrainPhase {
+    /// Everything from the CPU-built arguments (no GPU occlusion culling).
+    All,
+    /// GPU occlusion culling, before the depth pyramid: the opaque layers of the
+    /// sections visible last frame. No entities, no sub-pass timing.
+    Early,
+    /// GPU occlusion culling, after the depth pyramid: the opaque draws that passed the
+    /// test and were not drawn early, the entities, and the visible translucent draws.
+    Late,
+}
+
 impl Renderer {
     /// Draws `draws` (layer-major, see `draw_list.rs`) into `pass`, the entities included
-    /// before the first translucent draw (or after the last draw without translucent).
-    /// Returns the draw calls issued.
+    /// before the first translucent draw (or after the last draw without translucent),
+    /// except in the early phase. Returns the draw calls issued.
     pub(super) fn draw_terrain<'p>(
         &'p self,
         pass: &mut wgpu::RenderPass<'p>,
         draws: &[SectionDraw],
         brackets: &mut crate::timing::SubpassBrackets,
+        phase: TerrainPhase,
     ) -> u32 {
-        let timer = self.timer.as_ref();
+        let early = phase == TerrainPhase::Early;
+        let timer = if early { None } else { self.timer.as_ref() };
         let mut draw_calls = 0u32;
         // Layered draw order (RenderLayer Ord: Solid < Cutout < CutoutMipped
         // < Translucent). Section origins come from the instance-rate origin buffer, one
@@ -35,11 +50,16 @@ impl Renderer {
         let mut bound_arena = u32::MAX;
         let mut bound_layer = None;
         let mut i = 0;
+        let mut run = 0u32;
         while i < draws.len() {
             let d = &draws[i];
             let instance = i;
+            let translucent = d.layer == haste_assets::RenderLayer::Translucent;
+            if early && translucent {
+                break;
+            }
             // Entities after the opaque and cutout terrain, before translucent.
-            if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
+            if !entities_drawn && translucent {
                 brackets.begin_entities(pass, timer);
                 // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
                 // the entities, then the block entities' special passes: the end
@@ -114,12 +134,27 @@ impl Renderer {
                     .position(|e| e.layer != d.layer || e.arena != d.arena)
                     .map_or(draws.len(), |n| i + n);
                 let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>();
-                pass.multi_draw_indexed_indirect(
-                    &self.indirect_buffer,
-                    (i * stride) as u64,
-                    (end - i) as u32,
-                );
+                let offset = (i * stride) as u64;
+                let len = (end - i) as u32;
+                // The culled phases draw the compacted runs up to the GPU-written count;
+                // late translucent keeps every draw in place (zero instances when hidden).
+                let counted = match phase {
+                    TerrainPhase::Early => Some(self.gpu_cull.early(run)),
+                    TerrainPhase::Late if !translucent => Some(self.gpu_cull.late(run)),
+                    _ => None,
+                };
+                match (counted, phase) {
+                    (Some((args, counts, count_offset)), _) => pass
+                        .multi_draw_indexed_indirect_count(args, offset, counts, count_offset, len),
+                    (None, TerrainPhase::Late) => {
+                        pass.multi_draw_indexed_indirect(self.gpu_cull.late(run).0, offset, len)
+                    }
+                    (None, _) => {
+                        pass.multi_draw_indexed_indirect(&self.indirect_buffer, offset, len)
+                    }
+                }
                 draw_calls += 1;
+                run += 1;
                 i = end;
             } else if quad {
                 pass.draw_indexed(
@@ -139,7 +174,7 @@ impl Renderer {
                 i += 1;
             }
         }
-        if !entities_drawn {
+        if !entities_drawn && !early {
             brackets.begin_entities(pass, timer);
             draw_calls += self.entity.draw_shadows(pass);
             draw_calls += self.entity.draw(pass);
