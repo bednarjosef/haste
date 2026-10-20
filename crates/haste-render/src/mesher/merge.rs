@@ -35,7 +35,16 @@ pub(super) fn greedy_merge_enabled() -> bool {
 /// as the per-vertex attributes are constant across the merge (checked at
 /// emit time: uniform light, one tint per quad).
 pub(super) fn merge_face(quad: &haste_assets::BakedQuad, uvs: &[[f32; 2]; 4]) -> Option<MergeFace> {
-    let dir = quad.direction;
+    merge_face_geom(quad.direction, &quad.positions, uvs)
+}
+
+/// [`merge_face`] from the geometry alone: a quad on `dir`'s axis with block-local
+/// `positions` (a fluid surface; the winding may face either way along the axis).
+pub(super) fn merge_face_geom(
+    dir: haste_assets::Direction,
+    positions: &[[f32; 3]; 4],
+    uvs: &[[f32; 2]; 4],
+) -> Option<MergeFace> {
     let (u, v) = face_axes(dir);
     let n = dir.offset();
     let n_axis = n.iter().position(|&c| c != 0)?;
@@ -46,7 +55,7 @@ pub(super) fn merge_face(quad: &haste_assets::BakedQuad, uvs: &[[f32; 2]; 4]) ->
     // 2/16 merges with the same layer's neighbours). All four corners must
     // agree — a tilted quad is not a face.
     let mut plane: Option<f32> = None;
-    for (i, (&pos, &uv)) in quad.positions.iter().zip(uvs).enumerate() {
+    for (i, (&pos, &uv)) in positions.iter().zip(uvs).enumerate() {
         match plane {
             None => plane = Some(pos[n_axis]),
             Some(p) if p != pos[n_axis] => return None,

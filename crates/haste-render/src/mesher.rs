@@ -384,7 +384,7 @@ pub fn mesh_section_with(
                     }
                     let info = ctx.state_info(state);
                     if let Some(fluid) = info.fluid {
-                        mesh_fluid(&mut ctx, lx, ly, lz, fluid, sink);
+                        mesh_fluid(&mut ctx, lx, ly, lz, fluid, staged);
                     }
                     if info.quads.is_empty() {
                         continue;

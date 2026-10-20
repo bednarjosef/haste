@@ -3,9 +3,9 @@
 //! tinted, into the section's output.
 
 use super::fluid_view::FluidView;
-use super::{
-    block_tint, pack_ao_shade, pack_light, shade_index, MeshContext, MeshSink, TINT_WHITE,
-};
+use super::merge::{greedy_merge_enabled, merge_face_geom, MergeKey, MergeQuad, StagedQuad};
+use super::sink::{axis_facing, layer_index};
+use super::{block_tint, pack_ao_shade, pack_light, shade_index, MeshContext, TINT_WHITE};
 
 /// Max of two packed (sky, block) light values per channel.
 fn max_light(a: (u8, u8), b: (u8, u8)) -> u8 {
@@ -13,14 +13,20 @@ fn max_light(a: (u8, u8), b: (u8, u8)) -> u8 {
 }
 
 /// Emits the fluid surface of one block (see `fluid.rs` for the rules). Quads
-/// go through the context's reusable scratch Vec (no per-block allocation).
+/// go through the context's reusable scratch Vec (no per-block allocation), then into
+/// the section's staged quads like the block models' faces: a still, flat surface (an
+/// ocean or a lake) has uniform light and tint and the still sprite's full 0..1 UVs, so it
+/// greedy-merges into a few large quads where vanilla draws one per block. The pixels stay
+/// the same (the shader tiles the sprite across a merged quad), and so does the order:
+/// coplanar fluid faces of different blocks never overlap, and a surface's backward copy
+/// faces the other way.
 pub(super) fn mesh_fluid(
     ctx: &mut MeshContext,
     lx: i32,
     ly: i32,
     lz: i32,
     fluid: crate::fluid::FluidState,
-    sink: &mut MeshSink,
+    staged: &mut Vec<StagedQuad>,
 ) {
     let block_pos = ctx.origin.add(lx, ly, lz);
     let mut quads = std::mem::take(&mut *ctx.fluid_scratch);
@@ -72,7 +78,34 @@ pub(super) fn mesh_fluid(
             let positions = q
                 .positions
                 .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
-            sink.push_quad(layer, &positions, &q.uvs, [packed; 4], tint, q.sprite);
+            // The merge key's direction is the facing group the merged fan files under, so
+            // it must be the geometric facing: the backward up face is an up face wound
+            // to face down.
+            let merge = greedy_merge_enabled()
+                .then(|| merge_face_geom(q.dir, &q.positions, &q.uvs))
+                .flatten()
+                .zip(axis_facing(&positions));
+            match merge {
+                Some((face, facing)) => staged.push(StagedQuad::Merge(MergeQuad {
+                    key: MergeKey {
+                        layer: layer_index(layer) as u8,
+                        dir: facing.index() as u8,
+                        sprite: q.sprite,
+                        tint,
+                        light: packed,
+                        face,
+                    },
+                    cell: [lx as u8, ly as u8, lz as u8],
+                })),
+                None => staged.push(StagedQuad::Direct {
+                    layer,
+                    positions,
+                    uvs: q.uvs,
+                    lights: [packed; 4],
+                    tint,
+                    sprite: q.sprite,
+                }),
+            }
         }
     }
     *ctx.fluid_scratch = quads;
