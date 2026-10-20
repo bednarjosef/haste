@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod facing;
+mod merge;
 mod occlusion_dump;
 
 const STONE: BlockStateId = BlockStateId(1);
@@ -948,8 +949,29 @@ fn mesher_culls_fluid_faces_with_real_shapes() {
             &tables,
             SectionPos::new(0, 0, 0),
         );
-        mesh.vertices
+        // The side face and its inner copy face west and east: count the vertices of those
+        // groups (the merged top's edges also carry split vertices on the plane, where the
+        // side's top corners meet them).
+        let water = mesh
+            .layers
             .iter()
+            .find(|l| l.layer == haste_assets::RenderLayer::Translucent);
+        let side_vertices: std::collections::BTreeSet<u32> = water
+            .into_iter()
+            .flat_map(|l| {
+                [Direction::West, Direction::East]
+                    .into_iter()
+                    .flat_map(|d| {
+                        let (start, count) = l.dirs[d.index()];
+                        l.indices[start as usize..(start + count) as usize]
+                            .iter()
+                            .copied()
+                    })
+            })
+            .collect();
+        side_vertices
+            .iter()
+            .map(|&i| &mesh.vertices[i as usize])
             // The fluid block sits at x = 1; only its west face plane (INSET inside
             // the block) carries vertices there — models sit on the block boundary.
             // Positions are u16-quantized (24 blocks over 65535), so compare with the
