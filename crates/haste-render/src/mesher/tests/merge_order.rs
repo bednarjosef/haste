@@ -36,7 +36,6 @@ fn up_face(cell: [u8; 3], sprite: u16, tint: u32) -> StagedQuad {
 fn direct_quad() -> StagedQuad {
     StagedQuad::Direct {
         layer: RenderLayer::Solid,
-        dir: Direction::Up.index() as u8,
         positions: [
             [0.2, 0.5, 0.2],
             [0.2, 0.5, 0.8],

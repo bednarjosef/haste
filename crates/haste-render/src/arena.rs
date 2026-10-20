@@ -135,8 +135,8 @@ pub struct LayerDraw {
     pub layer: RenderLayer,
     pub first: u32,
     pub count: u32,
-    /// Face direction (`Direction::ALL` index) of this group; 6 = the whole
-    /// layer (translucent, never direction-skipped).
+    /// Facing group (`Direction::ALL` index) of this range; 6 = faces off the
+    /// axis planes (crossed plants, sloped fluids), never direction-skipped.
     pub dir: u8,
     /// Which pool `first` indexes (and the vertex-count rule; `Indexed` is the
     /// vertex format's index buffer).
@@ -407,29 +407,18 @@ impl MeshArenas {
         );
         view.copy_from_slice(bytemuck::cast_slice(&mesh.vertices));
         self.scratch.clear();
-        let mut layers = Vec::with_capacity(mesh.layers.len() * 6);
+        let mut layers = Vec::with_capacity(mesh.layers.len() * 7);
         for l in &mesh.layers {
             let base = index_start + self.scratch.len() as u32;
-            if l.whole {
-                layers.push(LayerDraw {
-                    layer: l.layer,
-                    first: base,
-                    count: l.indices.len() as u32,
-                    dir: 6,
-                    kind: SpanKind::Indexed,
-                });
-            } else {
-                for d in 0..6 {
-                    let (start, count) = l.dirs[d];
-                    if count > 0 {
-                        layers.push(LayerDraw {
-                            layer: l.layer,
-                            first: base + start,
-                            count,
-                            dir: d as u8,
-                            kind: SpanKind::Indexed,
-                        });
-                    }
+            for (d, &(start, count)) in l.dirs.iter().enumerate() {
+                if count > 0 {
+                    layers.push(LayerDraw {
+                        layer: l.layer,
+                        first: base + start,
+                        count,
+                        dir: d as u8,
+                        kind: SpanKind::Indexed,
+                    });
                 }
             }
             self.scratch.extend_from_slice(&l.indices);

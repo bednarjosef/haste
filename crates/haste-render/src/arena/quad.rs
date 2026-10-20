@@ -105,7 +105,7 @@ impl MeshArenas {
                         SpanKind::Indexed => s.first,
                     },
                     count: s.count,
-                    dir: if l.whole { 6 } else { s.dir },
+                    dir: s.dir,
                     kind: s.kind,
                 });
             }

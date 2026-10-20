@@ -7,6 +7,7 @@ use super::lighting::{
 use super::*;
 
 mod face_occlusion;
+mod facing;
 mod merge_order;
 
 /// A synthetic flat world: one layer of `block` over bedrock, for the

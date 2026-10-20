@@ -41,8 +41,8 @@ pub struct SlabLayer {
     pub layer: haste_assets::RenderLayer,
     pub first: u32,
     pub count: u32,
-    /// Face direction (`Direction::ALL` index) of this group; 6 = the whole
-    /// layer (translucent, never direction-skipped). See `LayerDraw`.
+    /// Facing group (`Direction::ALL` index) of this range; 6 = faces off the
+    /// axis planes (crossed plants, sloped fluids), never direction-skipped. See `LayerDraw`.
     pub dir: u8,
     /// Which pool `first` addresses (indices or quad-format records).
     pub kind: SpanKind,
