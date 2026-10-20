@@ -133,10 +133,6 @@ pub(crate) struct Shelf {
 }
 
 impl Shelf {
-    pub(super) fn alloc(&mut self, w: u32, h: u32) -> Option<[u32; 2]> {
-        self.alloc_in(w, h, GUI_ATLAS_SIZE)
-    }
-
     pub(crate) fn alloc_in(&mut self, w: u32, h: u32, size: u32) -> Option<[u32; 2]> {
         if w > size || h > size {
             return None;
@@ -234,7 +230,12 @@ impl GuiRenderer {
             return r;
         }
         let (w, h) = e.dims;
-        let Some([x, y]) = self.shelf.alloc(w.max(1), h.max(1)) else {
+        let (w1, h1) = (w.max(1), h.max(1));
+        let mut at = self.shelf.alloc_in(w1, h1, self.atlas_size);
+        while at.is_none() && self.grow_atlas() {
+            at = self.shelf.alloc_in(w1, h1, self.atlas_size);
+        }
+        let Some([x, y]) = at else {
             self.atlas_full = true;
             return self.entries[0].rect.unwrap_or([0, 0, 0, 0]);
         };
@@ -344,6 +345,68 @@ impl GuiRenderer {
             );
             self.entries[i].frame = index;
         }
+    }
+
+    /// Doubles the atlas texture, keeping its contents at the same texel positions (the
+    /// shader reads texels, so every resident rectangle stays valid). False at the
+    /// largest size.
+    fn grow_atlas(&mut self) -> bool {
+        if self.atlas_size >= GUI_ATLAS_SIZE {
+            return false;
+        }
+        let size = self.atlas_size * 2;
+        let atlas = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gui-atlas"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        // Queue writes to the old atlas run before this submit, so the copy carries them.
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("gui-atlas-grow"),
+            });
+        encoder.copy_texture_to_texture(
+            self.atlas.as_image_copy(),
+            atlas.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.atlas_size,
+                height: self.atlas_size,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gui-bind"),
+            layout: &self.bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(
+                        &atlas.create_view(&Default::default()),
+                    ),
+                },
+            ],
+        });
+        self.atlas = atlas;
+        self.atlas_size = size;
+        tracing::debug!("GUI atlas grown to {size}x{size}");
+        true
     }
 
     pub(super) fn reset_atlas(&mut self) {

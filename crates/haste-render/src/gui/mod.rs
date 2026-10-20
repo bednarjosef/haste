@@ -60,8 +60,13 @@ pub const HUD_SPRITES: &[&str] = &[
     "hud/air_empty",
 ];
 
-/// Side of the square GUI atlas texture.
+/// Largest side of the square GUI atlas texture.
 pub const GUI_ATLAS_SIZE: u32 = 4096;
+
+/// The GUI atlas's first side: it doubles (keeping what it holds) when a frame's textures
+/// do not fit, up to [`GUI_ATLAS_SIZE`]. The in-game HUD fits the first size, so the
+/// 64 MiB of a full-size atlas are spent only where screens need them.
+pub const GUI_ATLAS_START: u32 = 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -122,8 +127,11 @@ pub struct GuiRenderer {
     /// One pipeline per blend mode, indexed like [`GuiBlend`] discriminants (normal first).
     pipelines: [wgpu::RenderPipeline; 4],
     bind_group: wgpu::BindGroup,
+    bind_layout: wgpu::BindGroupLayout,
     uniforms: wgpu::Buffer,
     atlas: wgpu::Texture,
+    /// The atlas texture's current side.
+    atlas_size: u32,
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: usize,
 

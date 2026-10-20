@@ -15,17 +15,25 @@ use haste_assets::RenderLayer;
 use haste_core::SectionPos;
 
 mod quad;
+mod range_alloc;
 
 use crate::mesher::SectionMesh;
 use crate::quad_format::{quad_format_enabled, PackedGeneral, PackedQuad, SpanKind};
 use crate::vertex::PackedVertex;
+pub(crate) use range_alloc::RangeAlloc;
 
-/// Largest arena: 2^22 vertices (20 bytes each: 80 MiB) and 3x2^22 indices (4 bytes
-/// each: 48 MiB), the proven steady-state size at render distance 32. In the quad
-/// format the vertex half holds pulled records (no indices) and the quad half
-/// 32-byte rect records, so the same ladder fits a far bigger world.
+/// Largest arena: 2^22 vertices (20 bytes each: 80 MiB) and 2x2^22 indices (u16, so
+/// 16 MiB), the proven steady-state size at render distance 32. A quad is 4 vertices and
+/// 6 indices; the merged rectangles' fans add a few more, so 2 per vertex leaves room.
+/// In the quad format the vertex half holds pulled records (no indices) and the quad
+/// half 32-byte rect records, so the same ladder fits a far bigger world.
 const MAX_ARENA_VERTICES: u32 = 1 << 22;
-const MAX_ARENA_INDICES: u32 = 3 << 22;
+const MAX_ARENA_INDICES: u32 = 2 << 22;
+
+/// Indices are relative to the section's base vertex, so a section of up to this many
+/// vertices fits u16 indices; a bigger one (a section packed with leaves can pass it)
+/// goes into an arena with u32 indices.
+const U16_VERTICES: u32 = 1 << 16;
 
 /// Size of arena tier `t` (0-based): the pair starts at 16 MiB (vertices + indices)
 /// and doubles per tier up to [`MAX_ARENA_VERTICES`], so a small render distance never
@@ -40,66 +48,15 @@ fn arena_vertices(t: usize) -> u32 {
 
 fn arena_indices(t: usize) -> u32 {
     let shift = t.min(3) as u32;
-    (MAX_ARENA_INDICES >> (3 - shift)).max(3 << 19)
+    (MAX_ARENA_INDICES >> (3 - shift)).max(2 << 19)
 }
 
-/// First-fit range allocator with coalescing frees.
-#[derive(Debug, Clone)]
-pub(crate) struct RangeAlloc {
-    /// Free ranges (start, len), sorted by start, non-adjacent.
-    free: Vec<(u32, u32)>,
-    /// Total capacity in entries.
-    capacity: u32,
-}
-
-impl RangeAlloc {
-    pub(crate) fn new(len: u32) -> RangeAlloc {
-        RangeAlloc {
-            free: vec![(0, len)],
-            capacity: len,
-        }
-    }
-
-    pub(crate) fn alloc(&mut self, len: u32) -> Option<u32> {
-        if len == 0 {
-            return Some(0);
-        }
-        let i = self.free.iter().position(|&(_, l)| l >= len)?;
-        let (start, l) = self.free[i];
-        if l == len {
-            self.free.remove(i);
-        } else {
-            self.free[i] = (start + len, l - len);
-        }
-        Some(start)
-    }
-
-    pub(crate) fn free(&mut self, start: u32, len: u32) {
-        if len == 0 {
-            return;
-        }
-        let i = self.free.partition_point(|&(s, _)| s < start);
-        self.free.insert(i, (start, len));
-        // Merge with the next, then with the previous.
-        if i + 1 < self.free.len() && self.free[i].0 + self.free[i].1 == self.free[i + 1].0 {
-            self.free[i].1 += self.free[i + 1].1;
-            self.free.remove(i + 1);
-        }
-        if i > 0 && self.free[i - 1].0 + self.free[i - 1].1 == self.free[i].0 {
-            self.free[i - 1].1 += self.free[i].1;
-            self.free.remove(i);
-        }
-    }
-
-    /// Entries currently allocated (capacity minus the free list).
-    pub(crate) fn used(&self) -> u32 {
-        let free: u32 = self.free.iter().map(|&(_, l)| l).sum();
-        self.capacity - free
-    }
-
-    /// Total capacity in entries.
-    pub(crate) fn total(&self) -> u32 {
-        self.capacity
+/// Bytes per index of an arena's index buffer.
+fn index_bytes(wide: bool) -> u64 {
+    if wide {
+        4
+    } else {
+        2
     }
 }
 
@@ -117,6 +74,8 @@ pub(crate) struct Arena {
     pub vertex: Option<wgpu::Buffer>,
     /// Vertex-format index buffer (None in the quad format).
     pub index: Option<wgpu::Buffer>,
+    /// The index buffer holds u32 indices (sections past [`U16_VERTICES`]); else u16.
+    wide: bool,
     vertices: RangeAlloc,
     indices: RangeAlloc,
     /// Quad-format record halves (None in the vertex format).
@@ -170,6 +129,7 @@ pub struct MeshArenas {
     queue: Arc<wgpu::Queue>,
     pub(crate) arenas: Vec<Arena>,
     scratch: Vec<u32>,
+    scratch16: Vec<u16>,
     /// Staging for mesh uploads: one pool of recycled host-mapped chunks instead of
     /// wgpu's per-`write_buffer` staging. Measured at render distance 32: one
     /// `queue.write_buffer` per mesh (two per section) leaves ~3 GiB of 64 MiB driver
@@ -194,6 +154,7 @@ impl MeshArenas {
             queue,
             arenas: Vec::new(),
             scratch: Vec::new(),
+            scratch16: Vec::new(),
             belt,
             tier: 0,
             quad_bind_layout,
@@ -229,7 +190,7 @@ impl MeshArenas {
             .iter()
             .map(|a| {
                 let v = a.vertices.total() as u64 * std::mem::size_of::<PackedVertex>() as u64;
-                let i = a.indices.total() as u64 * 4;
+                let i = a.indices.total() as u64 * index_bytes(a.wide);
                 v + i + quad_bytes(a)
             })
             .sum();
@@ -239,13 +200,15 @@ impl MeshArenas {
             .map(|a| {
                 let v = a.vertices.used();
                 let i = a.indices.used();
-                v as u64 * std::mem::size_of::<PackedVertex>() as u64 + i as u64 * 4 + quad_used(a)
+                v as u64 * std::mem::size_of::<PackedVertex>() as u64
+                    + i as u64 * index_bytes(a.wide)
+                    + quad_used(a)
             })
             .sum();
         (self.arenas.len(), bytes, used)
     }
 
-    fn new_arena(&mut self) -> u32 {
+    fn new_arena(&mut self, wide: bool) -> u32 {
         let vcount = arena_vertices(self.tier);
         let quad_mode = quad_format_enabled();
         // In the quad format the arena is the two record halves (rect quads
@@ -264,7 +227,7 @@ impl MeshArenas {
             let icount = arena_indices(self.tier);
             let index = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("section-arena-indices"),
-                size: icount as u64 * 4,
+                size: icount as u64 * index_bytes(wide),
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -314,6 +277,7 @@ impl MeshArenas {
         self.arenas.push(Arena {
             vertex,
             index,
+            wide,
             vertices: RangeAlloc::new(if quad_mode { 0 } else { vcount }),
             indices: RangeAlloc::new(if quad_mode {
                 0
@@ -353,14 +317,25 @@ impl MeshArenas {
         if vcount == 0 || icount == 0 {
             return None;
         }
-        if vcount > arena_vertices(0) || icount > arena_indices(0) {
+        let wide = vcount > U16_VERTICES;
+        // u16 ranges stay even, so every range starts and ends 4-byte aligned (buffer
+        // copies need it); the padding index is never drawn.
+        let ialloc = if wide {
+            icount
+        } else {
+            icount.next_multiple_of(2)
+        };
+        if vcount > arena_vertices(0) || ialloc > arena_indices(0) {
             tracing::warn!("section {:?} mesh too large for an arena", mesh.pos);
             return None;
         }
         let mut found = None;
         for (i, a) in self.arenas.iter_mut().enumerate() {
+            if a.wide != wide {
+                continue;
+            }
             if let Some(v) = a.vertices.alloc(vcount) {
-                match a.indices.alloc(icount) {
+                match a.indices.alloc(ialloc) {
                     Some(ix) => {
                         found = Some((i as u32, v, ix));
                         break;
@@ -376,24 +351,27 @@ impl MeshArenas {
                 // the last arena of this tier was more than half full, the tier is
                 // too small for this world — double it for the arenas after this
                 // one (a big mesh that just missed the tail is not a reason to grow).
-                let same_tier = self
-                    .arenas
-                    .last()
-                    .is_some_and(|a| a.vertices.total() == arena_vertices(self.tier));
-                if same_tier {
-                    let last = self.arenas.last().unwrap();
+                let last = self.arenas.iter().rev().find(|a| a.wide == wide);
+                if let Some(last) = last.filter(|a| a.vertices.total() == arena_vertices(self.tier))
+                {
                     let v_used = last.vertices.used();
                     let i_used = last.indices.used();
                     if v_used * 2 > last.vertices.total() || i_used * 2 > last.indices.total() {
                         self.tier += 1;
                     }
                 }
-                let i = self.new_arena();
+                let i = self.new_arena(wide);
+                tracing::info!(
+                    "opened terrain arena {i} ({} indices; live arenas hold {} vertices, {} indices)",
+                    if wide { "u32" } else { "u16" },
+                    self.arenas.iter().map(|a| a.vertices.used() as u64).sum::<u64>(),
+                    self.arenas.iter().map(|a| a.indices.used() as u64).sum::<u64>(),
+                );
                 let a = &mut self.arenas[i as usize];
                 (
                     i,
                     a.vertices.alloc(vcount).unwrap(),
-                    a.indices.alloc(icount).unwrap(),
+                    a.indices.alloc(ialloc).unwrap(),
                 )
             }
         };
@@ -425,15 +403,37 @@ impl MeshArenas {
             }
             self.scratch.extend_from_slice(&l.indices);
         }
+        let bytes = index_bytes(wide);
         let mut view = self.belt.write_buffer(
             encoder,
             a.index.as_ref().unwrap(),
-            index_start as u64 * 4,
-            std::num::NonZeroU64::new(icount as u64 * 4).unwrap(),
+            index_start as u64 * bytes,
+            std::num::NonZeroU64::new(ialloc as u64 * bytes).unwrap(),
         );
-        view.copy_from_slice(bytemuck::cast_slice(&self.scratch));
-        let resident =
-            self.finish_resident(mesh, arena, base_vertex, vcount, 0, 0, 0, 0, 0, 0, layers);
+        if wide {
+            view.copy_from_slice(bytemuck::cast_slice(&self.scratch));
+        } else {
+            self.scratch16.clear();
+            self.scratch16
+                .extend(self.scratch.iter().map(|&i| i as u16));
+            self.scratch16.resize(ialloc as usize, 0);
+            view.copy_from_slice(bytemuck::cast_slice(&self.scratch16));
+        }
+        drop(view);
+        // The index range goes back with the section (`free`).
+        let resident = self.finish_resident(
+            mesh,
+            arena,
+            base_vertex,
+            vcount,
+            0,
+            0,
+            0,
+            0,
+            index_start,
+            ialloc,
+            layers,
+        );
         Some(resident)
     }
 
@@ -502,6 +502,15 @@ impl MeshArenas {
         };
     }
 
+    /// The index buffer's format.
+    pub(crate) fn index_format(&self, arena: u32) -> wgpu::IndexFormat {
+        if self.arenas[arena as usize].wide {
+            wgpu::IndexFormat::Uint32
+        } else {
+            wgpu::IndexFormat::Uint16
+        }
+    }
+
     pub fn free(&mut self, s: &ResidentSection) {
         if let Some(a) = self.arenas.get_mut(s.arena as usize) {
             a.vertices.free(s.base_vertex, s.vertex_count);
@@ -533,23 +542,4 @@ impl SectionMesh {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn range_alloc_first_fit_and_coalesce() {
-        let mut r = RangeAlloc::new(100);
-        let a = r.alloc(10).unwrap();
-        let b = r.alloc(20).unwrap();
-        let c = r.alloc(30).unwrap();
-        assert_eq!((a, b, c), (0, 10, 30));
-        r.free(b, 20);
-        assert_eq!(r.alloc(5), Some(10), "first fit reuses the hole");
-        r.free(10, 5);
-        r.free(a, 10);
-        r.free(c, 30);
-        assert_eq!(r.free, vec![(0, 100)], "all ranges merge back");
-        assert_eq!(r.alloc(101), None);
-        assert_eq!(r.alloc(100), Some(0));
-    }
-}
+mod tests;

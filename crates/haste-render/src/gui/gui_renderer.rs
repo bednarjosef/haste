@@ -20,15 +20,17 @@ impl GuiRenderer {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gui-atlas"),
             size: wgpu::Extent3d {
-                width: GUI_ATLAS_SIZE,
-                height: GUI_ATLAS_SIZE,
+                width: GUI_ATLAS_START,
+                height: GUI_ATLAS_START,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let atlas_view = atlas.create_view(&Default::default());
@@ -168,8 +170,10 @@ impl GuiRenderer {
             queue,
             pipelines,
             bind_group,
+            bind_layout: layout,
             uniforms,
             atlas,
+            atlas_size: GUI_ATLAS_START,
             vertex_buffer,
             vertex_capacity,
             keys: hashbrown::HashMap::new(),

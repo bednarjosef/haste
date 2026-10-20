@@ -182,6 +182,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             mib(rollup.2 * 1024),
             mib(memory::gpu_resident_bytes()),
         );
+        if std::env::var_os("HASTE_GPU_REPORT").is_some() {
+            if let Some(report) = renderer.gpu_allocation_report(20) {
+                println!("{report}");
+            }
+        }
         println!(
             "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",
             mib(world.chunks + world.sections + world.heightmaps + world.light + world.block_entities),

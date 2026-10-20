@@ -123,9 +123,20 @@ fn scissor_maps_to_framebuffer_and_clamps() {
 #[test]
 fn shelf_packs_rows_and_reports_full() {
     let mut s = Shelf::default();
-    assert_eq!(s.alloc(4000, 10), Some([0, 0]));
-    assert_eq!(s.alloc(200, 20), Some([0, 10]));
-    assert_eq!(s.alloc(GUI_ATLAS_SIZE, GUI_ATLAS_SIZE), None);
+    let size = GUI_ATLAS_SIZE;
+    assert_eq!(s.alloc_in(4000, 10, size), Some([0, 0]));
+    assert_eq!(s.alloc_in(200, 20, size), Some([0, 10]));
+    assert_eq!(s.alloc_in(size, size, size), None);
+}
+
+#[test]
+fn shelf_continues_into_a_grown_atlas() {
+    // `grow_atlas` doubles the side and keeps the shelf: the next row starts below the
+    // old rows and may use the new width.
+    let mut s = Shelf::default();
+    assert_eq!(s.alloc_in(1000, 600, 1024), Some([0, 0]));
+    assert_eq!(s.alloc_in(100, 500, 1024), None);
+    assert_eq!(s.alloc_in(1500, 500, 2048), Some([0, 600]));
 }
 
 #[test]

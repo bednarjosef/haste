@@ -116,6 +116,10 @@ impl Gpu {
             label: Some("haste-render"),
             required_features,
             required_limits: wgpu::Limits::default(),
+            // Small allocator blocks (8-64 MiB device, 4-32 MiB host) instead of 128-256 MiB:
+            // the large ones left ~200 MiB reserved and unused at render distance 32, and
+            // Haste allocates its big buffers (arenas, atlases) once, not per frame.
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .context("requesting a wgpu device")?;
