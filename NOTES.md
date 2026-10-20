@@ -422,3 +422,55 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   index range to `finish_resident`, so freed sections never returned their indices. GPU main pass
   9.73 -> 8.51 ms in the same run, frame time unchanged within noise. `HASTE_GPU_REPORT=1` makes
   the offscreen bench print wgpu's allocations grouped by label.
+- **2026-10-20 Measuring renderer changes in one process.** Separate runs swing up to 30% on
+  this laptop (the GPU switches between 600, 1100 and about 2800 MHz states), more than most
+  changes. The offscreen bench now caps itself at two frames in flight
+  (`renderer/frames_in_flight.rs`; without it the queue ran ahead and an A/B came out inverted),
+  and `HASTE_AB_BLOCK=16` flips `haste_render::experiment::on()` every 16 frames and reports
+  the median on/off ratio over the pairs (`app/bench/ab.rs`): 60 s gives about 200 pairs and
+  +-2%. Only for stateless variants (a shader, a draw order, a draw split); anything meshed or
+  carried between frames still needs interleaved separate runs (A, B, A, B, at least four each).
+  A throwaway pipeline-statistics query (vertex and fragment invocations, clipper primitives)
+  around the terrain draws is worth rebuilding when the question is "how many".
+- **2026-10-20 What the terrain pass is made of at rd 32 (reference spot, Radeon 860M).**
+  2.35M triangles reach the rasterizer, with 1.9 vertex and 1.9 fragment invocations per
+  triangle and 3.7x overdraw: the triangles are tiny and the cost is per triangle and per
+  vertex, not per pixel. Per million indices: solid 0.9 ms, cutout 0.94, leaves (cutout
+  mipped) 1.32, translucent 0.66. Vanilla draws 15.4M indices against Haste's 7.6M but its
+  back faces die cheaply in the driver (NGG culling), so both rasterize about the same front
+  faces: matching vanilla here means fewer front-facing triangles or cheaper vertices. Dead
+  ends, each measured: splitting every sub-draw in two (+7400 sub-draws) costs 9% (about 0.12
+  us per multi-draw sub-draw); capping multi-draw calls at 64 or 8 sub-draws is 1.4% / 2.5%
+  slower; drawing a skipped back-facing group to join two ranges (up to 256 or 1024 indices)
+  is 1.1% / 1.8% slower; looser greedy merging (light and tint ignored, an upper bound for
+  per-pixel lighting) removes only 19% of the indices, since rd 32 terrain is too bumpy to
+  merge further. Haste's GPU buffers live in GTT: the 512 MiB VRAM carve-out is nearly full
+  with the desktop before the game starts.
+- **2026-10-20 Every vertex output is a vec4 on RDNA.** The vertex shader's outputs go to the
+  attribute ring in memory, one 16-byte slot per location whatever its width. Packing vanilla's
+  per-vertex colour with the fog factor (5% at rd 32), then the sprite index into the UV's vec4
+  as a float (it is equal at all three corners, so interpolation returns it; 5.8%), took the
+  terrain from four outputs to two. Trimming shader arithmetic barely moves the pass (a
+  position-only shader still takes about 60% of it).
+- **2026-10-20 Diagonal facing groups.** Crossed plant planes (vanilla's `cross` models) face a
+  horizontal diagonal; they now have four groups of their own (11 per layer), skipped like the
+  axis groups when the whole section box is behind the plane. A storage order found by search
+  (`mesher::GROUP_ORDER`) keeps the visible groups in at most three ranges. Indices drawn at rd
+  32: -6.8% at both spots, GPU time -7% at the ground spot.
+- **2026-10-20 Shared corner vertices.** A full unit face now takes UVs that count whole
+  blocks from the section corner (`merge::section_uvs`, the merged rectangles' rings too), so
+  coplanar neighbours with the same sprite, tint and corner light produce identical corner
+  vertices, which the sink stores once. Vertex invocations 4.57M -> 3.66M at rd 32, GPU memory
+  429 -> 341 MiB, GPU main pass -5.7% at rd 32 and about -40% at rd 12. Stored vertices
+  roughly halved but invocations fell only 20%: the hardware reuses a vertex within a short
+  window only. Reordering each group's faces along a Morton curve to keep neighbours close
+  changed nothing (3.66M -> 3.64M) and was dropped.
+- **2026-10-20 CPU side of the frame at rd 32.** The draw list costs 1.3 ms per frame (the
+  occlusion walk runs on a worker): the per-section emit 0.95 ms, of which half the slab lookups
+  miss (the walk's order holds empty sections) and every drawn section carries about 11 slab
+  layers (layer x facing group). A facing mask per section and a counting sort by arena saved
+  only 0.06 ms; the next step is a flat per-visible-section cache rebuilt when the walk result
+  or the slab changes. Frames are GPU-bound on this laptop, so this pays on faster GPUs.
+- **2026-10-20 The scratchpad is RAM.** `/tmp` is a 16 GiB tmpfs; a night of 240 MB release
+  binaries kept for A/B runs had taken 8 GiB of it. Delete experiment binaries as soon as
+  their comparison is done.
