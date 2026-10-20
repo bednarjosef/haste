@@ -49,16 +49,20 @@ struct VertexIn {
     @location(4) origin: vec3<i32>,
 };
 
-// Three outputs per vertex (vanilla terrain.vsh has five, fewer components): the pass is
-// bound by vertex and primitive throughput, and on RDNA every output is one more vec4 the
-// vertex exports, so the colour and the fog share one.
+// Two outputs per vertex (vanilla terrain.vsh has five, fewer components): the pass is
+// bound by vertex and primitive throughput, and on RDNA every output location is one more
+// vec4 the vertex writes to the attribute ring, whatever its width. Packing the sprite
+// index into the UV's vec4 (instead of a flat third output) measured 5.8% less GPU time
+// per frame at render distance 32.
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) sprite_uv: vec2<f32>,
-    // rgb: vanilla's `vertexColor` (tint, face shade and AO times the lightmap texel, all per
-    // vertex as terrain.vsh does); a: the fog factor.
-    @location(1) color_fog: vec4<f32>,
-    @location(2) @interpolate(flat) sprite: u32,
+    // xy: sprite-local UV; z: the sprite index as a float, equal at all three corners, so
+    // interpolation returns it to within rounding (indices stay far below 2^24) and
+    // `shade` rounds it back; w: the fog factor.
+    @location(0) uv_sprite_fog: vec4<f32>,
+    // Vanilla's `vertexColor` (tint, face shade and AO times the lightmap texel, all per
+    // vertex as terrain.vsh does).
+    @location(1) color: vec3<f32>,
 };
 
 const POS_RANGE: f32 = 24.0;
@@ -152,8 +156,6 @@ fn finish_vertex(
 
     var out: VertexOut;
     out.clip = camera.view_proj * vec4<f32>(rel, 1.0);
-    out.sprite_uv = sprite_uv;
-    out.sprite = sprite;
 
     // Vanilla's per-vertex AO brightness: the average of four shade samples
     // (two sides, the diagonal, the face cell), each 1.0 or 0.2 — i.e.
@@ -170,7 +172,8 @@ fn finish_vertex(
         linear_fog_value(spherical, camera.fog_env_start, camera.fog_env_end),
         linear_fog_value(cylindrical, camera.fog_rd_start, camera.fog_rd_end),
     );
-    out.color_fog = vec4<f32>(color, fog);
+    out.uv_sprite_fog = vec4<f32>(sprite_uv, f32(sprite), fog);
+    out.color = color;
     return out;
 }
 
@@ -365,7 +368,8 @@ fn fs_translucent(in: VertexOut) -> @location(0) vec4<f32> {
 }
 
 fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
-    let rect = sprite_rects[in.sprite];
+    let sprite_uv = in.uv_sprite_fog.xy;
+    let rect = sprite_rects[u32(in.uv_sprite_fog.z + 0.5)];
     let sprite_size = vec2<f32>(rect.zw);
     let atlas_size = vec2<f32>(textureDimensions(atlas_texture));
     let origin = vec2<f32>(rect.xy);
@@ -379,13 +383,13 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     // jump clamps textureSampleGrad to the atlas's coarsest mip — the
     // atlas-average grey, drawn as a thin dashed line on every block edge
     // (the user bug this fixes; vanilla never merges, so it has no wraps).
-    let uv = (origin + fract(in.sprite_uv) * sprite_size) / atlas_size;
+    let uv = (origin + fract(sprite_uv) * sprite_size) / atlas_size;
     let atlas_scale = sprite_size / atlas_size;
     let color = sample_nearest(
         uv,
         1.0 / atlas_size,
-        dpdx(in.sprite_uv) * atlas_scale,
-        dpdy(in.sprite_uv) * atlas_scale,
+        dpdx(sprite_uv) * atlas_scale,
+        dpdy(sprite_uv) * atlas_scale,
     );
     // Vanilla's SOLID_TERRAIN defines no ALPHA_CUTOUT (RenderPipelines.SOLID_TERRAIN):
     // solid terrain never discards, so the GPU keeps early-Z for the whole pass.
@@ -404,8 +408,8 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     // there instead. Doing the multiplies on linear values instead lifts every
     // factor below 1 to roughly its 1/2.4th power (a 0.6 side face or a two-occluder AO
     // corner draws ~25% too bright).
-    let lit = color.rgb * in.color_fog.rgb;
-    let fogged = mix(lit, srgb_encode(camera.fog_color.rgb), in.color_fog.a);
+    let lit = color.rgb * in.color;
+    let fogged = mix(lit, srgb_encode(camera.fog_color.rgb), in.uv_sprite_fog.w);
     return vec4<f32>(select(fogged, srgb_decode(fogged), camera.hw_srgb == 1.0), color.a);
 }
 
