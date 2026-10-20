@@ -117,7 +117,7 @@ impl Renderer {
                     pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
                     pass.set_index_buffer(
                         a.index.as_ref().unwrap().slice(..),
-                        wgpu::IndexFormat::Uint32,
+                        self.arenas.index_format(d.arena),
                     );
                 }
                 bound_arena = d.arena;

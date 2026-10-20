@@ -62,7 +62,7 @@ impl MeshArenas {
                         self.tier += 1;
                     }
                 }
-                let i = self.new_arena();
+                let i = self.new_arena(false);
                 let a = &mut self.arenas[i as usize];
                 let q = a.quads.as_mut().unwrap();
                 let qx = q.rect_alloc.alloc(qcount).unwrap();
