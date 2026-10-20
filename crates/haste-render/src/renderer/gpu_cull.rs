@@ -65,7 +65,10 @@ struct Buffers {
 pub struct GpuCull {
     /// Off without indirect draw counts, in the quad format, or with `HASTE_GPU_CULL=0`.
     enabled: bool,
-    pyramid_pipelines: PyramidPipelines,
+    /// Only when enabled: the depth reduction reads the depth texture with `textureLoad`,
+    /// which the GL backend cannot translate (the GL fallback has no indirect draw count,
+    /// so it never culls).
+    pyramid_pipelines: Option<PyramidPipelines>,
     pyramid: Option<Pyramid>,
     layout: wgpu::BindGroupLayout,
     select: wgpu::ComputePipeline,
@@ -161,7 +164,7 @@ impl GpuCull {
         });
         GpuCull {
             enabled,
-            pyramid_pipelines: PyramidPipelines::new(device),
+            pyramid_pipelines: enabled.then(|| PyramidPipelines::new(device)),
             pyramid: None,
             select: pipeline("select_early"),
             test: pipeline("test_late"),
@@ -221,9 +224,10 @@ impl GpuCull {
         depth: &wgpu::TextureView,
         args_in: &wgpu::Buffer,
     ) {
-        let pyramid = self
-            .pyramid_pipelines
-            .pyramid(device, self.pyramid.take(), depth, size);
+        let Some(pipelines) = &self.pyramid_pipelines else {
+            return;
+        };
+        let pyramid = pipelines.pyramid(device, self.pyramid.take(), depth, size);
         let stale = match &self.groups {
             Some((_, args, view)) => args != args_in || view != &pyramid.all_levels,
             None => true,
@@ -264,14 +268,16 @@ impl GpuCull {
 
     /// Records the pyramid build and the late test (between the early and late draws).
     pub fn encode_late(&self, encoder: &mut wgpu::CommandEncoder) {
-        let (Some(pyramid), Some((groups, _, _))) = (&self.pyramid, &self.groups) else {
+        let (Some(pipelines), Some(pyramid), Some((groups, _, _))) =
+            (&self.pyramid_pipelines, &self.pyramid, &self.groups)
+        else {
             return;
         };
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("gpu-cull-late"),
             timestamp_writes: None,
         });
-        self.pyramid_pipelines.build(&mut pass, pyramid);
+        pipelines.build(&mut pass, pyramid);
         pass.set_pipeline(&self.test);
         pass.set_bind_group(0, &groups[self.current], &[]);
         pass.dispatch_workgroups((self.staging.len() as u32).div_ceil(64), 1, 1);
