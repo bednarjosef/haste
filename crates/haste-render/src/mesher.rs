@@ -40,8 +40,8 @@ pub(crate) use sink::axis_facing;
 use sink::{layer_index, MeshSink};
 use snapshot::{Cell, EXT};
 
-pub use sink::QuadSpan;
 pub use sink::SectionLayerMesh;
+pub use sink::{QuadSpan, GROUP_ORDER};
 
 /// One section's meshed geometry, split by render layer.
 pub struct SectionMesh {

@@ -71,6 +71,19 @@ impl Renderer {
                     haste_assets::RenderLayer::CutoutMipped => 2,
                     haste_assets::RenderLayer::Translucent => 3,
                 };
+                // Join a group to the previous one of this section when their
+                // ranges touch (see `mesher::GROUP_ORDER`): fewer sub-draws.
+                if let Some(prev) = buckets[i].last_mut() {
+                    if prev.kind == crate::quad_format::SpanKind::Indexed
+                        && l.kind == crate::quad_format::SpanKind::Indexed
+                        && prev.arena == s.arena
+                        && prev.base_vertex == s.base_vertex
+                        && prev.first_index + prev.index_count == l.first
+                    {
+                        prev.index_count += l.count;
+                        continue;
+                    }
+                }
                 buckets[i].push(SectionDraw {
                     layer: l.layer,
                     arena: s.arena,
