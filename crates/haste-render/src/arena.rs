@@ -15,10 +15,12 @@ use haste_assets::RenderLayer;
 use haste_core::SectionPos;
 
 mod quad;
+mod range_alloc;
 
 use crate::mesher::SectionMesh;
 use crate::quad_format::{quad_format_enabled, PackedGeneral, PackedQuad, SpanKind};
 use crate::vertex::PackedVertex;
+pub(crate) use range_alloc::RangeAlloc;
 
 /// Largest arena: 2^22 vertices (20 bytes each: 80 MiB) and 3x2^22 indices (4 bytes
 /// each: 48 MiB), the proven steady-state size at render distance 32. In the quad
@@ -41,66 +43,6 @@ fn arena_vertices(t: usize) -> u32 {
 fn arena_indices(t: usize) -> u32 {
     let shift = t.min(3) as u32;
     (MAX_ARENA_INDICES >> (3 - shift)).max(3 << 19)
-}
-
-/// First-fit range allocator with coalescing frees.
-#[derive(Debug, Clone)]
-pub(crate) struct RangeAlloc {
-    /// Free ranges (start, len), sorted by start, non-adjacent.
-    free: Vec<(u32, u32)>,
-    /// Total capacity in entries.
-    capacity: u32,
-}
-
-impl RangeAlloc {
-    pub(crate) fn new(len: u32) -> RangeAlloc {
-        RangeAlloc {
-            free: vec![(0, len)],
-            capacity: len,
-        }
-    }
-
-    pub(crate) fn alloc(&mut self, len: u32) -> Option<u32> {
-        if len == 0 {
-            return Some(0);
-        }
-        let i = self.free.iter().position(|&(_, l)| l >= len)?;
-        let (start, l) = self.free[i];
-        if l == len {
-            self.free.remove(i);
-        } else {
-            self.free[i] = (start + len, l - len);
-        }
-        Some(start)
-    }
-
-    pub(crate) fn free(&mut self, start: u32, len: u32) {
-        if len == 0 {
-            return;
-        }
-        let i = self.free.partition_point(|&(s, _)| s < start);
-        self.free.insert(i, (start, len));
-        // Merge with the next, then with the previous.
-        if i + 1 < self.free.len() && self.free[i].0 + self.free[i].1 == self.free[i + 1].0 {
-            self.free[i].1 += self.free[i + 1].1;
-            self.free.remove(i + 1);
-        }
-        if i > 0 && self.free[i - 1].0 + self.free[i - 1].1 == self.free[i].0 {
-            self.free[i - 1].1 += self.free[i].1;
-            self.free.remove(i);
-        }
-    }
-
-    /// Entries currently allocated (capacity minus the free list).
-    pub(crate) fn used(&self) -> u32 {
-        let free: u32 = self.free.iter().map(|&(_, l)| l).sum();
-        self.capacity - free
-    }
-
-    /// Total capacity in entries.
-    pub(crate) fn total(&self) -> u32 {
-        self.capacity
-    }
 }
 
 /// The quad-format halves of an arena: the rect-record and the general-record
@@ -533,23 +475,4 @@ impl SectionMesh {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn range_alloc_first_fit_and_coalesce() {
-        let mut r = RangeAlloc::new(100);
-        let a = r.alloc(10).unwrap();
-        let b = r.alloc(20).unwrap();
-        let c = r.alloc(30).unwrap();
-        assert_eq!((a, b, c), (0, 10, 30));
-        r.free(b, 20);
-        assert_eq!(r.alloc(5), Some(10), "first fit reuses the hole");
-        r.free(10, 5);
-        r.free(a, 10);
-        r.free(c, 30);
-        assert_eq!(r.free, vec![(0, 100)], "all ranges merge back");
-        assert_eq!(r.alloc(101), None);
-        assert_eq!(r.alloc(100), Some(0));
-    }
-}
+mod tests;
