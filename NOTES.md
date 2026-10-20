@@ -362,6 +362,34 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   cone + adaptive 3.97; unmeshed 7929 off, 2848-3500 with cone or predict. Adaptive is the clear
   rd 32 win (p99 -30 %); cone + adaptive keeps it and cuts pop-in by 60 % at rd 32; rd 12 is too
   noisy to decide (more runs before changing defaults).
+- **2026-10-19 Visible-only at rd 32, second look.** Rechecked on a quiet machine with the bench's
+  pop-in counter switched off (two interleaved runs each, still camera, average / p99 ms): meshing
+  every section 6.60 / 9.4 and 6.63 / 9.6 (GPU main 5.9); visible-only 9.20 / 29.3 and
+  7.78 / 27.7 (GPU 7.8 and 6.7) without the counter, 9.54 / 29.1 and 9.55 / 29.4 with it. rd 12
+  is even (3.87-3.99). So the entry above stands: the gap is real and sits in the GPU main pass
+  and in p99 spikes. Two leads ruled out on the way: the occlusion walks do not keep re-running
+  at a still camera (about 200 walks, all in the first 4 s while 3,700 chunks stream in, none in
+  the measured phase), and draw order (unstable, stable, distance, visit) moves the GPU main pass
+  by only 5 %. The bench's own pop-in count (`update_premesh` walks the whole visible mask with
+  hash lookups every frame, only when the bench tracks pop-in and smart culling is on) costs
+  about 1 ms per frame quiet and 2-3.4 ms under load: it biases every visible-only bench number
+  and should become incremental.
+- **2026-10-19 Cheap headless workers (Haiku 5.5, Sonnet 5.5).** Measured on three tasks already
+  done by GLM workers: with economy rules Haiku cost $0.15-0.31 a task and Sonnet $0.45-3.05;
+  without them Haiku cost 8.5x more (its price rises 5x above a 100K-token prompt). A run's cost
+  is requests x prompt size, re-read from cache each request, and half of every prompt was fixed
+  overhead: 28.5K tokens before the first read (unused tool definitions 9.5K, CLAUDE.md and
+  AGENTS.md 6K, Claude Code's system prompt 3K). `tools/worker/run.py` starts a worker at 13-15K
+  (six tools, no settings from disk, `tools/worker/RULES.md` appended, the `hx context`
+  orientation pack). Shell searches filled 70-86 % of Haiku's context and whole-file reads
+  52-79 % of Sonnet's, hence `scripts/hx`. Found on the way: in `dontAsk` mode every read through
+  the `cache` symlink is refused unless the cache is passed with `--add-dir`; the allow-list also
+  refuses loops, `$(...)`, `$VAR` expansion and heredocs (the worker hook now says so precisely);
+  a headless session ends when the model ends its turn to wait for a background task (Haiku did
+  in 3 of 4 runs; the hooks now refuse background commands and hold the stop until `hx done`);
+  stream-json per-message usage under-reports output, the result event is exact; Claude Code
+  clears old tool results only after an hour idle, so a long run's context only shrinks by
+  auto-compaction.
 - **2026-10-20 Where the GPU time goes (rd 32, Radeon 860M, RADV).** The terrain pass is bound by
   geometry, not pixels: at 1/16 of the pixels the GPU main pass fell only from 9.9 to about 7.5 ms.
   Vertex-shader trims barely matter (no lightmap or no fog about -0.5 ms; a position-only shader

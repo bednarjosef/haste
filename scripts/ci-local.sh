@@ -37,6 +37,12 @@ fi
 step "file sizes"
 scripts/check-file-sizes.sh || fail "file sizes (see AGENTS.md, Structured like vanilla)"
 
+if grep -q '^tools/hx/' <<<"$changed"; then
+  step "agent tools"
+  python3 -m unittest discover -s tools/hx >/dev/null 2>&1 || {
+    python3 -m unittest discover -s tools/hx; fail "tools/hx tests"; }
+fi
+
 # The crates to check: those owning a changed file plus every workspace crate depending on them.
 crates=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
 import json, sys, os
