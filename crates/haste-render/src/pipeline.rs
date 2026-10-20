@@ -17,6 +17,9 @@ pub struct Gpu {
     pub adapter: Arc<wgpu::Adapter>,
     /// Terrain is drawn with one multi-draw-indirect call per layer and arena.
     pub multi_draw: bool,
+    /// Multi-draws can take their draw count from a GPU buffer
+    /// (`MULTI_DRAW_INDIRECT_COUNT`), which the GPU occlusion culling needs.
+    pub draw_count: bool,
     /// `DownlevelFlags::VIEW_FORMATS` and `SURFACE_VIEW_FORMATS`.
     pub view_formats: bool,
     /// Kept alive for surface creation (windowed mode).
@@ -92,17 +95,23 @@ impl Gpu {
         }
         // Multi-draw-indirect terrain needs a non-zero first instance per draw (the section
         // origin); without it the renderer issues direct draws. TIMESTAMP_QUERY gives the
-        // per-pass GPU times, TIMESTAMP_QUERY_INSIDE_PASSES the main-pass sub-pass split.
+        // per-pass GPU times, TIMESTAMP_QUERY_INSIDE_PASSES the main-pass sub-pass split,
+        // MULTI_DRAW_INDIRECT_COUNT the GPU occlusion culling's compacted draws.
         let optional = wgpu::Features::INDIRECT_FIRST_INSTANCE
             | wgpu::Features::TIMESTAMP_QUERY
-            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
+            | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
         let required_features = adapter.features() & optional;
         let multi_draw = required_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
             && adapter
                 .get_downlevel_capabilities()
                 .flags
                 .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION);
-        tracing::info!("terrain multi-draw-indirect: {multi_draw}");
+        let draw_count =
+            multi_draw && required_features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
+        tracing::info!(
+            "terrain multi-draw-indirect: {multi_draw}, with GPU draw count: {draw_count}"
+        );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("haste-render"),
             required_features,
@@ -129,6 +138,7 @@ impl Gpu {
         Ok(Gpu {
             view_formats,
             multi_draw,
+            draw_count,
             device: Arc::new(device),
             queue: Arc::new(queue),
             adapter: Arc::new(adapter),

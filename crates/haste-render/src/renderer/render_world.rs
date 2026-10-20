@@ -419,182 +419,45 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
+        // GPU occlusion culling (`gpu_cull.rs`): the early selection runs before the main
+        // pass, which then splits around the depth pyramid and the late test.
+        let culled = self.gpu_cull.active();
+        if culled {
+            self.gpu_cull.encode_early(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut encoder,
+                rot_view_proj,
+                self.size,
+                &depth_view,
+                &self.indirect_buffer,
+            );
+        }
         {
             ran[0] = true;
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // The clear is the fog colour's sRGB-encoded bytes: the view is
-                        // non-sRGB, so no hardware conversion happens and the raw value is
-                        // what lands in the target (an sRGB view would have encoded the
-                        // linear colour itself).
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: fog_srgb[0] as f64,
-                            g: fog_srgb[1] as f64,
-                            b: fog_srgb[2] as f64,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(0)),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let mut pass = self.begin_main_pass(
+                &mut encoder,
+                &target_view,
+                &depth_view,
+                Some(fog_srgb),
+                !culled,
+            );
             brackets.begin(&mut pass, timer, crate::timing::SKY);
             draw_calls += self.sky.draw_background(&mut pass);
             brackets.end(&mut pass, timer, crate::timing::SKY);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-            pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
-
-            // Layered draw order (RenderLayer Ord: Solid < Cutout < CutoutMipped
-            // < Translucent). Section origins come from the instance-rate origin buffer, one
-            // instance per draw; buffers are bound once per arena. In the quad format
-            // the instance buffer also carries each draw's span kind, the arena's
-            // record storage buffers are bound as group 3, and the static index
-            // pattern replaces the arena's index buffer — the draw's base_vertex
-            // carries the record base.
-            let quad = crate::quad_format::quad_format_enabled();
-            if quad {
-                pass.set_vertex_buffer(0, self.quad_instance_buffer.slice(..));
-                pass.set_index_buffer(self.quad_pattern_index.slice(..), wgpu::IndexFormat::Uint32);
-            } else {
-                pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
+            self.bind_world_groups(&mut pass);
+            let mut phase = super::terrain_draw::TerrainPhase::All;
+            if culled {
+                let mut untimed = crate::timing::SubpassBrackets::default();
+                use super::terrain_draw::TerrainPhase::{Early, Late};
+                draw_calls += self.draw_terrain(&mut pass, &draws, &mut untimed, Early);
+                drop(pass);
+                self.gpu_cull.encode_late(&mut encoder);
+                pass = self.begin_main_pass(&mut encoder, &target_view, &depth_view, None, true);
+                self.bind_world_groups(&mut pass);
+                phase = Late;
             }
-            let mut entities_drawn = false;
-            let mut bound_arena = u32::MAX;
-            let mut bound_layer = None;
-            let mut i = 0;
-            while i < draws.len() {
-                let d = &draws[i];
-                let instance = i;
-                // Entities after the opaque and cutout terrain, before translucent.
-                if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
-                    brackets.begin_entities(&mut pass, timer);
-                    // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
-                    // the entities, then the block entities' special passes: the end
-                    // portal/gateway starfield and the beacon beams (inner opaque, glow
-                    // translucent without depth write). The special passes use their own bind
-                    // groups at index 1, so the terrain's must be restored after them (the
-                    // loop below sets the pipeline but not the bind groups again).
-                    draw_calls += self.entity.draw_shadows(&mut pass);
-                    draw_calls += self.entity.draw(&mut pass);
-                    pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                    pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
-                    draw_calls += self.entity.draw_portals(&mut pass);
-                    draw_calls += self.entity.draw_beams(&mut pass);
-                    pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                    // Close the entities bracket right after the entity draws, so the
-                    // translucent terrain below is not timed as "entities".
-                    brackets.end(&mut pass, timer, crate::timing::ENTITIES);
-                    entities_drawn = true;
-                    bound_layer = None;
-                    bound_arena = u32::MAX;
-                }
-                if bound_layer != Some(d.layer) {
-                    // CutoutMipped (leaves, vines) shares the solid *pipeline* (same shader
-                    // state, mips differ in the sampler) but must keep the alpha discard:
-                    // its sprites have transparent texels by vanilla's per-sprite layer rule
-                    // (NativeImage.computeTransparency -> ChunkSectionLayer.byTransparency).
-                    let (pipeline, sub) = match (d.layer, quad) {
-                        (haste_assets::RenderLayer::Solid, false) => (&self.pipeline_solid, 1),
-                        (haste_assets::RenderLayer::Cutout, false) => (&self.pipeline_cutout, 2),
-                        (haste_assets::RenderLayer::CutoutMipped, false) => {
-                            (&self.pipeline_cutout, 3)
-                        }
-                        (haste_assets::RenderLayer::Translucent, false) => {
-                            (&self.pipeline_translucent, 4)
-                        }
-                        (haste_assets::RenderLayer::Solid, true) => (&self.quad_pipeline_solid, 1),
-                        (haste_assets::RenderLayer::Cutout, true) => {
-                            (&self.quad_pipeline_cutout, 2)
-                        }
-                        (haste_assets::RenderLayer::CutoutMipped, true) => {
-                            (&self.quad_pipeline_cutout, 3)
-                        }
-                        (haste_assets::RenderLayer::Translucent, true) => {
-                            (&self.quad_pipeline_translucent, 4)
-                        }
-                    };
-                    brackets.begin_terrain_layer(&mut pass, timer, sub);
-                    pass.set_pipeline(pipeline);
-                    bound_layer = Some(d.layer);
-                }
-                if bound_arena != d.arena {
-                    let a = &self.arenas.arenas[d.arena as usize];
-                    if quad {
-                        if let Some(bind) = &a.quad_bind {
-                            pass.set_bind_group(3, bind, &[]);
-                        }
-                    } else {
-                        pass.set_vertex_buffer(0, a.vertex.as_ref().unwrap().slice(..));
-                        pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
-                        pass.set_index_buffer(
-                            a.index.as_ref().unwrap().slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                    }
-                    bound_arena = d.arena;
-                }
-                let (quad_count, quad_base) = if quad {
-                    d.kind.indexed_draw(d.first_index, d.index_count)
-                } else {
-                    (0, 0)
-                };
-                if self.gpu.multi_draw {
-                    // One call for the run of draws sharing this layer and arena.
-                    let end = draws[i..]
-                        .iter()
-                        .position(|e| e.layer != d.layer || e.arena != d.arena)
-                        .map_or(draws.len(), |n| i + n);
-                    let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>();
-                    pass.multi_draw_indexed_indirect(
-                        &self.indirect_buffer,
-                        (i * stride) as u64,
-                        (end - i) as u32,
-                    );
-                    draw_calls += 1;
-                    i = end;
-                } else if quad {
-                    pass.draw_indexed(
-                        0..quad_count,
-                        quad_base as i32,
-                        instance as u32..instance as u32 + 1,
-                    );
-                    draw_calls += 1;
-                    i += 1;
-                } else {
-                    pass.draw_indexed(
-                        d.first_index..d.first_index + d.index_count,
-                        d.base_vertex as i32,
-                        instance as u32..instance as u32 + 1,
-                    );
-                    draw_calls += 1;
-                    i += 1;
-                }
-            }
-            if !entities_drawn {
-                brackets.begin_entities(&mut pass, timer);
-                draw_calls += self.entity.draw_shadows(&mut pass);
-                draw_calls += self.entity.draw(&mut pass);
-                pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
-                draw_calls += self.entity.draw_portals(&mut pass);
-                draw_calls += self.entity.draw_beams(&mut pass);
-            }
+            draw_calls += self.draw_terrain(&mut pass, &draws, &mut brackets, phase);
             // Translucent is the last layer, so its bracket never sees a layer change:
             // `begin_particles` closes whatever terrain bracket is still open.
             brackets.begin_particles(&mut pass, timer);
@@ -606,6 +469,8 @@ impl Renderer {
             draw_calls += self.weather.draw_lightning(&mut pass);
             brackets.end(&mut pass, timer, crate::timing::OVERLAYS);
         }
+
+        self.gpu_cull.record_stats(&self.gpu.device, &mut encoder);
 
         // First-person hand: its own pass over the world with the depth cleared, so it never
         // sinks into walls.
@@ -674,6 +539,7 @@ impl Renderer {
         };
         self.timings.encode_ms = lap(&mut mark);
         self.gpu.queue.submit([encoder.finish()]);
+        self.gpu_cull.after_submit();
         if let Some(t) = &mut self.timer {
             t.after_submit(resolved);
         }

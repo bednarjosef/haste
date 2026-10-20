@@ -31,7 +31,7 @@ impl Renderer {
         let min_section = self.min_section;
         let sections = &self.sections;
         let emit = |buckets: &mut [Vec<SectionDraw>; 4], pos: SectionPos| {
-            let Some(s) = sections.get(pos) else {
+            let Some((slot, s)) = sections.get_with_slot(pos) else {
                 return;
             };
             let si = s.pos.y - min_section;
@@ -93,6 +93,9 @@ impl Renderer {
                     base_vertex: s.base_vertex,
                     kind: l.kind,
                     origin: [s.pos.x << 4, s.pos.y << 4, s.pos.z << 4],
+                    slot,
+                    lo,
+                    hi,
                 });
             }
         };
@@ -130,6 +133,12 @@ impl Renderer {
             draws.iter().map(|d| d.index_count).sum()
         };
         self.prepare_draw_data(&draws);
+        self.gpu_cull.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &draws,
+            self.sections.slot_capacity(),
+        );
         self.draw_list = draws;
         (sections_total, drawn, indices_drawn)
     }

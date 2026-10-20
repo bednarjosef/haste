@@ -225,6 +225,22 @@ impl GpuTimer {
         })
     }
 
+    /// Timestamp writes for pass `i` when it is recorded as several render passes (the
+    /// main pass around the GPU occlusion culling): the first part writes the beginning,
+    /// the last the end.
+    pub fn writes_part(
+        &self,
+        i: u32,
+        first: bool,
+        last: bool,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        (!self.in_flight && (first || last)).then(|| wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: first.then_some(i * 2),
+            end_of_pass_write_index: last.then_some(i * 2 + 1),
+        })
+    }
+
     /// Begin sub-pass `i`'s bracket: one timestamp write inside `pass`. Each query may be
     /// written at most once per pass, so a bracket that is already open must not begin again.
     /// No-op while the previous readback is still pending or on a frame that does not sample

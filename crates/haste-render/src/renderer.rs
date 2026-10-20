@@ -24,8 +24,10 @@ pub(crate) use surface::Offscreen;
 mod camera;
 mod draw_list;
 mod frame_setup;
+mod gpu_cull;
 mod gui_pass;
 mod init;
+mod main_pass;
 mod mesh_gate;
 mod premesh;
 mod quad_draw;
@@ -34,6 +36,7 @@ mod query;
 mod readback;
 mod render_world;
 mod surface;
+mod terrain_draw;
 mod terrain_feed;
 mod work_budget;
 
@@ -258,6 +261,11 @@ struct SectionDraw {
     /// where the index buffer carries the geometry).
     kind: crate::quad_format::SpanKind,
     origin: [i32; 3],
+    /// The section's slab slot and its mesh bounds relative to the camera (the GPU
+    /// occlusion culling's input).
+    slot: u32,
+    lo: [f32; 3],
+    hi: [f32; 3],
 }
 
 /// The renderer. Construct with a window (windowed mode) or offscreen
@@ -382,6 +390,8 @@ pub struct Renderer {
     indirect: Vec<u32>,
     indirect_buffer: wgpu::Buffer,
     indirect_capacity: usize,
+    /// GPU occlusion culling of the terrain draws (two phases around a depth pyramid).
+    gpu_cull: gpu_cull::GpuCull,
     camera_uniform: wgpu::Buffer,
     camera_bind_group_layout: wgpu::BindGroupLayout,
     camera_bind_group: wgpu::BindGroup,
