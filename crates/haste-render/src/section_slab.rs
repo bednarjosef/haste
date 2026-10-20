@@ -88,7 +88,15 @@ pub struct SectionSlab {
     /// place, so no generation tags are needed).
     index: ahash::AHashMap<u64, u32>,
     free: Vec<u32>,
+    /// Entries of `layers` no live slot points at (replaced or removed sections whose
+    /// range was not at the tail); compacted away once they outnumber the live ones.
+    dead_layers: usize,
+    /// The compaction's second buffer, kept so a compaction allocates nothing.
+    layer_scratch: Vec<SlabLayer>,
 }
+
+/// Dead layer entries tolerated before a compaction (a section has at most a few dozen).
+const DEAD_LAYERS_MIN: usize = 4096;
 
 fn key(pos: SectionPos) -> u64 {
     // Section coordinates fit in 21 bits each (±1M sections).
@@ -110,6 +118,8 @@ impl SectionSlab {
             layers: Vec::new(),
             index: ahash::AHashMap::with_capacity(1024),
             free: Vec::new(),
+            dead_layers: 0,
+            layer_scratch: Vec::new(),
         }
     }
 
@@ -126,19 +136,17 @@ impl SectionSlab {
     /// there was one, so the caller can free its arena ranges.
     pub fn insert(&mut self, s: ResidentSection) -> Option<ResidentSection> {
         let old = self.remove(&s.pos);
-        let layers: Vec<SlabLayer> = s
-            .layers
-            .iter()
-            .map(|l| SlabLayer {
-                layer: l.layer,
-                first: l.first,
-                count: l.count,
-                dir: l.dir,
-                kind: l.kind,
-            })
-            .collect();
+        if self.dead_layers >= DEAD_LAYERS_MIN && self.dead_layers * 2 > self.layers.len() {
+            self.compact_layers();
+        }
         let layers_base = self.layers.len() as u32;
-        self.layers.extend(layers);
+        self.layers.extend(s.layers.iter().map(|l| SlabLayer {
+            layer: l.layer,
+            first: l.first,
+            count: l.count,
+            dir: l.dir,
+            kind: l.kind,
+        }));
         let slot = match self.free.pop() {
             Some(i) => i,
             None => {
@@ -173,7 +181,14 @@ impl SectionSlab {
     pub fn remove(&mut self, pos: &SectionPos) -> Option<ResidentSection> {
         let slot = self.index.remove(&key(*pos))?;
         let s = self.slots[slot as usize].take()?;
-        self.layers.truncate_include(&s);
+        // The newest record's range is the tail and goes at once; any other becomes dead
+        // entries until the next compaction.
+        let end = (s.layers_base + s.layers_len) as usize;
+        if end == self.layers.len() {
+            self.layers.truncate(s.layers_base as usize);
+        } else {
+            self.dead_layers += s.layers_len as usize;
+        }
         self.free.push(slot);
         Some(ResidentSection {
             pos: s.pos,
@@ -237,28 +252,26 @@ impl SectionSlab {
         self.layers.clear();
         self.index.clear();
         self.free.clear();
+        self.dead_layers = 0;
+    }
+
+    /// Packs the live slots' layer ranges into the scratch buffer and swaps the two, so
+    /// replaced sections' entries do not pile up for the whole session.
+    fn compact_layers(&mut self) {
+        self.layer_scratch.clear();
+        for s in self.slots.iter_mut().flatten() {
+            let start = s.layers_base as usize;
+            s.layers_base = self.layer_scratch.len() as u32;
+            self.layer_scratch
+                .extend_from_slice(&self.layers[start..start + s.layers_len as usize]);
+        }
+        std::mem::swap(&mut self.layers, &mut self.layer_scratch);
+        self.dead_layers = 0;
     }
 
     /// Column key for the per-column visibility mask.
     pub fn column(pos: SectionPos) -> ChunkPos {
         ChunkPos::new(pos.x, pos.z)
-    }
-}
-
-trait TruncateInclude {
-    fn truncate_include(&mut self, s: &SlabSection);
-}
-
-impl TruncateInclude for Vec<SlabLayer> {
-    fn truncate_include(&mut self, s: &SlabSection) {
-        // Layers are appended in slot-removal order; a removal can only take
-        // the tail when this is the newest record, otherwise the range is
-        // left as dead entries reused on the next append (the free list of
-        // the layer array is the slot's own reuse, not this).
-        let end = (s.layers_base + s.layers_len) as usize;
-        if end == self.len() {
-            self.truncate(s.layers_base as usize);
-        }
     }
 }
 
@@ -338,5 +351,31 @@ mod tests {
         slab.remove(&SectionPos::new(0, 0, 0));
         let s1 = slab.get(SectionPos::new(0, 1, 0)).unwrap();
         assert_eq!(slab.layers(s1).len(), 1);
+    }
+
+    #[test]
+    fn replaced_sections_do_not_grow_the_layer_array() {
+        let mut slab = SectionSlab::new();
+        // Re-mesh 64 sections over and over, in an order that never replaces the tail.
+        for round in 0..400 {
+            for i in 0..64 {
+                let n = 1 + (i + round) % 5;
+                slab.insert(resident(SectionPos::new(i as i32, 0, 0), n));
+            }
+        }
+        let live: usize = slab.iter().map(|s| s.layers_len as usize).sum();
+        assert!(
+            slab.layers.len() <= live + 2 * DEAD_LAYERS_MIN,
+            "{} entries for {live} live",
+            slab.layers.len()
+        );
+        // Every slice still belongs to its own section.
+        for i in 0..64 {
+            let s = slab.get(SectionPos::new(i, 0, 0)).unwrap();
+            assert_eq!(slab.layers(s).len(), 1 + (i as usize + 399) % 5);
+            for (j, l) in slab.layers(s).iter().enumerate() {
+                assert_eq!(l.first, j as u32 * 6);
+            }
+        }
     }
 }
