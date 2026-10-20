@@ -92,6 +92,11 @@ pub(super) struct MeshSink {
     /// all point away from the camera is skipped at draw time, saving the
     /// vertex work of quads the rasterizer culls after vertex shading.
     pub(super) dirs: [Vec<u32>; BUCKETS],
+    /// The section's vertices by content, so identical corners of neighbouring
+    /// faces are stored and shaded once (see `merge::section_uvs`).
+    shared: ahash::AHashMap<[u32; 5], u32>,
+    /// A merged rectangle's ring as vertex indices (scratch for `push_fan`).
+    fan: Vec<u32>,
     /// Minimum extent seen, for the AABB.
     pub(super) min: [f32; 3],
     pub(super) max: [f32; 3],
@@ -122,6 +127,8 @@ impl MeshSink {
             quad_quads: std::array::from_fn(|_| Vec::new()),
             quad_general: std::array::from_fn(|_| Vec::new()),
             dirs: std::array::from_fn(|_| Vec::new()),
+            shared: ahash::AHashMap::default(),
+            fan: Vec::new(),
             min: [f32::MAX; 3],
             max: [f32::MIN; 3],
         }
@@ -139,8 +146,19 @@ impl MeshSink {
         for d in &mut self.dirs {
             d.clear();
         }
+        self.shared.clear();
         self.min = [f32::MAX; 3];
         self.max = [f32::MIN; 3];
+    }
+
+    /// The index of vertex `v`, pushing it unless an identical one is already stored.
+    fn shared_vertex(&mut self, v: PackedVertex) -> u32 {
+        let next = self.vertices.len() as u32;
+        let index = *self.shared.entry(bytemuck::cast(v)).or_insert(next);
+        if index == next {
+            self.vertices.push(v);
+        }
+        index
     }
 
     fn note_position(&mut self, pos: [f32; 3]) {
@@ -167,9 +185,9 @@ impl MeshSink {
             self.push_quad_pulled(bucket, positions, uvs, lights, tint, sprite);
             return;
         }
-        let base = self.vertices.len() as u32;
+        let mut v = [0u32; 4];
         for i in 0..4 {
-            self.vertices.push(pack_vertex_raw(
+            v[i] = self.shared_vertex(pack_vertex_raw(
                 positions[i],
                 uvs[i],
                 lights[i],
@@ -185,9 +203,9 @@ impl MeshSink {
         let ao = |v: usize| (lights[v][1] & 7) as u32;
         let indices = &mut self.dirs[bucket];
         if ao(0) + ao(2) < ao(1) + ao(3) {
-            indices.extend_from_slice(&[base + 1, base + 2, base + 3, base + 3, base, base + 1]);
+            indices.extend_from_slice(&[v[1], v[2], v[3], v[3], v[0], v[1]]);
         } else {
-            indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+            indices.extend_from_slice(&[v[0], v[1], v[2], v[2], v[3], v[0]]);
         }
     }
 
@@ -238,15 +256,15 @@ impl MeshSink {
             self.push_fan_pulled(bucket, ring, light, tint, sprite);
             return;
         }
-        let base = self.vertices.len() as u32;
+        self.fan.clear();
         for (pos, uv) in ring {
-            self.vertices
-                .push(pack_vertex_raw(*pos, *uv, light, tint, sprite));
+            let v = self.shared_vertex(pack_vertex_raw(*pos, *uv, light, tint, sprite));
+            self.fan.push(v);
             self.note_position(*pos);
         }
-        let indices = &mut self.dirs[bucket];
-        for i in 1..ring.len() - 1 {
-            indices.extend_from_slice(&[base, base + i as u32, base + i as u32 + 1]);
+        let (fan, indices) = (&self.fan, &mut self.dirs[bucket]);
+        for i in 1..fan.len() - 1 {
+            indices.extend_from_slice(&[fan[0], fan[i], fan[i + 1]]);
         }
     }
 

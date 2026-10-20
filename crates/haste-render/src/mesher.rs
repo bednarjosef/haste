@@ -474,10 +474,16 @@ pub fn mesh_section_with(
                                 cell: [lx as u8, ly as u8, lz as u8],
                             }));
                         } else {
+                            // A full face takes section-continuous UVs, so its
+                            // corners can be shared with its coplanar neighbours'.
+                            let uvs = match &quad.merge {
+                                Some(face) => merge::section_uvs(face, [lx, ly, lz]),
+                                None => quad.uvs,
+                            };
                             staged.push(StagedQuad::Direct {
                                 layer: info.layer,
                                 positions,
-                                uvs: quad.uvs,
+                                uvs,
                                 lights,
                                 tint: quad_tint,
                                 sprite: quad.sprite,

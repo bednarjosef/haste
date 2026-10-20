@@ -106,6 +106,24 @@ pub(super) fn merge_face_geom(
     })
 }
 
+/// Section-continuous UVs for a full unit face in block cell `cell` (section-local
+/// 0..16): each component counts whole blocks along the axis it follows, so the face's
+/// corners carry the same UVs as the touching corners of its coplanar neighbours.
+/// Under the shader's `fract` wrap the texels are those of the 0/1 corner UVs (the
+/// two differ by whole numbers, like a merged rectangle's repeats), and identical
+/// corners let the sink share the vertex between the faces.
+pub(super) fn section_uvs(face: &MergeFace, cell: [i32; 3]) -> [[f32; 2]; 4] {
+    let mut uvs = [[0f32; 2]; 4];
+    for (uv, corner) in uvs.iter_mut().zip(face.corners) {
+        for (c, [src, flip]) in face.uv_map.into_iter().enumerate() {
+            let axis = if src == 0 { face.u_axis } else { face.v_axis };
+            let t = (cell[axis as usize] + i32::from(corner[src as usize])) as f32;
+            uv[c] = if flip == 0 { t } else { 16.0 - t };
+        }
+    }
+    uvs
+}
+
 /// A UV component as an exact 0/1 flag.
 fn uv_flag(t: f32) -> Option<u8> {
     match t {
@@ -396,8 +414,11 @@ fn emit_rect(r: &MergeRect, junction: &mut JunctionScratch, sink: &mut MeshSink)
             [su as f32 * r.len_u as f32, sv as f32 * r.len_v as f32],
         )
     };
+    // The UVs count from the section's corner, not the rectangle's (`section_uvs`), so
+    // ring vertices match the touching corners of the faces around the rectangle.
     let push = |ring: &mut Vec<([f32; 3], [f32; 2])>, pos: [f32; 3], off: [f32; 2]| {
-        ring.push((pos, ring_uv(f, off[0], off[1], r.len_u, r.len_v)));
+        let (u, v) = (r.base[ua] as f32 + off[0], r.base[va] as f32 + off[1]);
+        ring.push((pos, ring_uv(f, u, v, 16, 16)));
     };
     for ci in 0..4 {
         let (su, sv) = (f.corners[ci][0] as i32, f.corners[ci][1] as i32);
