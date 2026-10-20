@@ -34,6 +34,7 @@ mod query;
 mod readback;
 mod render_world;
 mod surface;
+mod terrain_draw;
 mod terrain_feed;
 mod work_budget;
 

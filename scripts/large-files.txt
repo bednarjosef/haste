@@ -6,10 +6,10 @@ crates/haste-assets/src/packstack.rs 722
 crates/haste-client/src/ambient_particles.rs 614
 crates/haste-client/src/app.rs 4163
 crates/haste-client/src/boat.rs 871
-crates/haste-client/src/net/tests.rs 1788
+crates/haste-client/src/net/tests.rs 1785
 crates/haste-client/src/player/interact/tests.rs 2172
-crates/haste-client/src/player.rs 1363
-crates/haste-client/src/player/tests.rs 1713
+crates/haste-client/src/player.rs 1356
+crates/haste-client/src/player/tests.rs 1667
 crates/haste-client/src/script.rs 1159
 crates/haste-client/src/sound/tests.rs 1163
 crates/haste-data/src/blocks.rs 635
@@ -32,7 +32,6 @@ crates/haste-render/src/animation.rs 631
 crates/haste-render/src/blockentity/tests.rs 1405
 crates/haste-render/src/entity/tests.rs 1023
 crates/haste-render/src/lightmap.rs 789
-crates/haste-render/src/renderer/render_world.rs 721
 crates/haste-render/src/sky.rs 963
 crates/haste-render/src/tint.rs 995
 crates/haste-render/src/weather.rs 834
