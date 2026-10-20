@@ -410,7 +410,9 @@ impl MeshArenas {
         let mut layers = Vec::with_capacity(mesh.layers.len() * 7);
         for l in &mesh.layers {
             let base = index_start + self.scratch.len() as u32;
-            for (d, &(start, count)) in l.dirs.iter().enumerate() {
+            // In storage order, so adjacent groups stay adjacent in the draw list.
+            for d in crate::mesher::GROUP_ORDER {
+                let (start, count) = l.dirs[d];
                 if count > 0 {
                     layers.push(LayerDraw {
                         layer: l.layer,

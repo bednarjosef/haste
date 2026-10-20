@@ -53,3 +53,35 @@ fn rounding_of_a_rotated_model_stays_in_the_plane() {
     ];
     assert!(axis_facing(&face).is_some());
 }
+
+#[test]
+fn groups_seen_from_outside_a_section_form_few_runs() {
+    use crate::mesher::GROUP_ORDER;
+    // From outside a section on every axis the camera sees one side per axis plus the
+    // never-skipped group; the draw list joins adjacent groups. Four separate draws
+    // become one from two corners and at most three from any.
+    let mut total = 0;
+    for corner in 0..8 {
+        let visible = |d: usize| match d {
+            6 => true,
+            0 | 1 => (corner & 1 != 0) == (d == 1),
+            2 | 3 => (corner & 2 != 0) == (d == 3),
+            _ => (corner & 4 != 0) == (d == 5),
+        };
+        let mut runs = 0;
+        let mut prev = false;
+        for d in GROUP_ORDER {
+            let v = visible(d);
+            if v && !prev {
+                runs += 1;
+            }
+            prev = v;
+        }
+        assert!(runs <= 3, "corner {corner}: {runs} runs");
+        total += runs;
+        if corner == 7 || corner == 0 {
+            assert_eq!(runs, 1, "corner {corner}");
+        }
+    }
+    assert_eq!(total, 16, "two runs on average");
+}

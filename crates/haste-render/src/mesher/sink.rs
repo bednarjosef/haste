@@ -48,6 +48,14 @@ const GROUPS: usize = 7;
 /// Bucket count of both formats: four layers' facing groups.
 const BUCKETS: usize = 4 * GROUPS;
 
+/// The order the facing groups are stored in a layer's indices (`Direction::ALL`
+/// indices, 6 = never skipped): the negative sides, the never-skipped group, then
+/// the positive sides. From outside a section the camera sees one side of each
+/// axis plus the never-skipped group, so the groups it draws are often adjacent
+/// and the draw list joins them: one draw from the (+, +, +) and (-, -, -)
+/// corners, two on average, instead of four.
+pub const GROUP_ORDER: [usize; GROUPS] = [4, 2, 0, 6, 1, 3, 5];
+
 /// Per-section meshing accumulator. Vertices are shared; indices split by
 /// render layer (Pomme's MeshSink, extended from solid/cutout to four layers)
 /// and by facing group. Vertices are packed
@@ -364,9 +372,9 @@ impl MeshSink {
             }
             let mut indices = Vec::with_capacity(total);
             let mut dirs = [(0u32, 0u32); GROUPS];
-            for (d, b) in buckets.iter_mut().enumerate() {
-                dirs[d] = (indices.len() as u32, b.len() as u32);
-                indices.append(b);
+            for d in GROUP_ORDER {
+                dirs[d] = (indices.len() as u32, buckets[d].len() as u32);
+                indices.append(&mut buckets[d]);
             }
             layers.push(SectionLayerMesh {
                 layer: layer_from_index(l),
