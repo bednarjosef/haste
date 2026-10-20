@@ -40,46 +40,73 @@ impl<T: winit::raw_window_handle::HasDisplayHandle + core::fmt::Debug + Send + S
 }
 
 impl Gpu {
-    /// Enumerate adapters (all backends), prefer Vulkan, log the choice.
+    /// Find an adapter (Vulkan and the other primary backends first, GL as the fallback)
+    /// and log the choice.
     /// `display`: the window's display handle when a surface will be created
     /// (wgpu 30 requires it in the instance for `create_surface`).
     pub fn new(display: Option<Box<dyn ShareableDisplayHandle>>) -> Result<Gpu> {
         // wgpu's WgpuHasDisplayHandle blanket-implements for any
-        // HasDisplayHandle + Debug + Send + Sync; our wrapper satisfies it.
-        let mut descriptor = match display {
-            Some(display) => {
-                // Erase to wgpu's own trait object via the blanket impl.
-                struct WgpuHandle(Box<dyn ShareableDisplayHandle>);
-                impl core::fmt::Debug for WgpuHandle {
-                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                        self.0.fmt(f)
-                    }
-                }
-                impl winit::raw_window_handle::HasDisplayHandle for WgpuHandle {
-                    fn display_handle(
-                        &self,
-                    ) -> Result<
-                        winit::raw_window_handle::DisplayHandle<'_>,
-                        winit::raw_window_handle::HandleError,
-                    > {
-                        self.0.display_handle()
-                    }
-                }
-                wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WgpuHandle(display)))
+        // HasDisplayHandle + Debug + Send + Sync; our wrapper satisfies it (shared, so
+        // each instance attempt below gets its own descriptor).
+        struct WgpuHandle(std::sync::Arc<dyn ShareableDisplayHandle>);
+        impl core::fmt::Debug for WgpuHandle {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                self.0.fmt(f)
             }
-            None => wgpu::InstanceDescriptor::new_without_display_handle(),
+        }
+        impl winit::raw_window_handle::HasDisplayHandle for WgpuHandle {
+            fn display_handle(
+                &self,
+            ) -> Result<
+                winit::raw_window_handle::DisplayHandle<'_>,
+                winit::raw_window_handle::HandleError,
+            > {
+                self.0.display_handle()
+            }
+        }
+        let display: Option<std::sync::Arc<dyn ShareableDisplayHandle>> = display.map(Into::into);
+        let descriptor = |backends: wgpu::Backends| {
+            // Erase to wgpu's own trait object via the blanket impl.
+            let mut d = match &display {
+                Some(display) => wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
+                    WgpuHandle(display.clone()),
+                )),
+                None => wgpu::InstanceDescriptor::new_without_display_handle(),
+            };
+            d.backends = backends;
+            d
         };
         // `WGPU_BACKEND=gl|vulkan|...` picks a backend (tests the GL fallback on a Vulkan box).
-        descriptor.backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
-        let instance = wgpu::Instance::new(descriptor);
+        // Otherwise Vulkan (and the other primary APIs) first, GL only when none has an
+        // adapter: starting wgpu's GL backend loads the system's whole OpenGL driver (Mesa's
+        // gallium and LLVM, about 60 MiB resident) even when Vulkan is then chosen.
+        let attempts = match wgpu::Backends::from_env() {
+            Some(backends) => vec![backends],
+            None => vec![wgpu::Backends::PRIMARY, wgpu::Backends::GL],
+        };
+        let mut found = None;
+        let mut failure = None;
+        for backends in attempts {
+            let instance = wgpu::Instance::new(descriptor(backends));
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            })) {
+                Ok(adapter) => {
+                    found = Some((instance, adapter));
+                    break;
+                }
+                Err(e) => failure = Some(e),
+            }
+        }
+        let (instance, adapter) = match (found, failure) {
+            (Some(found), _) => found,
+            (None, Some(e)) => return Err(e).context("requesting a wgpu adapter"),
+            (None, None) => anyhow::bail!("requesting a wgpu adapter: no backend to try"),
+        };
         let instance = std::sync::Arc::new(instance);
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .context("requesting a wgpu adapter")?;
         let info = adapter.get_info();
         tracing::info!(
             "wgpu adapter: {} ({}) backend {:?}",
