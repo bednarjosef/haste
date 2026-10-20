@@ -39,6 +39,7 @@ impl Renderer {
         // uploaded sections next to visible ones (`bonus`).
         if let Some(mask) = self.walk.poll() {
             self.visible_mask = mask;
+            self.visible_generation += 1;
             self.visible_for = self.scheduled_for.take();
             self.walk_in_flight = false;
             self.clear_bonus();
