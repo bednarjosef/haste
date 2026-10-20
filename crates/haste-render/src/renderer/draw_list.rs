@@ -59,7 +59,7 @@ impl Renderer {
             .length_squared();
             for l in sections.layers(s) {
                 // Skip a direction group facing away from the camera.
-                if l.dir < 6 && l.back_facing(lo, hi) {
+                if l.back_facing(lo, hi) {
                     continue;
                 }
                 // Sort key: ascending distance for opaque (early depth),

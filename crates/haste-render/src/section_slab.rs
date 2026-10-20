@@ -55,8 +55,19 @@ impl SlabLayer {
     /// section's camera-relative AABB. A positive-direction face (up, south,
     /// east) is back-facing when the camera is below/before the section's low
     /// side on the face's axis, a negative one when the camera is past the
-    /// high side; inside the slab the group is mixed and kept.
+    /// high side; inside the slab the group is mixed and kept. A diagonal group
+    /// (7..11, `mesher::DIAGONALS`) follows the same rule along its normal: it is
+    /// back-facing when the box's nearest point along the normal is already past the
+    /// camera. Group 6 is never back-facing.
     pub fn back_facing(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
+        if self.dir == 6 {
+            return false;
+        }
+        if self.dir > 6 {
+            let [sx, sz] = crate::mesher::DIAGONALS[self.dir as usize - 7];
+            let near = |s: f32, lo: f32, hi: f32| if s > 0.0 { s * lo } else { s * hi };
+            return near(sx, lo[0], hi[0]) + near(sz, lo[2], hi[2]) > 0.0;
+        }
         // Direction axis: down/up = y, north/south = z, west/east = x.
         let (axis, positive) = match self.dir {
             0 => (1, false),

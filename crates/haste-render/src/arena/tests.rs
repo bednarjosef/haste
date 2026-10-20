@@ -24,7 +24,7 @@ fn mesh(x: i32, quads: u32, extra: u32) -> SectionMesh {
         .flat_map(|q| [0, 1, 2, 2, 3, 0].map(|i| q * 4 + i))
         .collect();
     indices.extend((0..extra).map(|i| i % (quads * 4)));
-    let mut dirs = [(0, 0); 7];
+    let mut dirs = [(0, 0); crate::mesher::GROUPS];
     dirs[1] = (0, indices.len() as u32);
     SectionMesh {
         pos: SectionPos::new(x, 0, 0),
