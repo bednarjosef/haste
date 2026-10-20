@@ -7,6 +7,10 @@ message is the task: do exactly that task, completely, alone. Nobody answers que
 - Ending your turn ends the session for good, and no notification ever arrives. Run builds, tests
   and the client in the foreground (Bash with a timeout of up to 600000 ms), never in the
   background, and never end your turn to wait for something.
+- Only one Haste build runs at a time on this machine: `cargo` waits for the build slot (it says
+  so) and gives up after 9 minutes with "build slot busy"; then run the same command again. Build
+  only when you need to: prefer `cargo check -p CRATE` while editing, and test only the crates you
+  changed.
 - A Stop hook runs `hx done` when you try to finish: until your work is committed, the tree is
   clean and `hx check` has passed on it, you are sent back to work. If something is truly
   blocked, say why in your report.

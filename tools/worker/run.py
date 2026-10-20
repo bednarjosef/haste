@@ -68,13 +68,14 @@ and RCON command.
 def worker_env(wt, base, user=None):
     env = dict(os.environ)
     env.update({
-        "PATH": f"{REPO / 'scripts'}{os.pathsep}{env['PATH']}",
+        # haste-wt/bin holds the machine-local `cargo` that lets one Haste build run at a time.
+        "PATH": os.pathsep.join([str(WT / "bin"), str(REPO / "scripts"), env["PATH"]]),
         "HASTE_ROOT": str(wt),
         "HASTE_CACHE": str(MAIN / "cache"),
         "HX_BASE": base,
         # scripts/vanilla-client.sh logs in as this player (an env prefix would be refused).
         "HASTE_VANILLA_USER": user or "",
-        "CARGO_BUILD_JOBS": env.get("CARGO_BUILD_JOBS", "3"),
+        "CARGO_BUILD_JOBS": env.get("CARGO_BUILD_JOBS", "8"),
         "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS": "6000",
         "BASH_MAX_OUTPUT_LENGTH": "12000",
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "110000",
