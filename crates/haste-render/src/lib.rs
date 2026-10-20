@@ -11,6 +11,7 @@ pub mod blockentity;
 pub mod blur;
 pub mod clouds;
 pub mod entity;
+pub mod experiment;
 pub mod fluid;
 pub mod fluid_occlusion;
 pub mod fog;
