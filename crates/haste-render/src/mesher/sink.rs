@@ -27,8 +27,9 @@ pub struct QuadSpan {
 /// whose faces all point away from the camera (the rasterizer culls them only
 /// after vertex shading; skipping saves that vertex work). Groups 0..6 hold the
 /// faces lying in an axis plane, by the direction they face (`axis_facing`);
-/// group 6 holds the rest (crossed plant planes, sloped fluid surfaces), which
-/// are never skipped. Within a group the quads keep their emission order (the
+/// groups 7..11 the vertical planes facing a horizontal diagonal (crossed plants,
+/// see `DIAGONALS`); group 6 holds the rest (sloped fluid surfaces), which are
+/// never skipped. Within a group the quads keep their emission order (the
 /// translucent blend order between coplanar faces depends on it).
 ///
 /// In the quad format (`--terrain-format quad`) the indices are empty and
@@ -37,24 +38,33 @@ pub struct SectionLayerMesh {
     pub layer: RenderLayer,
     pub indices: Vec<u32>,
     /// Direction order `Direction::ALL` (down, up, north, south, west, east),
-    /// then the never-skipped group.
-    pub dirs: [(u32, u32); 7],
+    /// then the never-skipped group, then the four diagonals.
+    pub dirs: [(u32, u32); GROUPS],
     /// Quad format: the layer's draw spans (empty in the vertex format).
     pub spans: Vec<QuadSpan>,
 }
 
-/// Facing groups per layer: the six axis directions plus the never-skipped one.
-const GROUPS: usize = 7;
+/// Facing groups per layer: the six axis directions, the never-skipped one and the
+/// four horizontal diagonals.
+pub const GROUPS: usize = 11;
+
+/// The horizontal normal (x, z signs) of facing groups 7..11: the planes of vanilla's
+/// `cross` and `tinted_cross` models (grass, flowers, saplings, crops' cross) stand at 45
+/// degrees, so each faces one of these. Like an axis group, a whole diagonal group points
+/// away from the camera when every point of the section lies in front of the camera
+/// along its normal.
+pub const DIAGONALS: [[f32; 2]; 4] = [[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]];
 /// Bucket count of both formats: four layers' facing groups.
 const BUCKETS: usize = 4 * GROUPS;
 
 /// The order the facing groups are stored in a layer's indices (`Direction::ALL`
-/// indices, 6 = never skipped): the negative sides, the never-skipped group, then
-/// the positive sides. From outside a section the camera sees one side of each
-/// axis plus the never-skipped group, so the groups it draws are often adjacent
-/// and the draw list joins them: one draw from the (+, +, +) and (-, -, -)
-/// corners, two on average, instead of four.
-pub const GROUP_ORDER: [usize; GROUPS] = [4, 2, 0, 6, 1, 3, 5];
+/// indices, 6 = never skipped, 7..11 the diagonals). From outside a section the
+/// camera sees one side of each axis, the never-skipped group and two of the
+/// diagonals, and the draw list joins the visible groups that are adjacent. This
+/// order (found by search over the camera's corners) gives at most three draws per
+/// layer from any corner and two on average, with or without diagonal faces; empty
+/// groups do not split a draw.
+pub const GROUP_ORDER: [usize; GROUPS] = [1, 2, 7, 4, 8, 3, 10, 5, 9, 6, 0];
 
 /// Per-section meshing accumulator. Vertices are shared; indices split by
 /// render layer (Pomme's MeshSink, extended from solid/cutout to four layers)
@@ -109,9 +119,9 @@ impl MeshSink {
     pub(super) fn new() -> MeshSink {
         MeshSink {
             vertices: Vec::new(),
-            quad_quads: Default::default(),
-            quad_general: Default::default(),
-            dirs: Default::default(),
+            quad_quads: std::array::from_fn(|_| Vec::new()),
+            quad_general: std::array::from_fn(|_| Vec::new()),
+            dirs: std::array::from_fn(|_| Vec::new()),
             min: [f32::MAX; 3],
             max: [f32::MIN; 3],
         }
@@ -152,7 +162,7 @@ impl MeshSink {
         // The group comes from the geometry, not from `dir`: a model quad's
         // `dir` is its baked nearest axis (a crossed plant plane's is a side),
         // and a fluid's reversed face keeps the direction it is shaded by.
-        let bucket = bucket(layer, axis_facing(positions));
+        let bucket = bucket(layer, facing_group(positions));
         if quad_format_enabled() {
             self.push_quad_pulled(bucket, positions, uvs, lights, tint, sprite);
             return;
@@ -223,7 +233,7 @@ impl MeshSink {
     ) {
         // A merged rectangle is a run of whole block faces in one axis plane,
         // facing its merge direction.
-        let bucket = bucket(layer, Some(dir));
+        let bucket = bucket(layer, dir.index());
         if quad_format_enabled() {
             self.push_fan_pulled(bucket, ring, light, tint, sprite);
             return;
@@ -387,9 +397,32 @@ impl MeshSink {
     }
 }
 
-/// The bucket of a quad in `layer` facing `facing` (`None`: never skipped).
-fn bucket(layer: RenderLayer, facing: Option<Direction>) -> usize {
-    layer_index(layer) * GROUPS + facing.map_or(GROUPS - 1, Direction::index)
+/// The bucket of a quad in `layer`'s facing group `group`.
+fn bucket(layer: RenderLayer, group: usize) -> usize {
+    layer_index(layer) * GROUPS + group
+}
+
+/// The facing group of a quad: its axis direction (`axis_facing`), else the diagonal
+/// it faces when it is a vertical plane at 45 degrees (`DIAGONALS`), else 6.
+pub(crate) fn facing_group(p: &[[f32; 3]; 4]) -> usize {
+    if let Some(d) = axis_facing(p) {
+        return d.index();
+    }
+    // Newell's normal of the outline (outward for the front face).
+    let mut n = [0.0f32; 3];
+    for i in 0..4 {
+        let (a, b) = (p[i], p[(i + 1) % 4]);
+        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    // Vertical (no y component) and at 45 degrees, within a rotated model's rounding;
+    // a tilted quad (a sloped fluid surface) stays in the never-skipped group.
+    if len == 0.0 || n[1].abs() > 1e-3 * len || (n[0].abs() - n[2].abs()).abs() > 1e-3 * len {
+        return 6;
+    }
+    7 + 2 * usize::from(n[0] > 0.0) + usize::from(n[2] > 0.0)
 }
 
 /// The direction a quad faces, when it lies in an axis plane: all four

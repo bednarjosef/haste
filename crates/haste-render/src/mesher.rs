@@ -37,12 +37,12 @@ use merge::{
     flush_staged, merge_face, JunctionScratch, MergeFace, MergeKey, MergeQuad, StagedQuad,
 };
 #[cfg(test)]
-pub(crate) use sink::axis_facing;
+pub(crate) use sink::{axis_facing, facing_group};
 use sink::{layer_index, MeshSink};
 use snapshot::{Cell, EXT};
 
 pub use sink::SectionLayerMesh;
-pub use sink::{QuadSpan, GROUP_ORDER};
+pub use sink::{QuadSpan, DIAGONALS, GROUPS, GROUP_ORDER};
 
 /// One section's meshed geometry, split by render layer.
 pub struct SectionMesh {

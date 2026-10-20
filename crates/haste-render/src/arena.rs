@@ -385,7 +385,7 @@ impl MeshArenas {
         );
         view.copy_from_slice(bytemuck::cast_slice(&mesh.vertices));
         self.scratch.clear();
-        let mut layers = Vec::with_capacity(mesh.layers.len() * 7);
+        let mut layers = Vec::with_capacity(mesh.layers.len() * crate::mesher::GROUPS);
         for l in &mesh.layers {
             let base = index_start + self.scratch.len() as u32;
             // In storage order, so adjacent groups stay adjacent in the draw list.
