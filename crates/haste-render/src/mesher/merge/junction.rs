@@ -287,9 +287,10 @@ impl JunctionScratch {
 }
 
 /// The sprite-local UV of a ring vertex at tangent-axis offsets (off_u,
-/// off_v) from the rectangle's low corner: a component that follows the u
-/// signs is the offset (or `len - offset` when flipped), so integer offsets
-/// tile the sprite per block — the wrap the fragment shader already does.
+/// off_v) from a corner (the section's, with lengths 16, in `emit_rect`): a
+/// component that follows the u signs is the offset (or `len - offset` when
+/// flipped), so integer offsets tile the sprite per block — the wrap the
+/// fragment shader already does.
 pub(super) fn ring_uv(
     f: &super::MergeFace,
     off_u: f32,

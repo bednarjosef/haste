@@ -23,8 +23,10 @@ use crate::vertex::PackedVertex;
 pub(crate) use range_alloc::RangeAlloc;
 
 /// Largest arena: 2^22 vertices (20 bytes each: 80 MiB) and 2x2^22 indices (u16, so
-/// 16 MiB), the proven steady-state size at render distance 32. A quad is 4 vertices and
-/// 6 indices; the merged rectangles' fans add a few more, so 2 per vertex leaves room.
+/// 16 MiB), the proven steady-state size at render distance 32. A quad is 6 indices and
+/// up to 4 vertices; neighbouring faces share their touching corners (`MeshSink`), which
+/// brings a world at render distance 32 to about 2.2 indices per vertex, so the two
+/// halves fill at about the same rate.
 /// In the quad format the vertex half holds pulled records (no indices) and the quad
 /// half 32-byte rect records, so the same ladder fits a far bigger world.
 const MAX_ARENA_VERTICES: u32 = 1 << 22;
