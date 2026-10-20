@@ -6,6 +6,7 @@ use haste_core::{Aabb, BlockPos, ChunkPos, DVec3, SectionPos};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod facing;
 mod occlusion_dump;
 
 const STONE: BlockStateId = BlockStateId(1);

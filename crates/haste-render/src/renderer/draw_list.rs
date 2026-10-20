@@ -93,9 +93,10 @@ impl Renderer {
             b.sort_unstable_by_key(|d| d.arena);
         }
         // Translucent back to front: the key is the negated distance, so
-        // ascending key order is far first.
+        // ascending key order is far first. Stable, so a section's facing
+        // groups (equal keys) keep their mesh order.
         if buckets[3].len() > 1 {
-            buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
+            buckets[3].sort_by(|a, b| a.key.total_cmp(&b.key));
         }
         let mut draws = std::mem::take(&mut self.draw_list);
         draws.clear();

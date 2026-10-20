@@ -35,6 +35,8 @@ use lighting::{shade_index, vertex_light_for};
 use merge::{
     flush_staged, merge_face, JunctionScratch, MergeFace, MergeKey, MergeQuad, StagedQuad,
 };
+#[cfg(test)]
+pub(crate) use sink::axis_facing;
 use sink::{layer_index, MeshSink};
 use snapshot::{Cell, EXT};
 
@@ -473,7 +475,6 @@ pub fn mesh_section_with(
                         } else {
                             staged.push(StagedQuad::Direct {
                                 layer: info.layer,
-                                dir: quad.direction.index() as u8,
                                 positions,
                                 uvs: quad.uvs,
                                 lights,
@@ -569,15 +570,7 @@ fn mesh_fluid(
             let positions = q
                 .positions
                 .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
-            sink.push_quad(
-                layer,
-                q.dir,
-                &positions,
-                &q.uvs,
-                [packed; 4],
-                tint,
-                q.sprite,
-            );
+            sink.push_quad(layer, &positions, &q.uvs, [packed; 4], tint, q.sprite);
         }
     }
     *ctx.fluid_scratch = quads;
