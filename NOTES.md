@@ -390,3 +390,146 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   stream-json per-message usage under-reports output, the result event is exact; Claude Code
   clears old tool results only after an hour idle, so a long run's context only shrinks by
   auto-compaction.
+- **2026-10-20 Where the GPU time goes (rd 32, Radeon 860M, RADV).** The terrain pass is bound by
+  geometry, not pixels: at 1/16 of the pixels the GPU main pass fell only from 9.9 to about 7.5 ms.
+  Vertex-shader trims barely matter (no lightmap or no fog about -0.5 ms; a position-only shader
+  still about 6 ms), and dropping the shader's sRGB work saves nothing measurable. Per sub-draw of
+  a multi-draw-indirect costs about 0.8 ms per frame with empty draws and 1.6 ms with one triangle
+  each at rd 32, so splitting draws further must remove more vertices than it adds draws. What
+  wins is drawing fewer vertices: fewer sections (the walk below) and skipping back-facing groups.
+- **2026-10-20 The occlusion walk follows `SectionOcclusionGraph.runUpdates`.** Haste's walk drew
+  632 sections at rd 12 and 3215 at rd 32 where vanilla draws 507 and 2646. Three deviations: it
+  walked a square, not vanilla's view circle (`ChunkTrackingView.isInViewDistance`, which tests
+  `max(0, |dx| - 1)^2 + max(0, |dz| - 1)^2 < vd^2`, plus `|dy| <= vd` on sections); it kept
+  empty sections in the visible list (vanilla only adds sections with geometry to its section
+  tree); and the advanced-culling ray started at the camera-facing corner on all axes instead of
+  `getRelativeFrom`'s per-face corner. Now 486 / 2677 sections, cull 3.9 -> 1.41 ms, resident
+  sections at rd 32 3355 -> 2803.
+- **2026-10-20 Power saver makes frame times bimodal.** With the power-saver profile both clients
+  alternate between two GPU clocks, so averages and p90 swing by 30 % between runs of the same
+  binary (Haste rd 12 286 FPS in one run, 357 in the next). A/B runs must be interleaved and on
+  the same profile; vs-vanilla numbers on power saver only show the order of magnitude.
+- **2026-10-20 Facing groups from the geometry.** Direct model quads were grouped by their baked
+  nearest direction, so a crossed plant plane (45 degrees, `FaceBakery` facing = a side) sat in an
+  axis group and was skipped when the camera was behind that axis plane, though half of it still
+  faced the camera. Translucent kept one never-skipped range, so the underside of every water
+  surface (`FluidState.shouldRenderBackwardUpFace`) and the inner copies of its sides were
+  vertex-shaded every frame. Groups now come from the quad itself (`mesher::sink::axis_facing`):
+  in an axis plane -> that direction with the winding's sign, else group 6 (never skipped), for
+  every layer including translucent. Within a group the emission order is kept and the
+  translucent sort is stable, so coplanar blending (water under ice) is unchanged. Flight path at rd 32: GPU main pass
+  11.45 -> 10.0-10.6 ms, translucent sub-pass 1.6-2.0 -> 1.1-1.27 ms; rotated fallen logs no longer
+  show see-through holes. Adjacent ranges of one section are joined into one sub-draw
+  (`draw_list.rs`), 15286 -> 7904 sub-draws per frame.
+- **2026-10-20 Haste against vanilla, power saver (1408x828, reference spot).** rd 12: 357 FPS /
+  583 MB RSS against 402 FPS / 1489 MB (an earlier run: 286 against 248). rd 32: average 11.6 ms
+  against 9.7, median 7.47 against 7.85, p90 24 against 18.8, 9.5M indices drawn against 15.4M,
+  734 MB against 1967 MB RSS. Haste draws far fewer vertices and is faster in the median, but its
+  slow-frame tail is longer: that tail is the next target.
+- **2026-10-20 Two-phase GPU occlusion culling** (`renderer/gpu_cull.rs`). The CPU walk follows
+  vanilla's `SectionOcclusionGraph` and keeps every section a ray can see past the cave/visibility
+  graph, so behind a hill thousands of fully hidden sections were still drawn. Each frame a compute
+  pass first draws the opaque sections that were visible last frame, builds a depth pyramid from
+  that depth (R32Float, max reduction, mip sizes rounded down with the last texel covering the odd
+  edge), then tests every candidate's box against the pyramid and draws the newly visible opaque
+  ones; translucent draws keep their place and order (hidden ones get zero instances). Visibility
+  per section slot ping-pongs between two buffers. Ground spot rd 32: 6068 -> 1634 opaque draws,
+  frame 9.15 -> 3.05 ms; flight path GPU main 9.45 -> 7.62 ms; high spot (little to hide) 6305 ->
+  5593, frame time within noise. `HASTE_GPU_CULL=0` turns it off; statistics at debug level
+  (`RUST_LOG=haste_render::renderer::gpu_cull=debug`). Pitfall: a pyramid built with rounded-up
+  mip sizes exceeds wgpu's mip count for the texture (11 levels where 10 are allowed). An attempt
+  to measure on/off alternating inside one process gave nonsense (cull "on" 2.4x slower, the
+  per-frame toggling defeats last-frame visibility); compare separate runs.
+- **2026-10-20 GPU memory: 794 -> 432 MiB resident at rd 32.** Four changes: wgpu's
+  `MemoryHints::MemoryUsage` (gpu-allocator blocks of 8-64 MiB instead of 128-256; 790 -> 650 MiB
+  alone); the GUI atlas starts at 1024x1024 and doubles on demand up to 4096 (it was a fixed 64 MiB
+  texture; the shader reads texels, so a grow is a texture copy and a new bind group); u16 terrain
+  indices (indices are relative to the section's base vertex, every section seen has fewer than
+  65536 vertices; bigger ones go to u32 arenas); arenas reserve 2 indices per vertex instead of 3
+  (measured 1.53 at rd 32). It also fixed a leak: since 4f3cf35a the vertex upload passed an empty
+  index range to `finish_resident`, so freed sections never returned their indices. GPU main pass
+  9.73 -> 8.51 ms in the same run, frame time unchanged within noise. `HASTE_GPU_REPORT=1` makes
+  the offscreen bench print wgpu's allocations grouped by label.
+- **2026-10-20 Measuring renderer changes in one process.** Separate runs swing up to 30% on
+  this laptop (the GPU switches between 600, 1100 and about 2800 MHz states), more than most
+  changes. The offscreen bench now caps itself at two frames in flight
+  (`renderer/frames_in_flight.rs`; without it the queue ran ahead and an A/B came out inverted),
+  and `HASTE_AB_BLOCK=16` flips `haste_render::experiment::on()` every 16 frames and reports
+  the median on/off ratio over the pairs (`app/bench/ab.rs`): 60 s gives about 200 pairs and
+  +-2%. Only for stateless variants (a shader, a draw order, a draw split); anything meshed or
+  carried between frames still needs interleaved separate runs (A, B, A, B, at least four each).
+  A throwaway pipeline-statistics query (vertex and fragment invocations, clipper primitives)
+  around the terrain draws is worth rebuilding when the question is "how many".
+- **2026-10-20 What the terrain pass is made of at rd 32 (reference spot, Radeon 860M).**
+  2.35M triangles reach the rasterizer, with 1.9 vertex and 1.9 fragment invocations per
+  triangle and 3.7x overdraw: the triangles are tiny and the cost is per triangle and per
+  vertex, not per pixel. Per million indices: solid 0.9 ms, cutout 0.94, leaves (cutout
+  mipped) 1.32, translucent 0.66. Vanilla draws 15.4M indices against Haste's 7.6M but its
+  back faces die cheaply in the driver (NGG culling), so both rasterize about the same front
+  faces: matching vanilla here means fewer front-facing triangles or cheaper vertices. Dead
+  ends, each measured: splitting every sub-draw in two (+7400 sub-draws) costs 9% (about 0.12
+  us per multi-draw sub-draw); capping multi-draw calls at 64 or 8 sub-draws is 1.4% / 2.5%
+  slower; drawing a skipped back-facing group to join two ranges (up to 256 or 1024 indices)
+  is 1.1% / 1.8% slower; looser greedy merging (light and tint ignored, an upper bound for
+  per-pixel lighting) removes only 19% of the indices, since rd 32 terrain is too bumpy to
+  merge further. Haste's GPU buffers live in GTT: the 512 MiB VRAM carve-out is nearly full
+  with the desktop before the game starts.
+- **2026-10-20 Every vertex output is a vec4 on RDNA.** The vertex shader's outputs go to the
+  attribute ring in memory, one 16-byte slot per location whatever its width. Packing vanilla's
+  per-vertex colour with the fog factor (5% at rd 32), then the sprite index into the UV's vec4
+  as a float (it is equal at all three corners, so interpolation returns it; 5.8%), took the
+  terrain from four outputs to two. Trimming shader arithmetic barely moves the pass (a
+  position-only shader still takes about 60% of it).
+- **2026-10-20 Diagonal facing groups.** Crossed plant planes (vanilla's `cross` models) face a
+  horizontal diagonal; they now have four groups of their own (11 per layer), skipped like the
+  axis groups when the whole section box is behind the plane. A storage order found by search
+  (`mesher::GROUP_ORDER`) keeps the visible groups in at most three ranges. Indices drawn at rd
+  32: -6.8% at both spots, GPU time -7% at the ground spot.
+- **2026-10-20 Shared corner vertices.** A full unit face now takes UVs that count whole
+  blocks from the section corner (`merge::section_uvs`, the merged rectangles' rings too), so
+  coplanar neighbours with the same sprite, tint and corner light produce identical corner
+  vertices, which the sink stores once. Vertex invocations 4.57M -> 3.66M at rd 32, GPU memory
+  429 -> 341 MiB, GPU main pass -5.7% at rd 32 and about -40% at rd 12. Stored vertices
+  roughly halved but invocations fell only 20%: the hardware reuses a vertex within a short
+  window only. Reordering each group's faces along a Morton curve to keep neighbours close
+  changed nothing (3.66M -> 3.64M) and was dropped.
+- **2026-10-20 CPU side of the frame at rd 32.** The draw list costs 1.3 ms per frame (the
+  occlusion walk runs on a worker): the per-section emit 0.95 ms, of which half the slab lookups
+  miss (the walk's order holds empty sections) and every drawn section carries about 11 slab
+  layers (layer x facing group). A facing mask per section and a counting sort by arena saved
+  only 0.06 ms; the next step is a flat per-visible-section cache rebuilt when the walk result
+  or the slab changes. Frames are GPU-bound on this laptop, so this pays on faster GPUs.
+  Done (`renderer/visible_list.rs`): the cached list, grouped by arena at rebuild, with each
+  layer's groups as storage-order offsets walked by bitmask, takes the draw list from 1.1 to
+  0.55 ms per frame. What is left: emit 0.27 ms (2803 frustum tests and pushes of 64-byte
+  draws), copying the buckets into the draw list and summing indices 0.15 ms, the per-draw
+  GPU data 0.13 ms. Shrinking `SectionDraw` (the bounds belong to the section, not the draw)
+  is the next lever. The cache only helps frames where neither the mask nor the slab
+  changed; while chunks stream in it rebuilds every frame at the old cost.
+- **2026-10-20 The scratchpad is RAM.** `/tmp` is a 16 GiB tmpfs; a night of 240 MB release
+  binaries kept for A/B runs had taken 8 GiB of it. Delete experiment binaries as soon as
+  their comparison is done.
+- **2026-10-20 What the embedded JVM costs.** Windowed bench at rd 12 (settled RSS 591 MiB):
+  heap 152 MiB committed (104 used), metaspace 68 MiB, code cache 11 MiB, about 231 MiB before
+  the JVM's native overhead (GC tables, thread stacks, the library), which was not measured; the
+  estimate is 250-300 MiB of the 591, against vanilla's 1.45-1.7 GB process. Per frame it costs
+  almost nothing: everything outside the renderer (the JVM's GUI building included) took
+  0.1-0.3 ms, and none of the traced slow frames came from it. Boot is 6.6 s (4.8 s of it
+  vanilla's bootstrap) before the HUD is ready. Porting the HUD, chat and screens to Rust and
+  keeping Java only for mods was considered and not done: vanilla has 127 screen classes plus
+  the HUD, chat with Brigadier suggestions and text components, all of which would have to be
+  ported exactly; the JVM returns with the first mod anyway; and the HUD and screens are among
+  the most-modded parts (`Gui.render` injections, `Screen` subclasses), so a Rust UI would need
+  a landmark and a proxy for every one of them. Cheaper steps first: class data sharing, a
+  measured native footprint, trimmed heap limits, a background boot (roadmap F1-F4). A no-mods
+  Rust UI stays possible later but changes architecture rule 1 (roadmap F11).
+- **2026-10-20 Slow frames are the GPU's clock, not Haste's work.** `--bench-trace PATH` writes
+  every measured frame as a CSV row. At the reference spot on power saver the slow 1% spent
+  their time waiting for a swapchain image (rd 12: 6.3 of 8.2 ms) with no uploads, steady CPU
+  steps and 0.1-0.3 ms outside the renderer; the same still view took 3-15 ms of GPU time
+  within a fraction of a second (the GPU timer is read every 4 frames). Mailbox against
+  Immediate made no difference (rd 32 p99 18.2 against 17.1 ms). Haste had no frame limiter at
+  all; vanilla's (`FramerateLimiter`, `FramerateLimitTracker`) is ported now, and a cap evens
+  the pacing: rd 32 at 60 FPS p50 16.65, p99 18.39 ms (unlimited 11.81 / 18.21), rd 12 at 90 FPS
+  p50 11.06, p99 13.05 ms (unlimited 3.66 / 6.89). The 16.7 ms p99 seen at rd 32 in performance
+  mode is not traced yet (roadmap F7).

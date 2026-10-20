@@ -154,6 +154,11 @@ pub struct GpuTimer {
     /// Frames rendered so far; sub-pass brackets run on multiples of
     /// [`SUBPASS_SAMPLE_FRAMES`].
     frame: u32,
+    /// Whether the sub-pass brackets are written at all: off by default, since a sampled
+    /// frame costs ~2.5 ms more GPU time and one frame in 64 lands in every p99 (vanilla
+    /// writes no timestamps); the offscreen bench turns it on for its breakdown, and
+    /// `HASTE_GPU_BREAKDOWN=1` does for any run.
+    pub sample_subpasses: bool,
 }
 
 /// Total query slots: 2 per pass plus 2 per main-pass sub-pass bracket.
@@ -207,6 +212,7 @@ impl GpuTimer {
             latest: [0.0; 3],
             latest_sub: [0.0; 8],
             frame: 0,
+            sample_subpasses: std::env::var_os("HASTE_GPU_BREAKDOWN").is_some(),
         })
     }
 
@@ -219,13 +225,29 @@ impl GpuTimer {
         })
     }
 
+    /// Timestamp writes for pass `i` when it is recorded as several render passes (the
+    /// main pass around the GPU occlusion culling): the first part writes the beginning,
+    /// the last the end.
+    pub fn writes_part(
+        &self,
+        i: u32,
+        first: bool,
+        last: bool,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        (!self.in_flight && (first || last)).then(|| wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: first.then_some(i * 2),
+            end_of_pass_write_index: last.then_some(i * 2 + 1),
+        })
+    }
+
     /// Begin sub-pass `i`'s bracket: one timestamp write inside `pass`. Each query may be
     /// written at most once per pass, so a bracket that is already open must not begin again.
     /// No-op while the previous readback is still pending or on a frame that does not sample
     /// sub-passes (every [`SUBPASS_SAMPLE_FRAMES`]th); returns whether the bracket was
     /// written, so the caller's `ran_sub` flag matches what the readback will contain.
     pub fn begin_subpass(&self, pass: &mut wgpu::RenderPass<'_>, i: u32) -> bool {
-        if !self.in_flight && self.frame.is_multiple_of(SUBPASS_SAMPLE_FRAMES) {
+        if self.samples_subpasses() {
             pass.write_timestamp(&self.query_set, SUB_BASE + i * 2);
             true
         } else {
@@ -236,9 +258,13 @@ impl GpuTimer {
     /// End sub-pass `i`'s bracket. No-op unless this frame samples sub-passes (the same
     /// condition as [`begin_subpass`], so the pair always matches).
     pub fn end_subpass(&self, pass: &mut wgpu::RenderPass<'_>, i: u32) {
-        if !self.in_flight && self.frame.is_multiple_of(SUBPASS_SAMPLE_FRAMES) {
+        if self.samples_subpasses() {
             pass.write_timestamp(&self.query_set, SUB_BASE + i * 2 + 1);
         }
+    }
+
+    fn samples_subpasses(&self) -> bool {
+        self.sample_subpasses && !self.in_flight && self.frame.is_multiple_of(SUBPASS_SAMPLE_FRAMES)
     }
 
     /// Resolves this frame's queries (call after the passes, before finishing the encoder).

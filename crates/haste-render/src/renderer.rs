@@ -24,8 +24,11 @@ pub(crate) use surface::Offscreen;
 mod camera;
 mod draw_list;
 mod frame_setup;
+mod frames_in_flight;
+mod gpu_cull;
 mod gui_pass;
 mod init;
+mod main_pass;
 mod mesh_gate;
 mod premesh;
 mod quad_draw;
@@ -34,6 +37,7 @@ mod query;
 mod readback;
 mod render_world;
 mod surface;
+mod terrain_draw;
 mod terrain_feed;
 mod work_budget;
 
@@ -43,6 +47,7 @@ pub use work_budget::WorkBudgetMode;
 #[cfg(test)]
 mod tests;
 mod textures;
+mod visible_list;
 mod visible_sections;
 
 /// Camera for one frame (docs/INTERFACES.md FrameInput).
@@ -258,6 +263,11 @@ struct SectionDraw {
     /// where the index buffer carries the geometry).
     kind: crate::quad_format::SpanKind,
     origin: [i32; 3],
+    /// The section's slab slot and its mesh bounds relative to the camera (the GPU
+    /// occlusion culling's input).
+    slot: u32,
+    lo: [f32; 3],
+    hi: [f32; 3],
 }
 
 /// The renderer. Construct with a window (windowed mode) or offscreen
@@ -305,6 +315,11 @@ pub struct Renderer {
     /// sections that have no mesh, so unmeshed air never blocks it.
     known_empty: Arc<Mutex<crate::occlusion::EmptyColumns>>,
     visible_mask: crate::occlusion::VisibleMask,
+    /// Bumped whenever `visible_mask` is replaced, for `visible_list`.
+    visible_generation: u64,
+    /// The mask's resident sections in visit order, rebuilt when the mask or the slab
+    /// changes (`renderer/visible_list.rs`).
+    visible_list: visible_list::VisibleList,
     /// Bumped every time a finished walk replaces `visible_mask` or the look crosses a
     /// 2-degree step, so the feed can re-check its held-back dirty sections.
     want_version: u64,
@@ -343,6 +358,8 @@ pub struct Renderer {
     scheduled_for: Option<(SectionPos, i32)>,
     /// A walk is scheduled and not yet collected.
     walk_in_flight: bool,
+    /// Offscreen frames the CPU has queued (see `frames_in_flight.rs`).
+    offscreen_frames: frames_in_flight::FramesInFlight,
     /// Newly uploaded sections next to a visible one, drawn until the new mask
     /// arrives (vanilla propagates from newly loaded sections on the render
     /// thread). A dense list plus a bit on each named slab record (so a
@@ -382,6 +399,8 @@ pub struct Renderer {
     indirect: Vec<u32>,
     indirect_buffer: wgpu::Buffer,
     indirect_capacity: usize,
+    /// GPU occlusion culling of the terrain draws (two phases around a depth pyramid).
+    gpu_cull: gpu_cull::GpuCull,
     camera_uniform: wgpu::Buffer,
     camera_bind_group_layout: wgpu::BindGroupLayout,
     camera_bind_group: wgpu::BindGroup,

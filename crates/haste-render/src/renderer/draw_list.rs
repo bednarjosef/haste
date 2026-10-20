@@ -1,11 +1,9 @@
 // The terrain draw list (`render_world.rs`'s cull step, split out by the
-// file-size rule): frustum-cull the visible sections into per-layer draw
-// lists in the occlusion walk's visit order, group the opaque layers by
-// arena, sort translucent back to front, and write the per-draw data (see
+// file-size rule): frustum-cull the visible sections (`visible_list.rs`, kept
+// grouped by arena in the occlusion walk's visit order) into per-layer draw
+// lists, sort translucent back to front, and write the per-draw data (see
 // `quad_draw.rs`). Vanilla's equivalent is `LevelRenderer` compiling its
 // visible sections into per-layer render lists.
-
-use haste_core::SectionPos;
 
 use super::{Renderer, SectionDraw};
 
@@ -28,16 +26,9 @@ impl Renderer {
         for b in buckets.iter_mut() {
             b.clear();
         }
-        let min_section = self.min_section;
-        let sections = &self.sections;
-        let emit = |buckets: &mut [Vec<SectionDraw>; 4], pos: SectionPos| {
-            let Some(s) = sections.get(pos) else {
-                return;
-            };
-            let si = s.pos.y - min_section;
-            if !(0..32).contains(&si) {
-                return;
-            }
+        self.refresh_visible_list();
+        let list = &self.visible_list;
+        for s in list.sections() {
             let lo = [
                 (s.aabb.0[0] as f64 - cam.x) as f32,
                 (s.aabb.0[1] as f64 - cam.y) as f32,
@@ -49,7 +40,7 @@ impl Renderer {
                 (s.aabb.1[2] as f64 - cam.z) as f32,
             ];
             if !Self::aabb_visible(planes, lo, hi) {
-                return;
+                continue;
             }
             let d = glam::Vec3::new(
                 (lo[0] + hi[0]) * 0.5,
@@ -57,49 +48,60 @@ impl Renderer {
                 (lo[2] + hi[2]) * 0.5,
             )
             .length_squared();
-            for l in sections.layers(s) {
-                // Skip a direction group facing away from the camera.
-                if l.dir < 6 && l.back_facing(lo, hi) {
-                    continue;
-                }
+            let front =
+                super::visible_list::front_positions(crate::section_slab::front_groups(lo, hi));
+            for g in list.groups(s) {
                 // Sort key: ascending distance for opaque (early depth),
                 // negated for translucent so ascending = far first.
-                let translucent = l.layer == haste_assets::RenderLayer::Translucent;
-                let i = match l.layer {
-                    haste_assets::RenderLayer::Solid => 0,
-                    haste_assets::RenderLayer::Cutout => 1,
-                    haste_assets::RenderLayer::CutoutMipped => 2,
-                    haste_assets::RenderLayer::Translucent => 3,
-                };
-                buckets[i].push(SectionDraw {
-                    layer: l.layer,
-                    arena: s.arena,
-                    key: if translucent { -d } else { d },
-                    first_index: l.first,
-                    index_count: l.count,
-                    base_vertex: s.base_vertex,
-                    kind: l.kind,
-                    origin: [s.pos.x << 4, s.pos.y << 4, s.pos.z << 4],
+                let key = if g.bucket == 3 { -d } else { d };
+                let bucket = &mut buckets[g.bucket as usize];
+                // The groups facing the camera, joined where their ranges touch (see
+                // `mesher::GROUP_ORDER`); a run also joins the previous draw of the
+                // bucket when it continues it: fewer sub-draws.
+                g.for_each_run(front, |first, count| {
+                    if let Some(prev) = bucket.last_mut() {
+                        if prev.kind == crate::quad_format::SpanKind::Indexed
+                            && g.kind == crate::quad_format::SpanKind::Indexed
+                            && prev.arena == s.arena
+                            && prev.base_vertex == s.base_vertex
+                            && prev.first_index + prev.index_count == first
+                        {
+                            prev.index_count += count;
+                            return;
+                        }
+                    }
+                    bucket.push(SectionDraw {
+                        layer: g.layer,
+                        arena: s.arena,
+                        key,
+                        first_index: first,
+                        index_count: count,
+                        base_vertex: s.base_vertex,
+                        kind: g.kind,
+                        origin: s.origin,
+                        slot: s.slot,
+                        lo,
+                        hi,
+                    });
                 });
             }
-        };
-        self.for_each_visible_section(|pos| emit(&mut buckets, pos));
-        // Group the opaque buckets by arena: the draw loop issues one multi-draw
-        // call per run sharing a layer and an arena, and the visit order
-        // interleaves the arenas, so ungrouped the frame pays thousands of draw
-        // dispatches (2232 measured at rd 32 over 16 arenas). Depth-tested
-        // layers do not depend on order (terrain faces never coincide).
-        for b in buckets.iter_mut().take(3) {
-            b.sort_unstable_by_key(|d| d.arena);
         }
         // Translucent back to front: the key is the negated distance, so
-        // ascending key order is far first.
+        // ascending key order is far first. Equal keys order by section, then by
+        // range, so a section's facing groups stay together in mesh order (an
+        // unstable sort: the stable one allocates its buffer every frame).
         if buckets[3].len() > 1 {
-            buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
+            buckets[3].sort_unstable_by(|a, b| {
+                (a.key.total_cmp(&b.key))
+                    .then(a.slot.cmp(&b.slot))
+                    .then(a.first_index.cmp(&b.first_index))
+            });
         }
         let mut draws = std::mem::take(&mut self.draw_list);
         draws.clear();
-        for b in buckets.iter() {
+        // The visible list is grouped by arena (see `visible_list.rs`), so each opaque
+        // bucket is already in the draw loop's run order.
+        for b in &buckets {
             draws.extend_from_slice(b);
         }
         self.layer_buckets = buckets;
@@ -116,6 +118,12 @@ impl Renderer {
             draws.iter().map(|d| d.index_count).sum()
         };
         self.prepare_draw_data(&draws);
+        self.gpu_cull.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &draws,
+            self.sections.slot_capacity(),
+        );
         self.draw_list = draws;
         (sections_total, drawn, indices_drawn)
     }

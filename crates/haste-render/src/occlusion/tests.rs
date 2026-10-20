@@ -33,11 +33,13 @@ fn wall_splits_west_from_east() {
 }
 
 #[test]
-fn open_grid_reaches_every_section() {
-    // Every section see-through (an all-empty world): the walk must reach every
-    // section within render distance.
+fn open_grid_reaches_the_view_circle() {
+    // Every section see-through (an all-empty world): the walk reaches every
+    // section inside vanilla's view circle (`ChunkTrackingView.isInViewDistance`)
+    // and none of the grid's corners outside it.
     let sc = 8;
     let rd = 6;
+    let vd = rd - 1;
     let eye = DVec3::new(8.0, 72.0, 8.0);
     let mask = compute_visible_mask(
         |_, _| VisibilitySet::all(),
@@ -47,17 +49,42 @@ fn open_grid_reaches_every_section() {
         0,
         sc,
         rd,
+        vd,
     );
     let full = (1u32 << sc) - 1;
     for x in -rd..=rd {
         for z in -rd..=rd {
+            let inside = crate::occlusion::in_view_distance(ChunkPos::new(0, 0), x, z, vd);
             assert_eq!(
                 mask.column(ChunkPos::new(x, z)),
-                full,
-                "column ({x}, {z}) not fully reached"
+                if inside { full } else { 0 },
+                "column ({x}, {z})"
             );
         }
     }
+    // Vanilla's one-column buffer: (6, 0) counts as 5 (25 < 25 fails: outside),
+    // (5, 3) as (4, 2) (20 < 25: inside), (5, 4) as (4, 3) (25: outside).
+    assert_eq!(mask.column(ChunkPos::new(6, 0)), 0);
+    assert_eq!(mask.column(ChunkPos::new(5, 3)), full);
+    assert_eq!(mask.column(ChunkPos::new(5, 4)), 0);
+}
+
+#[test]
+fn walk_stops_at_the_vertical_view_distance() {
+    // Vanilla's getRelativeFrom also drops a neighbour more than the view
+    // distance away vertically: with view distance 2 the camera at section 4
+    // reaches sections 2..=6 only.
+    let mask = compute_visible_mask(
+        |_, _| VisibilitySet::all(),
+        ChunkPos::new(0, 0),
+        4,
+        DVec3::new(8.0, 72.0, 8.0),
+        0,
+        12,
+        3,
+        2,
+    );
+    assert_eq!(mask.column(ChunkPos::new(0, 0)), 0b111_1100);
 }
 
 #[test]
@@ -77,6 +104,7 @@ fn unmeshed_sections_block_the_walk() {
         eye,
         0,
         sc,
+        rd,
         rd,
     );
     // The camera column: section 4 plus the sections above and below.
@@ -116,6 +144,7 @@ fn solid_wall_hides_sections_behind_it() {
         0,
         8,
         4,
+        4,
     );
     // The wall section itself is reached (visible face)...
     assert!(mask.column(ChunkPos::new(0, -1)) & (1 << 4) != 0);
@@ -127,6 +156,7 @@ fn solid_wall_hides_sections_behind_it() {
 /// 6-iteration `any` sightline check and `/16.0` section indexing. The
 /// optimized walk must produce the identical mask; this reference is the
 /// oracle the differential test compares against.
+#[allow(clippy::too_many_arguments)]
 fn reference_visible_mask(
     section_vis: &HashMap<(ChunkPos, i32), VisibilitySet>,
     cam_col: ChunkPos,
@@ -135,6 +165,7 @@ fn reference_visible_mask(
     min_y: i32,
     section_count: i32,
     render_distance: i32,
+    view_distance: i32,
 ) -> VisibleMask {
     let r = render_distance.max(0);
     let w = 2 * r + 1;
@@ -193,6 +224,7 @@ fn reference_visible_mask(
                     eye,
                     cam_center,
                     (x, si, z),
+                    face,
                     min_y,
                     section_count,
                 )
@@ -202,6 +234,11 @@ fn reference_visible_mask(
             let Some(ni) = idx(nx, nsi, nz) else {
                 continue;
             };
+            if !crate::occlusion::in_view_distance(cam_col, nx, nz, view_distance)
+                || (nsi - cam_si).abs() > view_distance
+            {
+                continue;
+            }
             if cone[ni] & VISITED != 0 {
                 source[ni] |= face.bit();
                 continue;
@@ -223,23 +260,34 @@ fn reference_visible_mask(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reference_ray_occluded(
     cone: &[u8],
     idx: &impl Fn(i32, i32, i32) -> Option<usize>,
     eye: DVec3,
     cam_center: DVec3,
     (sx, ssi, sz): (i32, i32, i32),
+    face: Face,
     min_y: i32,
     section_count: i32,
 ) -> bool {
     let ox = (sx * 16) as f64;
     let oy = (min_y + ssi * 16) as f64;
     let oz = (sz * 16) as f64;
-    let corner = |c: f64, o: f64| o + if c > o { 16.0 } else { 0.0 };
+    // Vanilla's maxX/maxY/maxZ: along the face's axis the high side when the
+    // camera is past the origin, along the other axes when it is before it.
+    let (fx, fy, fz) = face.offset();
+    let corner = |c: f64, o: f64, on_axis: bool| {
+        o + if (on_axis && c > o) || (!on_axis && c < o) {
+            16.0
+        } else {
+            0.0
+        }
+    };
     let mut check = DVec3::new(
-        corner(cam_center.x, ox),
-        corner(cam_center.y, oy),
-        corner(cam_center.z, oz),
+        corner(cam_center.x, ox, fx != 0),
+        corner(cam_center.y, oy, fy != 0),
+        corner(cam_center.z, oz, fz != 0),
     );
     let step = (eye - check).normalize() * CEILED_SECTION_DIAGONAL;
     let world_min_y = min_y as f64;
@@ -275,6 +323,8 @@ fn optimized_walk_matches_reference() {
         let sc = 4 + (lcg(&mut rng) % 5) as i32; // 4..=8 sections tall
         let rd = 2 + (lcg(&mut rng) % 4) as i32; // render distance 2..=5
         let w = 2 * rd + 1;
+        // The view circle: the grid's radius or one less (the walker's grid is one wider).
+        let vd = rd - (lcg(&mut rng) % 2) as i32;
         let mut section_vis = HashMap::new();
         for x in -rd..=rd {
             for z in -rd..=rd {
@@ -323,6 +373,7 @@ fn optimized_walk_matches_reference() {
             min_y,
             sc,
             rd,
+            vd,
         );
         let slow = reference_visible_mask(
             &section_vis,
@@ -332,6 +383,7 @@ fn optimized_walk_matches_reference() {
             min_y,
             sc,
             rd,
+            vd,
         );
         for x in -rd..=rd {
             for z in -rd..=rd {
@@ -396,6 +448,7 @@ fn async_walk_matches_sync() {
         0,
         sc,
         vd + 1,
+        vd,
     );
     assert_eq!(mask, sync);
 }
@@ -435,13 +488,16 @@ fn walker_passes_through_known_empty_sections() {
     let full = (1u32 << sc) - 1;
     for x in -rd..=rd {
         for z in -rd..=rd {
+            let inside = crate::occlusion::in_view_distance(ChunkPos::new(0, 0), x, z, rd);
             assert_eq!(
                 mask.column(ChunkPos::new(x, z)),
-                full,
-                "column ({x}, {z}) not fully reached"
+                if inside { full } else { 0 },
+                "column ({x}, {z})"
             );
         }
     }
+    // The empty sections were walked through but are not in the draw order.
+    assert_eq!(mask.ordered().count(), 0);
 }
 
 /// The render thread must never run the walk: `schedule` (a channel send)

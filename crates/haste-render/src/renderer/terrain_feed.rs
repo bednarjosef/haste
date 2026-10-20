@@ -359,6 +359,7 @@ impl Renderer {
         self.section_vis.lock().clear();
         self.known_empty.lock().clear();
         self.visible_mask = Default::default();
+        self.visible_generation += 1;
         self.visible_for = None;
         self.scheduled_for = None;
         self.walk_in_flight = false;

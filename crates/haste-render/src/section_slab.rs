@@ -41,8 +41,8 @@ pub struct SlabLayer {
     pub layer: haste_assets::RenderLayer,
     pub first: u32,
     pub count: u32,
-    /// Face direction (`Direction::ALL` index) of this group; 6 = the whole
-    /// layer (translucent, never direction-skipped). See `LayerDraw`.
+    /// Facing group (`Direction::ALL` index) of this range; 6 = faces off the
+    /// axis planes (crossed plants, sloped fluids), never direction-skipped. See `LayerDraw`.
     pub dir: u8,
     /// Which pool `first` addresses (indices or quad-format records).
     pub kind: SpanKind,
@@ -55,23 +55,31 @@ impl SlabLayer {
     /// section's camera-relative AABB. A positive-direction face (up, south,
     /// east) is back-facing when the camera is below/before the section's low
     /// side on the face's axis, a negative one when the camera is past the
-    /// high side; inside the slab the group is mixed and kept.
+    /// high side; inside the slab the group is mixed and kept. A diagonal group
+    /// (7..11, `mesher::DIAGONALS`) follows the same rule along its normal: it is
+    /// back-facing when the box's nearest point along the normal is already past the
+    /// camera. Group 6 is never back-facing.
     pub fn back_facing(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
-        // Direction axis: down/up = y, north/south = z, west/east = x.
-        let (axis, positive) = match self.dir {
-            0 => (1, false),
-            1 => (1, true),
-            2 => (2, false),
-            3 => (2, true),
-            4 => (0, false),
-            _ => (0, true),
-        };
-        if positive {
-            lo[axis] > 0.0
-        } else {
-            hi[axis] < 0.0
-        }
+        front_groups(lo, hi) & (1 << self.dir) == 0
     }
+}
+
+/// The facing groups (bit `dir`) of a section that are not back-facing from the camera,
+/// [`SlabLayer::back_facing`] for every group at once: the draw list tests a section's
+/// groups with one mask instead of one test per group.
+pub fn front_groups(lo: [f32; 3], hi: [f32; 3]) -> u16 {
+    // Direction axis: down/up = y, north/south = z, west/east = x.
+    let mut mask = 1u16 << 6;
+    let bit = |back: bool, dir: u16| u16::from(!back) << dir;
+    mask |= bit(hi[1] < 0.0, 0) | bit(lo[1] > 0.0, 1);
+    mask |= bit(hi[2] < 0.0, 2) | bit(lo[2] > 0.0, 3);
+    mask |= bit(hi[0] < 0.0, 4) | bit(lo[0] > 0.0, 5);
+    let near = |s: f32, lo: f32, hi: f32| if s > 0.0 { s * lo } else { s * hi };
+    for (i, [sx, sz]) in crate::mesher::DIAGONALS.iter().enumerate() {
+        let back = near(*sx, lo[0], hi[0]) + near(*sz, lo[2], hi[2]) > 0.0;
+        mask |= bit(back, 7 + i as u16);
+    }
+    mask
 }
 
 /// Dense storage of resident sections with `SectionPos` lookup: a slab of
@@ -88,7 +96,18 @@ pub struct SectionSlab {
     /// place, so no generation tags are needed).
     index: ahash::AHashMap<u64, u32>,
     free: Vec<u32>,
+    /// Entries of `layers` no live slot points at (replaced or removed sections whose
+    /// range was not at the tail); compacted away once they outnumber the live ones.
+    dead_layers: usize,
+    /// The compaction's second buffer, kept so a compaction allocates nothing.
+    layer_scratch: Vec<SlabLayer>,
+    /// Bumped by every change to a record (insert, remove, clear, mutable access), so a
+    /// list built from the slab knows when to rebuild (`renderer/visible_list.rs`).
+    generation: u64,
 }
+
+/// Dead layer entries tolerated before a compaction (a section has at most a few dozen).
+const DEAD_LAYERS_MIN: usize = 4096;
 
 fn key(pos: SectionPos) -> u64 {
     // Section coordinates fit in 21 bits each (±1M sections).
@@ -110,7 +129,15 @@ impl SectionSlab {
             layers: Vec::new(),
             index: ahash::AHashMap::with_capacity(1024),
             free: Vec::new(),
+            dead_layers: 0,
+            layer_scratch: Vec::new(),
+            generation: 0,
         }
+    }
+
+    /// The change counter: equal values mean no record changed in between.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn len(&self) -> usize {
@@ -126,19 +153,17 @@ impl SectionSlab {
     /// there was one, so the caller can free its arena ranges.
     pub fn insert(&mut self, s: ResidentSection) -> Option<ResidentSection> {
         let old = self.remove(&s.pos);
-        let layers: Vec<SlabLayer> = s
-            .layers
-            .iter()
-            .map(|l| SlabLayer {
-                layer: l.layer,
-                first: l.first,
-                count: l.count,
-                dir: l.dir,
-                kind: l.kind,
-            })
-            .collect();
+        if self.dead_layers >= DEAD_LAYERS_MIN && self.dead_layers * 2 > self.layers.len() {
+            self.compact_layers();
+        }
         let layers_base = self.layers.len() as u32;
-        self.layers.extend(layers);
+        self.layers.extend(s.layers.iter().map(|l| SlabLayer {
+            layer: l.layer,
+            first: l.first,
+            count: l.count,
+            dir: l.dir,
+            kind: l.kind,
+        }));
         let slot = match self.free.pop() {
             Some(i) => i,
             None => {
@@ -163,6 +188,7 @@ impl SectionSlab {
             bonus: false,
         });
         self.index.insert(key(s.pos), slot);
+        self.generation += 1;
         old
     }
 
@@ -173,7 +199,15 @@ impl SectionSlab {
     pub fn remove(&mut self, pos: &SectionPos) -> Option<ResidentSection> {
         let slot = self.index.remove(&key(*pos))?;
         let s = self.slots[slot as usize].take()?;
-        self.layers.truncate_include(&s);
+        self.generation += 1;
+        // The newest record's range is the tail and goes at once; any other becomes dead
+        // entries until the next compaction.
+        let end = (s.layers_base + s.layers_len) as usize;
+        if end == self.layers.len() {
+            self.layers.truncate(s.layers_base as usize);
+        } else {
+            self.dead_layers += s.layers_len as usize;
+        }
         self.free.push(slot);
         Some(ResidentSection {
             pos: s.pos,
@@ -197,9 +231,22 @@ impl SectionSlab {
         self.slots[slot as usize].as_ref()
     }
 
+    /// The record at `pos` with its slot index (stable while the section stays
+    /// resident; the GPU occlusion culling keys its visibility by it).
+    pub fn get_with_slot(&self, pos: SectionPos) -> Option<(u32, &SlabSection)> {
+        let &slot = self.index.get(&key(pos))?;
+        Some((slot, self.slots[slot as usize].as_ref()?))
+    }
+
+    /// One past the highest slot index in use.
+    pub fn slot_capacity(&self) -> usize {
+        self.slots.len()
+    }
+
     /// The record at `pos`, mutably (to set the bonus flag).
     pub fn get_mut(&mut self, pos: SectionPos) -> Option<&mut SlabSection> {
         let &slot = self.index.get(&key(pos))?;
+        self.generation += 1;
         self.slots[slot as usize].as_mut()
     }
 
@@ -210,6 +257,7 @@ impl SectionSlab {
 
     /// Iterate every live record mutably (clearing bonus bits).
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut SlabSection> {
+        self.generation += 1;
         self.slots.iter_mut().flatten()
     }
 
@@ -225,28 +273,27 @@ impl SectionSlab {
         self.layers.clear();
         self.index.clear();
         self.free.clear();
+        self.dead_layers = 0;
+        self.generation += 1;
+    }
+
+    /// Packs the live slots' layer ranges into the scratch buffer and swaps the two, so
+    /// replaced sections' entries do not pile up for the whole session.
+    fn compact_layers(&mut self) {
+        self.layer_scratch.clear();
+        for s in self.slots.iter_mut().flatten() {
+            let start = s.layers_base as usize;
+            s.layers_base = self.layer_scratch.len() as u32;
+            self.layer_scratch
+                .extend_from_slice(&self.layers[start..start + s.layers_len as usize]);
+        }
+        std::mem::swap(&mut self.layers, &mut self.layer_scratch);
+        self.dead_layers = 0;
     }
 
     /// Column key for the per-column visibility mask.
     pub fn column(pos: SectionPos) -> ChunkPos {
         ChunkPos::new(pos.x, pos.z)
-    }
-}
-
-trait TruncateInclude {
-    fn truncate_include(&mut self, s: &SlabSection);
-}
-
-impl TruncateInclude for Vec<SlabLayer> {
-    fn truncate_include(&mut self, s: &SlabSection) {
-        // Layers are appended in slot-removal order; a removal can only take
-        // the tail when this is the newest record, otherwise the range is
-        // left as dead entries reused on the next append (the free list of
-        // the layer array is the slot's own reuse, not this).
-        let end = (s.layers_base + s.layers_len) as usize;
-        if end == self.len() {
-            self.truncate(s.layers_base as usize);
-        }
     }
 }
 
@@ -302,6 +349,36 @@ mod tests {
     }
 
     #[test]
+    fn every_change_bumps_the_generation() {
+        let mut slab = SectionSlab::new();
+        let mut last = slab.generation();
+        let mut changed = |slab: &SectionSlab| {
+            let g = slab.generation();
+            let bumped = g != last;
+            last = g;
+            bumped
+        };
+        let pos = SectionPos::new(0, 0, 0);
+        slab.insert(resident(pos, 1));
+        assert!(changed(&slab));
+        assert!(slab.get(pos).is_some());
+        assert!(!changed(&slab), "a read changes nothing");
+        slab.get_mut(pos).unwrap().bonus = true;
+        assert!(changed(&slab));
+        slab.iter_mut().for_each(|s| s.bonus = false);
+        assert!(changed(&slab));
+        slab.remove(&pos);
+        assert!(changed(&slab));
+        slab.remove(&pos);
+        assert!(
+            !changed(&slab),
+            "removing an absent section changes nothing"
+        );
+        slab.clear();
+        assert!(changed(&slab));
+    }
+
+    #[test]
     fn clear_empties() {
         let mut slab = SectionSlab::new();
         slab.insert(resident(SectionPos::new(0, 0, 0), 1));
@@ -326,5 +403,31 @@ mod tests {
         slab.remove(&SectionPos::new(0, 0, 0));
         let s1 = slab.get(SectionPos::new(0, 1, 0)).unwrap();
         assert_eq!(slab.layers(s1).len(), 1);
+    }
+
+    #[test]
+    fn replaced_sections_do_not_grow_the_layer_array() {
+        let mut slab = SectionSlab::new();
+        // Re-mesh 64 sections over and over, in an order that never replaces the tail.
+        for round in 0..400 {
+            for i in 0..64 {
+                let n = 1 + (i + round) % 5;
+                slab.insert(resident(SectionPos::new(i as i32, 0, 0), n));
+            }
+        }
+        let live: usize = slab.iter().map(|s| s.layers_len as usize).sum();
+        assert!(
+            slab.layers.len() <= live + 2 * DEAD_LAYERS_MIN,
+            "{} entries for {live} live",
+            slab.layers.len()
+        );
+        // Every slice still belongs to its own section.
+        for i in 0..64 {
+            let s = slab.get(SectionPos::new(i, 0, 0)).unwrap();
+            assert_eq!(slab.layers(s).len(), 1 + (i as usize + 399) % 5);
+            for (j, l) in slab.layers(s).iter().enumerate() {
+                assert_eq!(l.first, j as u32 * 6);
+            }
+        }
     }
 }

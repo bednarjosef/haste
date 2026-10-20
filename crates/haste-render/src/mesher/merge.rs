@@ -35,7 +35,16 @@ pub(super) fn greedy_merge_enabled() -> bool {
 /// as the per-vertex attributes are constant across the merge (checked at
 /// emit time: uniform light, one tint per quad).
 pub(super) fn merge_face(quad: &haste_assets::BakedQuad, uvs: &[[f32; 2]; 4]) -> Option<MergeFace> {
-    let dir = quad.direction;
+    merge_face_geom(quad.direction, &quad.positions, uvs)
+}
+
+/// [`merge_face`] from the geometry alone: a quad on `dir`'s axis with block-local
+/// `positions` (a fluid surface; the winding may face either way along the axis).
+pub(super) fn merge_face_geom(
+    dir: haste_assets::Direction,
+    positions: &[[f32; 3]; 4],
+    uvs: &[[f32; 2]; 4],
+) -> Option<MergeFace> {
     let (u, v) = face_axes(dir);
     let n = dir.offset();
     let n_axis = n.iter().position(|&c| c != 0)?;
@@ -46,7 +55,7 @@ pub(super) fn merge_face(quad: &haste_assets::BakedQuad, uvs: &[[f32; 2]; 4]) ->
     // 2/16 merges with the same layer's neighbours). All four corners must
     // agree — a tilted quad is not a face.
     let mut plane: Option<f32> = None;
-    for (i, (&pos, &uv)) in quad.positions.iter().zip(uvs).enumerate() {
+    for (i, (&pos, &uv)) in positions.iter().zip(uvs).enumerate() {
         match plane {
             None => plane = Some(pos[n_axis]),
             Some(p) if p != pos[n_axis] => return None,
@@ -95,6 +104,24 @@ pub(super) fn merge_face(quad: &haste_assets::BakedQuad, uvs: &[[f32; 2]; 4]) ->
         // The plane's model-space height, as f32 bits (grouping only).
         plane: plane?.to_bits(),
     })
+}
+
+/// Section-continuous UVs for a full unit face in block cell `cell` (section-local
+/// 0..16): each component counts whole blocks along the axis it follows, so the face's
+/// corners carry the same UVs as the touching corners of its coplanar neighbours.
+/// Under the shader's `fract` wrap the texels are those of the 0/1 corner UVs (the
+/// two differ by whole numbers, like a merged rectangle's repeats), and identical
+/// corners let the sink share the vertex between the faces.
+pub(super) fn section_uvs(face: &MergeFace, cell: [i32; 3]) -> [[f32; 2]; 4] {
+    let mut uvs = [[0f32; 2]; 4];
+    for (uv, corner) in uvs.iter_mut().zip(face.corners) {
+        for (c, [src, flip]) in face.uv_map.into_iter().enumerate() {
+            let axis = if src == 0 { face.u_axis } else { face.v_axis };
+            let t = (cell[axis as usize] + i32::from(corner[src as usize])) as f32;
+            uv[c] = if flip == 0 { t } else { 16.0 - t };
+        }
+    }
+    uvs
 }
 
 /// A UV component as an exact 0/1 flag.
@@ -159,8 +186,6 @@ pub(super) enum StagedQuad {
     /// A quad that cannot merge (any shape, or per-vertex light differences).
     Direct {
         layer: haste_assets::RenderLayer,
-        /// Face direction (`Direction::ALL` index): the sink's draw-time bucket.
-        dir: u8,
         positions: [[f32; 3]; 4],
         uvs: [[f32; 2]; 4],
         lights: [[u8; 3]; 4],
@@ -208,11 +233,6 @@ struct MergeRect {
 
 /// The greedy pass: merge the staged unit faces into rectangles and emit
 /// everything into `sink` in the original emission order.
-/// The staged direction byte back to a `Direction` (the sink buckets by it).
-fn dir_of(dir: u8) -> haste_assets::Direction {
-    haste_assets::Direction::from_index(dir as usize)
-}
-
 pub(super) fn flush_staged(
     staged: &mut [StagedQuad],
     sink: &mut MeshSink,
@@ -223,7 +243,6 @@ pub(super) fn flush_staged(
         for q in staged.iter() {
             if let StagedQuad::Direct {
                 layer,
-                dir,
                 positions,
                 uvs,
                 lights,
@@ -231,15 +250,7 @@ pub(super) fn flush_staged(
                 sprite,
             } = q
             {
-                sink.push_quad(
-                    *layer,
-                    dir_of(*dir),
-                    positions,
-                    uvs,
-                    *lights,
-                    *tint,
-                    *sprite,
-                );
+                sink.push_quad(*layer, positions, uvs, *lights, *tint, *sprite);
             }
         }
         return;
@@ -337,21 +348,12 @@ pub(super) fn flush_staged(
         match q {
             StagedQuad::Direct {
                 layer,
-                dir,
                 positions,
                 uvs,
                 lights,
                 tint,
                 sprite,
-            } => sink.push_quad(
-                *layer,
-                dir_of(*dir),
-                positions,
-                uvs,
-                *lights,
-                *tint,
-                *sprite,
-            ),
+            } => sink.push_quad(*layer, positions, uvs, *lights, *tint, *sprite),
             StagedQuad::Merge(_) => {
                 if let Some(ri) = rect_at[i] {
                     if emitted_rects[ri] {
@@ -412,8 +414,11 @@ fn emit_rect(r: &MergeRect, junction: &mut JunctionScratch, sink: &mut MeshSink)
             [su as f32 * r.len_u as f32, sv as f32 * r.len_v as f32],
         )
     };
+    // The UVs count from the section's corner, not the rectangle's (`section_uvs`), so
+    // ring vertices match the touching corners of the faces around the rectangle.
     let push = |ring: &mut Vec<([f32; 3], [f32; 2])>, pos: [f32; 3], off: [f32; 2]| {
-        ring.push((pos, ring_uv(f, off[0], off[1], r.len_u, r.len_v)));
+        let (u, v) = (r.base[ua] as f32 + off[0], r.base[va] as f32 + off[1]);
+        ring.push((pos, ring_uv(f, u, v, 16, 16)));
     };
     for ci in 0..4 {
         let (su, sv) = (f.corners[ci][0] as i32, f.corners[ci][1] as i32);

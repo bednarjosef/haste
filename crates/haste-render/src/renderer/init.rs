@@ -419,6 +419,7 @@ impl Renderer {
         let walk =
             crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone(), known_empty.clone())?;
 
+        let gpu_cull = super::gpu_cull::GpuCull::new(&gpu.device, gpu.draw_count);
         Ok(Renderer {
             gpu,
             surface: surface.map(|(s, _)| s),
@@ -438,6 +439,8 @@ impl Renderer {
             section_vis,
             known_empty,
             visible_mask: Default::default(),
+            visible_generation: 0,
+            visible_list: Default::default(),
             want_version: 0,
             want_look: None,
             want_frustum: None,
@@ -451,6 +454,7 @@ impl Renderer {
             visible_for: None,
             scheduled_for: None,
             walk_in_flight: false,
+            offscreen_frames: Default::default(),
             bonus_list: Vec::new(),
             bonus_dirty: false,
             walk,
@@ -472,6 +476,7 @@ impl Renderer {
             indirect: Vec::new(),
             indirect_buffer,
             indirect_capacity: 4096,
+            gpu_cull,
             camera_uniform,
             camera_bind_group_layout,
             camera_bind_group,

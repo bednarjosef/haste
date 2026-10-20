@@ -18,6 +18,9 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    // The offscreen bench reports the per-pass GPU split; the windowed bench (the one
+    // compared with vanilla) leaves it off unless HASTE_GPU_BREAKDOWN is set.
+    renderer.set_gpu_breakdown(true);
     renderer.set_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
@@ -179,6 +182,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             mib(rollup.2 * 1024),
             mib(memory::gpu_resident_bytes()),
         );
+        if std::env::var_os("HASTE_GPU_REPORT").is_some() {
+            if let Some(report) = renderer.gpu_allocation_report(20) {
+                println!("{report}");
+            }
+        }
         println!(
             "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",
             mib(world.chunks + world.sections + world.heightmaps + world.light + world.block_entities),
@@ -229,6 +237,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         height: args.height,
         adapter,
     };
+    let ab_block = super::ab::block();
     let started = Instant::now();
     loop {
         let elapsed = started.elapsed().as_secs_f32();
@@ -298,6 +307,9 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
                 .unwrap_or_else(|| Arc::new(Default::default()));
             renderer.prepare_particles(&snapshot, camera, partial_tick, None);
         }
+        if let Some(block) = ab_block {
+            haste_render::experiment::set(super::ab::variant(samples.len() as u32, block));
+        }
         let stats = renderer.render(&frame)?;
         let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
@@ -325,6 +337,9 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let summary = bench_summary(&samples, renderer.premesh_summary());
     println!("{}", summary.text(&meta));
     print_slowest_frames(&samples);
+    if let Some(block) = ab_block {
+        println!("{}", super::ab::report(&samples, block));
+    }
     if let Some(out) = &args.bench_out {
         let json = serde_json::json!({
             "frames": summary.frames,

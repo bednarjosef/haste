@@ -32,7 +32,9 @@ pub type EmptyColumns = AHashMap<ChunkPos, u32>;
 /// walk under-reaches through unmeshed terrain exactly as vanilla's does. Both
 /// maps are copied into the reusable buffers under their locks (a fast drain)
 /// and the grid is built after they are released, so the render thread's
-/// per-upload lock never waits on the grid build.
+/// per-upload lock never waits on the grid build. `empty_grid` gets one flag per
+/// node, set for the known-empty sections (reused across walks).
+#[allow(clippy::too_many_arguments)]
 fn dense_visibility_grid(
     vis: &Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>,
     empty: &Mutex<EmptyColumns>,
@@ -41,6 +43,7 @@ fn dense_visibility_grid(
     cam: ChunkPos,
     r: i32,
     h: i32,
+    empty_grid: &mut Vec<bool>,
 ) -> Vec<VisibilitySet> {
     entries.clear();
     entries.extend(vis.lock().iter().map(|(k, v)| (*k, *v)));
@@ -48,6 +51,8 @@ fn dense_visibility_grid(
     empty_entries.extend(empty.lock().iter().map(|(k, v)| (*k, *v)));
     let w = 2 * r + 1;
     let mut dense = vec![VisibilitySet::none(); (w * w * h) as usize];
+    empty_grid.clear();
+    empty_grid.resize((w * w * h) as usize, false);
     for (c, bits) in empty_entries.iter() {
         let (dx, dz) = (c.x - cam.x + r, c.z - cam.z + r);
         if dx < 0 || dz < 0 || dx >= w || dz >= w {
@@ -57,6 +62,7 @@ fn dense_visibility_grid(
         for si in 0..h.min(32) {
             if bits & (1 << si) != 0 {
                 dense[base + si as usize] = VisibilitySet::all();
+                empty_grid[base + si as usize] = true;
             }
         }
     }
@@ -90,13 +96,15 @@ impl WalkJob {
         empty: &Mutex<EmptyColumns>,
         entries: &mut Vec<((ChunkPos, i32), VisibilitySet)>,
         empty_entries: &mut Vec<(ChunkPos, u32)>,
+        empty_grid: &mut Vec<bool>,
     ) -> VisibleMask {
         let r = self.view_distance + 1;
         let h = self.section_count;
         let cam = ChunkPos::new(self.cam_section.x, self.cam_section.z);
-        let dense = dense_visibility_grid(vis, empty, entries, empty_entries, cam, r, h);
+        let dense =
+            dense_visibility_grid(vis, empty, entries, empty_entries, cam, r, h, empty_grid);
         let w = 2 * r + 1;
-        compute_visible_mask(
+        let mut mask = compute_visible_mask(
             |c, si| {
                 let dx = c.x - cam.x + r;
                 let dz = c.z - cam.z + r;
@@ -111,7 +119,14 @@ impl WalkJob {
             self.min_section * 16,
             h,
             r,
-        )
+            self.view_distance,
+        );
+        // Vanilla's walk passes through empty sections but only puts sections with
+        // something to draw into its `sectionTree`; the draw list visits the order, so
+        // dropping the empty ones here saves the render thread a lookup each (at render
+        // distance 32 the walk reaches ~66k nodes, ~8k of them non-empty).
+        mask.retain_order(|n| !empty_grid[n as usize]);
+        mask
     }
 }
 
@@ -145,9 +160,15 @@ impl AsyncOcclusionWalker {
                 // The walk's snapshot buffers, reused across jobs (no allocation per walk).
                 let mut entries: Vec<((ChunkPos, i32), VisibilitySet)> = Vec::new();
                 let mut empty_entries: Vec<(ChunkPos, u32)> = Vec::new();
+                let mut empty_grid: Vec<bool> = Vec::new();
                 while let Ok(job) = job_rx.recv() {
-                    let mask =
-                        job.run(&vis_worker, &empty_worker, &mut entries, &mut empty_entries);
+                    let mask = job.run(
+                        &vis_worker,
+                        &empty_worker,
+                        &mut entries,
+                        &mut empty_entries,
+                        &mut empty_grid,
+                    );
                     if done_tx.send(mask).is_err() {
                         break;
                     }
