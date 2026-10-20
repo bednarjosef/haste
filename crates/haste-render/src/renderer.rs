@@ -47,6 +47,7 @@ pub use work_budget::WorkBudgetMode;
 #[cfg(test)]
 mod tests;
 mod textures;
+mod visible_list;
 mod visible_sections;
 
 /// Camera for one frame (docs/INTERFACES.md FrameInput).
@@ -314,6 +315,11 @@ pub struct Renderer {
     /// sections that have no mesh, so unmeshed air never blocks it.
     known_empty: Arc<Mutex<crate::occlusion::EmptyColumns>>,
     visible_mask: crate::occlusion::VisibleMask,
+    /// Bumped whenever `visible_mask` is replaced, for `visible_list`.
+    visible_generation: u64,
+    /// The mask's resident sections in visit order, rebuilt when the mask or the slab
+    /// changes (`renderer/visible_list.rs`).
+    visible_list: visible_list::VisibleList,
     /// Bumped every time a finished walk replaces `visible_mask` or the look crosses a
     /// 2-degree step, so the feed can re-check its held-back dirty sections.
     want_version: u64,
@@ -376,8 +382,6 @@ pub struct Renderer {
     /// Per-layer scratch lists the cull fills in walk order (Solid, Cutout,
     /// CutoutMipped, Translucent), concatenated into `draw_list` per frame.
     layer_buckets: [Vec<SectionDraw>; 4],
-    /// Scratch for grouping the opaque draws by arena (`draw_list.rs`).
-    arena_offsets: Vec<u32>,
     origins: Vec<[i32; 3]>,
     origin_buffer: wgpu::Buffer,
     origin_capacity: usize,

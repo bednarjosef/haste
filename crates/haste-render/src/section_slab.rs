@@ -101,6 +101,9 @@ pub struct SectionSlab {
     dead_layers: usize,
     /// The compaction's second buffer, kept so a compaction allocates nothing.
     layer_scratch: Vec<SlabLayer>,
+    /// Bumped by every change to a record (insert, remove, clear, mutable access), so a
+    /// list built from the slab knows when to rebuild (`renderer/visible_list.rs`).
+    generation: u64,
 }
 
 /// Dead layer entries tolerated before a compaction (a section has at most a few dozen).
@@ -128,7 +131,13 @@ impl SectionSlab {
             free: Vec::new(),
             dead_layers: 0,
             layer_scratch: Vec::new(),
+            generation: 0,
         }
+    }
+
+    /// The change counter: equal values mean no record changed in between.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn len(&self) -> usize {
@@ -179,6 +188,7 @@ impl SectionSlab {
             bonus: false,
         });
         self.index.insert(key(s.pos), slot);
+        self.generation += 1;
         old
     }
 
@@ -189,6 +199,7 @@ impl SectionSlab {
     pub fn remove(&mut self, pos: &SectionPos) -> Option<ResidentSection> {
         let slot = self.index.remove(&key(*pos))?;
         let s = self.slots[slot as usize].take()?;
+        self.generation += 1;
         // The newest record's range is the tail and goes at once; any other becomes dead
         // entries until the next compaction.
         let end = (s.layers_base + s.layers_len) as usize;
@@ -235,6 +246,7 @@ impl SectionSlab {
     /// The record at `pos`, mutably (to set the bonus flag).
     pub fn get_mut(&mut self, pos: SectionPos) -> Option<&mut SlabSection> {
         let &slot = self.index.get(&key(pos))?;
+        self.generation += 1;
         self.slots[slot as usize].as_mut()
     }
 
@@ -245,6 +257,7 @@ impl SectionSlab {
 
     /// Iterate every live record mutably (clearing bonus bits).
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut SlabSection> {
+        self.generation += 1;
         self.slots.iter_mut().flatten()
     }
 
@@ -261,6 +274,7 @@ impl SectionSlab {
         self.index.clear();
         self.free.clear();
         self.dead_layers = 0;
+        self.generation += 1;
     }
 
     /// Packs the live slots' layer ranges into the scratch buffer and swaps the two, so
@@ -332,6 +346,36 @@ mod tests {
         slab.insert(resident(SectionPos::new(1, 2, 3), 1));
         assert_eq!(slab.len(), 2);
         assert_eq!(slab.iter().count(), 2);
+    }
+
+    #[test]
+    fn every_change_bumps_the_generation() {
+        let mut slab = SectionSlab::new();
+        let mut last = slab.generation();
+        let mut changed = |slab: &SectionSlab| {
+            let g = slab.generation();
+            let bumped = g != last;
+            last = g;
+            bumped
+        };
+        let pos = SectionPos::new(0, 0, 0);
+        slab.insert(resident(pos, 1));
+        assert!(changed(&slab));
+        assert!(slab.get(pos).is_some());
+        assert!(!changed(&slab), "a read changes nothing");
+        slab.get_mut(pos).unwrap().bonus = true;
+        assert!(changed(&slab));
+        slab.iter_mut().for_each(|s| s.bonus = false);
+        assert!(changed(&slab));
+        slab.remove(&pos);
+        assert!(changed(&slab));
+        slab.remove(&pos);
+        assert!(
+            !changed(&slab),
+            "removing an absent section changes nothing"
+        );
+        slab.clear();
+        assert!(changed(&slab));
     }
 
     #[test]
