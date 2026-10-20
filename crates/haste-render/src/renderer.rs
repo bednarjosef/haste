@@ -24,6 +24,7 @@ pub(crate) use surface::Offscreen;
 mod camera;
 mod draw_list;
 mod frame_setup;
+mod frames_in_flight;
 mod gpu_cull;
 mod gui_pass;
 mod init;
@@ -351,6 +352,8 @@ pub struct Renderer {
     scheduled_for: Option<(SectionPos, i32)>,
     /// A walk is scheduled and not yet collected.
     walk_in_flight: bool,
+    /// Offscreen frames the CPU has queued (see `frames_in_flight.rs`).
+    offscreen_frames: frames_in_flight::FramesInFlight,
     /// Newly uploaded sections next to a visible one, drawn until the new mask
     /// arrives (vanilla propagates from newly loaded sections on the render
     /// thread). A dense list plus a bit on each named slab record (so a

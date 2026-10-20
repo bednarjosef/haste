@@ -323,7 +323,6 @@ impl Renderer {
             }
         };
         let present = held_surface_texture.is_some();
-        let _ = present;
 
         self.timings.acquire_ms = lap(&mut mark);
         // Frustum cull in camera-relative space (f32 precision far from the origin), into the
@@ -538,7 +537,11 @@ impl Renderer {
             None => false,
         };
         self.timings.encode_ms = lap(&mut mark);
-        self.gpu.queue.submit([encoder.finish()]);
+        let submission = self.gpu.queue.submit([encoder.finish()]);
+        if !present {
+            self.offscreen_frames
+                .submitted(&self.gpu.device, submission);
+        }
         self.gpu_cull.after_submit();
         if let Some(t) = &mut self.timer {
             t.after_submit(resolved);

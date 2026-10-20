@@ -452,6 +452,7 @@ impl Renderer {
             visible_for: None,
             scheduled_for: None,
             walk_in_flight: false,
+            offscreen_frames: Default::default(),
             bonus_list: Vec::new(),
             bonus_dirty: false,
             walk,
