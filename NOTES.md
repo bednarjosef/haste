@@ -481,3 +481,27 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
 - **2026-10-20 The scratchpad is RAM.** `/tmp` is a 16 GiB tmpfs; a night of 240 MB release
   binaries kept for A/B runs had taken 8 GiB of it. Delete experiment binaries as soon as
   their comparison is done.
+- **2026-10-20 What the embedded JVM costs.** Windowed bench at rd 12 (settled RSS 591 MiB):
+  heap 152 MiB committed (104 used), metaspace 68 MiB, code cache 11 MiB, about 231 MiB before
+  the JVM's native overhead (GC tables, thread stacks, the library), which was not measured; the
+  estimate is 250-300 MiB of the 591, against vanilla's 1.45-1.7 GB process. Per frame it costs
+  almost nothing: everything outside the renderer (the JVM's GUI building included) took
+  0.1-0.3 ms, and none of the traced slow frames came from it. Boot is 6.6 s (4.8 s of it
+  vanilla's bootstrap) before the HUD is ready. Porting the HUD, chat and screens to Rust and
+  keeping Java only for mods was considered and not done: vanilla has 127 screen classes plus
+  the HUD, chat with Brigadier suggestions and text components, all of which would have to be
+  ported exactly; the JVM returns with the first mod anyway; and the HUD and screens are among
+  the most-modded parts (`Gui.render` injections, `Screen` subclasses), so a Rust UI would need
+  a landmark and a proxy for every one of them. Cheaper steps first: class data sharing, a
+  measured native footprint, trimmed heap limits, a background boot (roadmap F1-F4). A no-mods
+  Rust UI stays possible later but changes architecture rule 1 (roadmap F11).
+- **2026-10-20 Slow frames are the GPU's clock, not Haste's work.** `--bench-trace PATH` writes
+  every measured frame as a CSV row. At the reference spot on power saver the slow 1% spent
+  their time waiting for a swapchain image (rd 12: 6.3 of 8.2 ms) with no uploads, steady CPU
+  steps and 0.1-0.3 ms outside the renderer; the same still view took 3-15 ms of GPU time
+  within a fraction of a second (the GPU timer is read every 4 frames). Mailbox against
+  Immediate made no difference (rd 32 p99 18.2 against 17.1 ms). Haste had no frame limiter at
+  all; vanilla's (`FramerateLimiter`, `FramerateLimitTracker`) is ported now, and a cap evens
+  the pacing: rd 32 at 60 FPS p50 16.65, p99 18.39 ms (unlimited 11.81 / 18.21), rd 12 at 90 FPS
+  p50 11.06, p99 13.05 ms (unlimited 3.66 / 6.89). The 16.7 ms p99 seen at rd 32 in performance
+  mode is not traced yet (roadmap F7).
