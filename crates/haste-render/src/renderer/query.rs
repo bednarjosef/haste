@@ -69,6 +69,32 @@ impl Renderer {
         }
     }
 
+    /// The GPU allocator's live allocations grouped by label, largest first (`limit`
+    /// groups, plus the allocator's reserved total); None when the backend has no report.
+    pub fn gpu_allocation_report(&self, limit: usize) -> Option<String> {
+        let report = self.gpu.device.generate_allocator_report()?;
+        let mut groups: std::collections::HashMap<&str, (u64, u32)> =
+            std::collections::HashMap::new();
+        for a in &report.allocations {
+            let g = groups.entry(a.name.as_str()).or_default();
+            g.0 += a.size;
+            g.1 += 1;
+        }
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        groups.sort_by_key(|g| std::cmp::Reverse(g.1 .0));
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        let mut out = format!(
+            "gpu allocations: {:.1} MiB allocated, {:.1} MiB reserved in {} blocks",
+            mib(report.total_allocated_bytes),
+            mib(report.total_reserved_bytes),
+            report.blocks.len()
+        );
+        for (name, (bytes, n)) in groups.into_iter().take(limit) {
+            out.push_str(&format!("\n  {:>8.1} MiB  {n:>5} x {name}", mib(bytes)));
+        }
+        Some(out)
+    }
+
     /// CPU phase and GPU pass timings of the last frame.
     pub fn timings(&self) -> crate::timing::FrameTimings {
         self.timings
