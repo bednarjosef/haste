@@ -237,6 +237,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         height: args.height,
         adapter,
     };
+    let ab_block = super::ab::block();
     let started = Instant::now();
     loop {
         let elapsed = started.elapsed().as_secs_f32();
@@ -306,6 +307,9 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
                 .unwrap_or_else(|| Arc::new(Default::default()));
             renderer.prepare_particles(&snapshot, camera, partial_tick, None);
         }
+        if let Some(block) = ab_block {
+            haste_render::experiment::set(super::ab::variant(samples.len() as u32, block));
+        }
         let stats = renderer.render(&frame)?;
         let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
@@ -333,6 +337,9 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let summary = bench_summary(&samples, renderer.premesh_summary());
     println!("{}", summary.text(&meta));
     print_slowest_frames(&samples);
+    if let Some(block) = ab_block {
+        println!("{}", super::ab::report(&samples, block));
+    }
     if let Some(out) = &args.bench_out {
         let json = serde_json::json!({
             "frames": summary.frames,
