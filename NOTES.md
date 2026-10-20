@@ -471,6 +471,13 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   layers (layer x facing group). A facing mask per section and a counting sort by arena saved
   only 0.06 ms; the next step is a flat per-visible-section cache rebuilt when the walk result
   or the slab changes. Frames are GPU-bound on this laptop, so this pays on faster GPUs.
+  Done (`renderer/visible_list.rs`): the cached list, grouped by arena at rebuild, with each
+  layer's groups as storage-order offsets walked by bitmask, takes the draw list from 1.1 to
+  0.55 ms per frame. What is left: emit 0.27 ms (2803 frustum tests and pushes of 64-byte
+  draws), copying the buckets into the draw list and summing indices 0.15 ms, the per-draw
+  GPU data 0.13 ms. Shrinking `SectionDraw` (the bounds belong to the section, not the draw)
+  is the next lever. The cache only helps frames where neither the mask nor the slab
+  changed; while chunks stream in it rebuilds every frame at the old cost.
 - **2026-10-20 The scratchpad is RAM.** `/tmp` is a 16 GiB tmpfs; a night of 240 MB release
   binaries kept for A/B runs had taken 8 GiB of it. Delete experiment binaries as soon as
   their comparison is done.
