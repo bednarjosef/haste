@@ -60,29 +60,26 @@ impl SlabLayer {
     /// back-facing when the box's nearest point along the normal is already past the
     /// camera. Group 6 is never back-facing.
     pub fn back_facing(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
-        if self.dir == 6 {
-            return false;
-        }
-        if self.dir > 6 {
-            let [sx, sz] = crate::mesher::DIAGONALS[self.dir as usize - 7];
-            let near = |s: f32, lo: f32, hi: f32| if s > 0.0 { s * lo } else { s * hi };
-            return near(sx, lo[0], hi[0]) + near(sz, lo[2], hi[2]) > 0.0;
-        }
-        // Direction axis: down/up = y, north/south = z, west/east = x.
-        let (axis, positive) = match self.dir {
-            0 => (1, false),
-            1 => (1, true),
-            2 => (2, false),
-            3 => (2, true),
-            4 => (0, false),
-            _ => (0, true),
-        };
-        if positive {
-            lo[axis] > 0.0
-        } else {
-            hi[axis] < 0.0
-        }
+        front_groups(lo, hi) & (1 << self.dir) == 0
     }
+}
+
+/// The facing groups (bit `dir`) of a section that are not back-facing from the camera,
+/// [`SlabLayer::back_facing`] for every group at once: the draw list tests a section's
+/// groups with one mask instead of one test per group.
+pub fn front_groups(lo: [f32; 3], hi: [f32; 3]) -> u16 {
+    // Direction axis: down/up = y, north/south = z, west/east = x.
+    let mut mask = 1u16 << 6;
+    let bit = |back: bool, dir: u16| u16::from(!back) << dir;
+    mask |= bit(hi[1] < 0.0, 0) | bit(lo[1] > 0.0, 1);
+    mask |= bit(hi[2] < 0.0, 2) | bit(lo[2] > 0.0, 3);
+    mask |= bit(hi[0] < 0.0, 4) | bit(lo[0] > 0.0, 5);
+    let near = |s: f32, lo: f32, hi: f32| if s > 0.0 { s * lo } else { s * hi };
+    for (i, [sx, sz]) in crate::mesher::DIAGONALS.iter().enumerate() {
+        let back = near(*sx, lo[0], hi[0]) + near(*sz, lo[2], hi[2]) > 0.0;
+        mask |= bit(back, 7 + i as u16);
+    }
+    mask
 }
 
 /// Dense storage of resident sections with `SectionPos` lookup: a slab of

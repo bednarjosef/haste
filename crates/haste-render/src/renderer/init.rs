@@ -464,6 +464,7 @@ impl Renderer {
             drain_buf: Vec::new(),
             mesh_carry: Vec::new(),
             layer_buckets: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            arena_offsets: Vec::new(),
             origins: Vec::new(),
             origin_buffer,
             origin_capacity: 4096,
