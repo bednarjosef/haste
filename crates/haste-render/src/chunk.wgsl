@@ -49,14 +49,16 @@ struct VertexIn {
     @location(4) origin: vec3<i32>,
 };
 
+// Three outputs per vertex (vanilla terrain.vsh has five, fewer components): the pass is
+// bound by vertex and primitive throughput, and on RDNA every output is one more vec4 the
+// vertex exports, so the colour and the fog share one.
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) sprite_uv: vec2<f32>,
-    @location(1) light: vec3<f32>,
-    @location(2) tint: vec3<f32>,
-    @location(3) fog: f32,
-    @location(4) @interpolate(flat) sprite: u32,
-    @location(5) world_dist: f32,
+    // rgb: vanilla's `vertexColor` (tint, face shade and AO times the lightmap texel, all per
+    // vertex as terrain.vsh does); a: the fog factor.
+    @location(1) color_fog: vec4<f32>,
+    @location(2) @interpolate(flat) sprite: u32,
 };
 
 const POS_RANGE: f32 = 24.0;
@@ -157,19 +159,18 @@ fn finish_vertex(
     // (two sides, the diagonal, the face cell), each 1.0 or 0.2 — i.e.
     // 1 - 0.2 * occluders.
     let ao = 1.0 - 0.2 * f32(ao_count);
-    out.light = light_color16(sky16, block16) * ao * face_shade(shade_index);
-    out.tint = tint;
+    let color = tint * light_color16(sky16, block16) * ao * face_shade(shade_index);
 
     // Fog: vanilla's two linear bands, both per-vertex like its vertex-shader varyings —
     // the environmental band on the spherical distance, the render distance band on the
     // cylindrical distance (max of horizontal and |y|); the fragment takes their max.
     let spherical = length(rel);
     let cylindrical = max(length(rel.xz), abs(rel.y));
-    out.world_dist = spherical;
-    out.fog = max(
+    let fog = max(
         linear_fog_value(spherical, camera.fog_env_start, camera.fog_env_end),
         linear_fog_value(cylindrical, camera.fog_rd_start, camera.fog_rd_end),
     );
+    out.color_fog = vec4<f32>(color, fog);
     return out;
 }
 
@@ -393,7 +394,8 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     }
     // Vanilla's terrain shader (terrain.vsh/terrain.fsh) does all of its colour math on
     // the encoded (sRGB) values, into a plain RGBA8 target: texel * vertex colour (tint,
-    // AO and face shade) * lightmap texel, then the fog mix with the encoded fog colour.
+    // AO and face shade times the lightmap texel, multiplied per vertex), then the fog
+    // mix with the encoded fog colour.
     // The atlas here is an UNORM texture like vanilla's (`TextureAtlas.createTexture`),
     // so the sample is already the encoded texel (and the GPU filters encoded values,
     // like vanilla's). The target view is non-sRGB, so the encoded result is written raw
@@ -402,8 +404,8 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     // there instead. Doing the multiplies on linear values instead lifts every
     // factor below 1 to roughly its 1/2.4th power (a 0.6 side face or a two-occluder AO
     // corner draws ~25% too bright).
-    let lit = color.rgb * in.tint * in.light;
-    let fogged = mix(lit, srgb_encode(camera.fog_color.rgb), in.fog);
+    let lit = color.rgb * in.color_fog.rgb;
+    let fogged = mix(lit, srgb_encode(camera.fog_color.rgb), in.color_fog.a);
     return vec4<f32>(select(fogged, srgb_decode(fogged), camera.hw_srgb == 1.0), color.a);
 }
 
