@@ -376,6 +376,8 @@ pub struct Renderer {
     /// Per-layer scratch lists the cull fills in walk order (Solid, Cutout,
     /// CutoutMipped, Translucent), concatenated into `draw_list` per frame.
     layer_buckets: [Vec<SectionDraw>; 4],
+    /// Scratch for grouping the opaque draws by arena (`draw_list.rs`).
+    arena_offsets: Vec<u32>,
     origins: Vec<[i32; 3]>,
     origin_buffer: wgpu::Buffer,
     origin_capacity: usize,

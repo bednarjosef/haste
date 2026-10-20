@@ -9,6 +9,9 @@ use haste_core::SectionPos;
 
 use super::{Renderer, SectionDraw};
 
+#[cfg(test)]
+mod tests;
+
 impl Renderer {
     /// Fills `self.draw_list` from the visible sections and returns
     /// `(sections_total, draws, indices_drawn)` for the frame stats.
@@ -57,9 +60,10 @@ impl Renderer {
                 (lo[2] + hi[2]) * 0.5,
             )
             .length_squared();
+            let front = crate::section_slab::front_groups(lo, hi);
             for l in sections.layers(s) {
                 // Skip a direction group facing away from the camera.
-                if l.back_facing(lo, hi) {
+                if front & (1 << l.dir) == 0 {
                     continue;
                 }
                 // Sort key: ascending distance for opaque (early depth),
@@ -100,14 +104,6 @@ impl Renderer {
             }
         };
         self.for_each_visible_section(|pos| emit(&mut buckets, pos));
-        // Group the opaque buckets by arena: the draw loop issues one multi-draw
-        // call per run sharing a layer and an arena, and the visit order
-        // interleaves the arenas, so ungrouped the frame pays thousands of draw
-        // dispatches (2232 measured at rd 32 over 16 arenas). Depth-tested
-        // layers do not depend on order (terrain faces never coincide).
-        for b in buckets.iter_mut().take(3) {
-            b.sort_unstable_by_key(|d| d.arena);
-        }
         // Translucent back to front: the key is the negated distance, so
         // ascending key order is far first. Stable, so a section's facing
         // groups (equal keys) keep their mesh order.
@@ -116,9 +112,16 @@ impl Renderer {
         }
         let mut draws = std::mem::take(&mut self.draw_list);
         draws.clear();
-        for b in buckets.iter() {
-            draws.extend_from_slice(b);
+        // Group the opaque buckets by arena: the draw loop issues one multi-draw
+        // call per run sharing a layer and an arena, and the visit order
+        // interleaves the arenas, so ungrouped the frame pays thousands of draw
+        // dispatches (2232 measured at rd 32 over 16 arenas). A counting sort,
+        // stable, so each arena's draws keep the walk's visit order.
+        let arenas = self.arenas.arenas.len();
+        for b in buckets.iter().take(3) {
+            extend_grouped_by_arena(&mut draws, b, arenas, &mut self.arena_offsets);
         }
+        draws.extend_from_slice(&buckets[3]);
         self.layer_buckets = buckets;
         let sections_total = self.sections.len() as u32;
         let drawn = draws.len() as u32;
@@ -141,5 +144,35 @@ impl Renderer {
         );
         self.draw_list = draws;
         (sections_total, drawn, indices_drawn)
+    }
+}
+
+/// Appends `src` to `out` grouped by arena (ascending), keeping the order within each
+/// arena; `offsets` is reused scratch.
+fn extend_grouped_by_arena(
+    out: &mut Vec<SectionDraw>,
+    src: &[SectionDraw],
+    arenas: usize,
+    offsets: &mut Vec<u32>,
+) {
+    let Some(&first) = src.first() else {
+        return;
+    };
+    offsets.clear();
+    offsets.resize(arenas + 1, 0);
+    for d in src {
+        offsets[d.arena as usize + 1] += 1;
+    }
+    let base = out.len() as u32;
+    let mut sum = base;
+    for o in offsets.iter_mut() {
+        sum += *o;
+        *o = sum - *o;
+    }
+    out.resize(out.len() + src.len(), first);
+    for d in src {
+        let at = &mut offsets[d.arena as usize + 1];
+        out[*at as usize] = *d;
+        *at += 1;
     }
 }
