@@ -471,6 +471,7 @@ impl EntityRenderer {
             map_decoration_rects: HashMap::new(),
             map_decoration_names: Vec::new(),
             drawn: 0,
+            leash_lines: Vec::new(),
         }
     }
 }

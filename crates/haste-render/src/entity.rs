@@ -34,6 +34,10 @@ mod flame;
 #[cfg(test)]
 mod flame_tests;
 mod item;
+mod leash;
+#[cfg(test)]
+mod leash_tests;
+pub use leash::LeashLine;
 mod item_entity;
 mod item_frame;
 pub mod map;
@@ -69,7 +73,7 @@ pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matr
 #[cfg(test)]
 use hand::{arm_model, hand_root_matrix, item_arm_matrix};
 pub(crate) use humanoid::{elytra_model, humanoid_armor};
-use humanoid::{missing_item_model, missing_texture, placeholder_texture};
+use humanoid::{missing_item_model, missing_texture, placeholder_texture, white_texture};
 use item_display::item_model_bbox;
 pub(crate) use item_display::{
     argb_linear, item_display_matrix, item_frame_item_transform, item_frame_transform,
@@ -320,6 +324,8 @@ pub struct EntityRenderer {
     /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
     map_decoration_names: Vec<Identifier>,
     pub drawn: u32,
+    /// The leash ropes to draw this frame (set by the client through [`Self::set_leash_lines`]).
+    leash_lines: Vec<leash::LeashLine>,
 }
 
 impl EntityRenderer {
@@ -542,6 +548,14 @@ impl EntityRenderer {
                         below_name: e.below_name.clone(),
                     });
                 }
+            }
+        }
+        // `LeashFeatureRenderer`: the ropes after the entities, on the white texel so the
+        // colour is the rope's own.
+        if !self.leash_lines.is_empty() {
+            let white = self.texture_rect(&parse_tex("haste:white"), assets);
+            for line in &self.leash_lines {
+                leash::push_leash(&mut self.vertices, line, camera, white);
             }
         }
         if self.vertices.len() > self.vertex_capacity {

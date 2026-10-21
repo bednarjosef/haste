@@ -53,6 +53,11 @@ impl Session {
                 }
                 entities.remove(&ids);
             }
+            // `ClientPacketListener.handleEntityLinkPacket`: a holder of -1 unties the leash.
+            P::SetEntityLink(s) => {
+                let holder = (s.holder != -1).then_some(EntityId(s.holder));
+                entities.set_leash(EntityId(s.attached), holder);
+            }
             P::SetPassengers(s) => {
                 let vehicle = EntityId(s.vehicle);
                 let passengers: Vec<EntityId> = s.passengers.iter().map(|i| EntityId(*i)).collect();

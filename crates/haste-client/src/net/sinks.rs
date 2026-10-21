@@ -159,6 +159,10 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::set_leash` (`SetEntityLink`): `holder` `None` unties. Default no-op.
+    fn set_leash(&mut self, attached: EntityId, holder: Option<EntityId>) {
+        let _ = (attached, holder);
+    }
     /// `EntityStore::set_world_age` (from `set_time`); the bee's anger end time compares
     /// against it. Default no-op.
     fn set_world_age(&mut self, world_age: i64) {
@@ -323,6 +327,9 @@ impl EntitySink for EntityStore {
     }
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
         EntityStore::set_passengers(self, vehicle, passengers)
+    }
+    fn set_leash(&mut self, attached: EntityId, holder: Option<EntityId>) {
+        EntityStore::set_leash(self, attached, holder)
     }
     fn set_world_age(&mut self, world_age: i64) {
         EntityStore::set_world_age(self, world_age)
