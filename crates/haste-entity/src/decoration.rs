@@ -202,6 +202,8 @@ pub fn build(
         crate::registry::DecorationKind::LightningBolt => None,
         // Handled before the facing is parsed (not hanging).
         crate::registry::DecorationKind::ExperienceOrb => None,
+        // Built from the entity's interpolated state (`crate::display`), not from here.
+        crate::registry::DecorationKind::Display(_) => None,
     }
 }
 

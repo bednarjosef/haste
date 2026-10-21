@@ -58,6 +58,14 @@ impl Session {
                 // constant dimension layer).
                 self.dimension_music_volume =
                     crate::app::biomes::audio::dimension_music_volume(regs, &dim);
+                // A new `LocalPlayer`, so new ambient handlers; a new level also stops
+                // every sound (`Minecraft.updateLevelInEngines`). Its dimension type's
+                // `audio/ambient_sounds` is the attribute's new constant layer.
+                let dimension_changed = self.dimension.name != dim.name;
+                self.ambient_sound_handlers
+                    .respawn(&mut self.ticking_sounds, dimension_changed);
+                self.ambient_sounds_layers.dimension =
+                    crate::app::biomes::ambient_sounds::dimension_ambient_sounds(regs, &dim);
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding. A new level also starts
                 // with vanilla's default border until its initialize_border arrives.

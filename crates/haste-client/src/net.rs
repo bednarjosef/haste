@@ -47,6 +47,14 @@ pub struct Session {
     /// The dimension type's `audio/music_volume` (vanilla's constant dimension layer of
     /// the environment attribute system): the base the camera's biome overrides each tick.
     pub dimension_music_volume: f32,
+    /// The `audio/ambient_sounds` attribute's layers for the current level (the
+    /// dimension type's value, each synced biome's override), read at the player's
+    /// position by the biome ambient sounds handler.
+    pub ambient_sounds_layers: crate::app::biomes::ambient_sounds::AmbientSoundsLayers,
+    /// The local player's ambient sound handlers (vanilla `LocalPlayer.ambientSoundHandlers`).
+    pub ambient_sound_handlers: crate::sound::AmbientSoundHandlers,
+    /// The ticking sound instances they start (vanilla `SoundEngine.tickingSounds`).
+    pub ticking_sounds: crate::sound::TickingSounds,
     /// The camera's `MUSIC_VOLUME` as of the last tick (vanilla
     /// `Minecraft.getMusicVolume`): `dimension_music_volume` overridden by the camera's
     /// biome, clamped to the attribute's unit range (`biomes::audio` resolves it).
@@ -164,6 +172,10 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// The totem pops in progress (vanilla `TrackingEmitter`s the status 35 adds), ticked by
+    /// the game thread into the particle pool, and their random (vanilla's level random).
+    pub totem_emitters: Vec<crate::game::totem_emitter::TotemEmitter>,
+    pub totem_rng: haste_audio::random::LegacyRandom,
     /// Block particles queued since the last tick (our own break and mining start, and the
     /// server's `level_event`s), drained by the game thread into the shared pool.
     pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
@@ -255,6 +267,9 @@ impl Session {
             biome_audio: Vec::new(),
             dimension_music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
             music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
+            ambient_sounds_layers: Default::default(),
+            ambient_sound_handlers: Default::default(),
+            ticking_sounds: Default::default(),
             breaking: HashMap::new(),
             lids: HashMap::new(),
             lid_states: None,
@@ -298,6 +313,13 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            totem_emitters: Vec::new(),
+            totem_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
             block_particle_requests: Vec::new(),
             item_particle_requests: Vec::new(),
             explosions: explosion_tracker::ExplosionTracker::default(),
@@ -397,6 +419,12 @@ impl Session {
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.remote_use.clear();
+                // A new level and player: the ambient handlers start over and every sound
+                // stops (`Minecraft.updateLevelInEngines`); the dimension layer re-resolves.
+                self.ambient_sound_handlers
+                    .respawn(&mut self.ticking_sounds, true);
+                self.ambient_sounds_layers.dimension =
+                    crate::app::biomes::ambient_sounds::dimension_ambient_sounds(regs, &dim);
                 self.dimension = dim;
                 self.world_border = crate::world_border::WorldBorder::default();
                 self.entity_id = EntityId(l.entity_id);
@@ -530,6 +558,7 @@ mod remote_use;
 mod session_tick;
 mod sinks;
 mod sync_block_state;
+mod totem;
 mod vehicle;
 mod weather;
 mod world;

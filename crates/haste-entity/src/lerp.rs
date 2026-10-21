@@ -28,6 +28,9 @@ pub(crate) struct LerpState {
     target_pitch: f32,
     /// Ticks left in the current window; 0 = resting on the targets.
     remaining: u8,
+    /// `AbstractInterpolationHandler.interpolationSteps`: the window length, 3 for most
+    /// entities; a display entity's comes from its teleport duration (0 snaps).
+    steps: u8,
     /// `InterpolationHandler.NO_OP`: targets are never eased toward.
     no_op: bool,
 }
@@ -39,6 +42,7 @@ impl LerpState {
             target_yaw: yaw,
             target_pitch: pitch,
             remaining: 0,
+            steps: INTERPOLATION_STEPS,
             no_op: false,
         }
     }
@@ -50,22 +54,24 @@ impl LerpState {
         self.remaining = 0;
     }
 
+    /// `LinearInterpolationHandler.setInterpolationLength`: the next window's length (the one
+    /// in flight keeps its remaining steps).
+    pub fn set_steps(&mut self, steps: u8) {
+        self.steps = steps;
+    }
+
     /// `AbstractInterpolationHandler.interpolateTo`: head for `pos` and/or `rot` over 3 steps.
     /// A part the packet lacks keeps the in-flight target, or the entity's `current` value when
     /// nothing is in flight. A target identical to the one already in flight does not restart
-    /// the window (the `is` check before `startInterpolating`). Returns false for the no-op
-    /// handler, whose caller applies the values itself; the target is still kept as the base
-    /// later short-delta moves add to.
+    /// the window (the `is` check before `startInterpolating`). With a zero-step window the
+    /// handler does not ease at all: the target comes back for the caller to `snapTo`
+    /// (position, yaw, pitch), and nothing stays in flight.
     pub fn interpolate_to(
         &mut self,
         pos: Option<DVec3>,
         rot: Option<(f32, f32)>,
         current: (DVec3, f32, f32),
-    ) -> bool {
-        if self.no_op {
-            self.target = pos.unwrap_or(self.target);
-            return false;
-        }
+    ) -> Option<(DVec3, f32, f32)> {
         let active = self.remaining > 0;
         let (cur_pos, cur_yaw, cur_pitch) = if active {
             (self.target, self.target_yaw, self.target_pitch)
@@ -74,14 +80,18 @@ impl LerpState {
         };
         let pos = pos.unwrap_or(cur_pos);
         let (yaw, pitch) = rot.unwrap_or((cur_yaw, cur_pitch));
+        if self.steps == 0 {
+            self.snap(pos, yaw, pitch);
+            return Some((pos, yaw, pitch));
+        }
         if active && self.target == pos && self.target_yaw == yaw && self.target_pitch == pitch {
-            return true;
+            return None;
         }
         self.target = pos;
         self.target_yaw = yaw;
         self.target_pitch = pitch;
-        self.remaining = INTERPOLATION_STEPS;
-        true
+        self.remaining = self.steps;
+        None
     }
 
     /// `Entity.snapTo`: abandon any in-flight smoothing and rest on the new values.
@@ -124,17 +134,24 @@ pub(crate) struct LerpTarget<'a> {
 
 impl Entity {
     /// `Entity.moveOrInterpolateTo`: hand the packet's position and/or rotation to the
-    /// interpolation, or, when it does not take them (the no-op handler), set them at once.
+    /// interpolation (which may ask for a snap, for a zero-step window), or, for the no-op
+    /// handler, set them at once. The no-op handler still keeps the position as the base later
+    /// short-delta moves add to.
     pub(crate) fn move_or_interpolate_to(&mut self, pos: Option<DVec3>, rot: Option<(f32, f32)>) {
-        let current = (self.pos, self.yaw, self.pitch);
-        if !self.lerp.interpolate_to(pos, rot, current) {
+        if self.lerp.no_op {
             if let Some(pos) = pos {
+                self.lerp.target = pos;
                 self.pos = pos;
             }
             if let Some((yaw, pitch)) = rot {
                 self.yaw = yaw;
                 self.pitch = pitch;
             }
+            return;
+        }
+        let current = (self.pos, self.yaw, self.pitch);
+        if let Some(snap) = self.lerp.interpolate_to(pos, rot, current) {
+            self.snap_to(snap);
         }
     }
 
