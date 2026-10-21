@@ -13,6 +13,7 @@ pub mod dragon_fireball;
 pub mod eye;
 pub mod item_entity;
 pub mod lerp;
+pub mod living;
 pub mod local_player;
 pub mod metadata;
 pub mod minecart;

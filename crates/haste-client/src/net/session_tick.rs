@@ -3,7 +3,7 @@
 // screen effects' tick, and the accessors the renderer and the HUD read out between ticks.
 
 use haste_core::input::InputState;
-use haste_protocol::haste_core::BlockPos;
+use haste_protocol::haste_core::{BlockPos, Identifier};
 use haste_protocol::ServerboundPlay;
 
 use super::sinks::{NoBlocks, StriderWarm};
@@ -103,6 +103,14 @@ impl Session {
                 vehicle,
                 out,
             ),
+        }
+        // `Player.attack` -> `attackVisualEffects` -> `LocalPlayer.crit`: the local player's own
+        // critical hits start the crit emitter on the living target (a non-living target gets
+        // nothing, as `Player.attack` checks `instanceof LivingEntity`).
+        for id in self.player.take_own_crit_hits() {
+            if entities.is_living(id) {
+                self.create_tracking_emitter(id, Identifier::minecraft("crit"), entities);
+            }
         }
         // The pickup particles' tick, after the player moved this tick (vanilla's
         // `ParticleEngine.tick` runs after `tickEntities`/`level.tick`), so their target is the

@@ -152,6 +152,11 @@ pub trait EntitySink {
     fn wake_up(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::is_living` (`instanceof LivingEntity`). Default: not living.
+    fn is_living(&self, id: EntityId) -> bool {
+        let _ = id;
+        false
+    }
     /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
@@ -323,6 +328,9 @@ impl EntitySink for EntityStore {
     }
     fn wake_up(&mut self, id: EntityId) {
         EntityStore::wake_up(self, id)
+    }
+    fn is_living(&self, id: EntityId) -> bool {
+        EntityStore::is_living(self, id)
     }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)
