@@ -13,6 +13,7 @@
 //! * [`GameState`] is the Rust-owned state the proxies read through natives (inventory, chat
 //!   history, player name) and the outbox screens write to (sent chat messages).
 
+mod crate_dir;
 mod error;
 mod gui;
 mod host;

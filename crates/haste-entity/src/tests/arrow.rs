@@ -431,3 +431,68 @@ fn spectral_arrow_breathes_white_particles() {
     );
     assert_eq!(particles.len(), 0);
 }
+
+/// The trident runs the same client tick (`ThrownTrident` extends `AbstractArrow`) and is not
+/// drawn as an arrow.
+#[test]
+fn the_trident_is_an_abstract_arrow_but_not_an_arrow() {
+    let (Some(trident), Some(arrow_kind), Some(pig)) = (
+        kind_of("minecraft:trident"),
+        kind_of("minecraft:arrow"),
+        kind_of("minecraft:pig"),
+    ) else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    assert!(arrow::is_abstract_arrow(trident) && !arrow::is_arrow(trident));
+    assert!(arrow::is_abstract_arrow(arrow_kind));
+    assert!(!arrow::is_abstract_arrow(pig));
+}
+
+/// `ThrownTrident.getWaterInertia`: a trident in water keeps 0.99 of its speed where an arrow
+/// keeps 0.6 (then the air drag is skipped in water and gravity applies).
+#[test]
+fn a_trident_keeps_its_speed_in_water() {
+    let Some(trident) = kind_of("minecraft:trident") else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    let water = TestWorld {
+        contains: false,
+        hit: None,
+        water: true,
+    };
+    let mut e = arrow_entity(1, DVec3::new(0.0, 64.0, 0.0), DVec3::new(0.0, 0.0, 2.0));
+    e.kind = trident;
+    let mut particles = Vec::new();
+    arrow::tick(&mut e, &water, &mut particles);
+    assert!((e.velocity.z - 2.0 * 0.99).abs() < 1e-9, "{:?}", e.velocity);
+    assert!((e.velocity.y + arrow::GRAVITY).abs() < 1e-9);
+    // The step itself is the movement read before the inertia (`AbstractArrow.tick`).
+    assert!((e.pos.z - 2.0).abs() < 1e-9);
+}
+
+/// A returning trident (loyalty sets no-physics) is left to the server's position packets:
+/// the homing `ThrownTrident.tick` adds is not modelled.
+#[test]
+fn a_returning_trident_is_not_moved_by_the_client_tick() {
+    let Some(trident) = kind_of("minecraft:trident") else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    let mut e = arrow_entity(1, DVec3::new(0.0, 64.0, 0.0), DVec3::new(0.0, 0.0, 1.0));
+    e.kind = trident;
+    e.metadata.apply(&entries(&[(
+        arrow::FLAGS_INDEX,
+        MetadataValue::Byte(arrow::NO_PHYSICS_FLAG as i8),
+    )]));
+    let mut particles = Vec::new();
+    let air = TestWorld {
+        contains: false,
+        hit: None,
+        water: false,
+    };
+    arrow::tick(&mut e, &air, &mut particles);
+    assert_eq!(e.pos, DVec3::new(0.0, 64.0, 0.0));
+    assert_eq!(e.velocity, DVec3::new(0.0, 0.0, 1.0));
+}
