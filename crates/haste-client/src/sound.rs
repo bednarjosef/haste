@@ -25,12 +25,26 @@ use haste_protocol::wire::{IdOr, SoundEvent as InlineSoundEvent};
 use haste_protocol::ClientboundPlay;
 use haste_protocol::SyncedRegistries;
 
+mod ambient_sound_handlers;
+mod biome_ambient_sounds_handler;
 mod falls;
 mod own_block;
+mod sound_manager;
 mod steps;
+#[cfg(test)]
+mod test_output;
+mod ticking_sounds;
+mod under_liquid_ambient_sound_instance;
+mod under_liquid_sub_sound;
+mod underwater_ambient_sound_handler;
+pub use ambient_sound_handlers::{
+    AmbientLevel, AmbientPlayer, AmbientSoundHandlers, WorldBrightness,
+};
 pub use falls::{FallBlockRule, FallSounds, LandedOn};
 pub use own_block::{level_event_sound, OwnBlockSounds};
+pub use sound_manager::{NoSoundManager, SoundManager};
 pub use steps::{resolve_step_blocks, StepCtx, StepSounds};
+pub use ticking_sounds::TickingSounds;
 
 use crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT;
 

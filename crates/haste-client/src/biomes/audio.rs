@@ -74,19 +74,27 @@ pub fn camera_music_volume(
     camera: DVec3,
     dimension: f32,
 ) -> f32 {
-    // `QuartPos.fromBlock(Mth.floor(pos))`: the quart cell holding the block position.
-    let (x, y, z) = (camera.x.floor(), camera.y.floor(), camera.z.floor());
-    let (qx, qy, qz) = (x as i32 >> 2, y as i32 >> 2, z as i32 >> 2);
-    let biome = world
-        .chunk(ChunkPos::new(qx >> 2, qz >> 2))
-        .and_then(|c| c.section(qy >> 2))
-        .map(|s| s.biome((qx & 3) as u8, (qy & 3) as u8, (qz & 3) as u8))
-        .unwrap_or(BiomeId(0));
+    let biome = noise_biome_at(world, camera);
     biomes
         .get(biome.0 as usize)
         .and_then(|a| a.music_volume)
         .unwrap_or(dimension)
         .clamp(0.0, 1.0)
+}
+
+/// The biome a positional, not spatially interpolated environment attribute reads at
+/// `pos` (vanilla `BiomeManager.getNoiseBiomeAtPosition`): the raw stored quart cell
+/// holding the block position, no zoom fiddle; biome 0 where no chunk is loaded, like the
+/// tint lookup. No allocation.
+pub fn noise_biome_at(world: &haste_world::World, pos: DVec3) -> BiomeId {
+    // `QuartPos.fromBlock(Mth.floor(pos))`: the quart cell holding the block position.
+    let (x, y, z) = (pos.x.floor(), pos.y.floor(), pos.z.floor());
+    let (qx, qy, qz) = (x as i32 >> 2, y as i32 >> 2, z as i32 >> 2);
+    world
+        .chunk(ChunkPos::new(qx >> 2, qz >> 2))
+        .and_then(|c| c.section(qy >> 2))
+        .map(|s| s.biome((qx & 3) as u8, (qy & 3) as u8, (qz & 3) as u8))
+        .unwrap_or(BiomeId(0))
 }
 
 /// One attribute map's `minecraft:audio/music_volume`: a synced value is the override

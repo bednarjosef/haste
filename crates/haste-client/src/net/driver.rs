@@ -55,6 +55,11 @@ impl NetDriver {
         session.biome_audio = crate::app::biomes::audio::biome_audio(conn.registries());
         session.dimension_music_volume =
             crate::app::biomes::audio::dimension_music_volume(conn.registries(), &login.dimension);
+        // The `audio/ambient_sounds` layers the biome ambient sounds handler reads.
+        session.ambient_sounds_layers = crate::app::biomes::ambient_sounds::ambient_sounds_layers(
+            conn.registries(),
+            &login.dimension,
+        );
         let chat = chat_session::ClientChat::new(conn.profile().uuid, None);
         Ok(Self {
             conn,
