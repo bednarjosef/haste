@@ -416,6 +416,8 @@ impl EntityRenderer {
                         assets,
                     ),
                     Decoration::Arrow(a) => self.emit_arrow(e, a, camera, light, assets),
+                    // Display entities: their renderer comes in the next change.
+                    Decoration::Display(_) => {}
                     // Vanilla `FallingBlockRenderer` / `TntRenderer`: the entity's block
                     // state drawn as the block model (see the renderer modules).
                     Decoration::FallingBlock(f) => {

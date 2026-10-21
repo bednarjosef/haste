@@ -50,7 +50,9 @@ impl Entity {
             dimensions: dims.get(s.kind, Pose::Standing),
             metadata: Metadata::default(),
             equipment: Vec::new(),
-            lerp: LerpState::new(s.pos, s.yaw, s.pitch),
+            // `Display.createInterpolationHandler`: a zero-step window until the synched
+            // teleport duration sets one.
+            lerp: crate::display::lerp_state(s.kind, LerpState::new(s.pos, s.yaw, s.pitch)),
             nametag: None,
             is_player_type: false,
             walk: WalkAnimationState::default(),
@@ -90,6 +92,7 @@ impl Entity {
             arrow_in_ground: false,
             in_ground_time: 0,
             spectral: type_name == Some("minecraft:spectral_arrow"),
+            display: crate::display::DisplayState::for_kind(s.kind).map(Box::new),
         }
     }
 }

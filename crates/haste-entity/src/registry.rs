@@ -927,10 +927,14 @@ fn load_entity_type_names() -> Option<HashMap<RegistryIndex, &'static str>> {
 /// `LightningBolt`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecorationKind {
-    ItemFrame { glow: bool },
+    ItemFrame {
+        glow: bool,
+    },
     Painting,
     LightningBolt,
     ExperienceOrb,
+    /// `DisplayRenderer.BlockDisplayRenderer` / `ItemDisplayRenderer` / `TextDisplayRenderer`.
+    Display(crate::display::DisplayKind),
 }
 
 /// The decoration kind of an entity type (`minecraft:item_frame`, `glow_item_frame`,
@@ -947,7 +951,7 @@ pub fn decoration_kind(kind: RegistryIndex) -> Option<DecorationKind> {
         "minecraft:painting" => Some(DecorationKind::Painting),
         "minecraft:lightning_bolt" => Some(DecorationKind::LightningBolt),
         "minecraft:experience_orb" => Some(DecorationKind::ExperienceOrb),
-        _ => None,
+        name => crate::display::DisplayKind::for_name(name).map(DecorationKind::Display),
     }
 }
 

@@ -153,6 +153,8 @@ pub struct Entity {
     /// The entity is a `minecraft:spectral_arrow` (its own per-tick particle,
     /// `SpectralArrow.tick`).
     pub spectral: bool,
+    /// A display entity's interpolated render state (`crate::display`); `None` otherwise.
+    pub display: Option<Box<crate::display::DisplayState>>,
 }
 
 impl Entity {
@@ -182,6 +184,20 @@ impl Entity {
         } else {
             lerp(partial, self.prev_pitch, self.pitch)
         }
+    }
+
+    /// `Entity.snapTo`: jump to the values with no interpolation (the old position and
+    /// rotation move too, so no frame draws the gap) and drop any smoothing in flight.
+    fn snap_to(&mut self, (pos, yaw, pitch): (DVec3, f32, f32)) {
+        (self.pos, self.prev_pos) = (pos, pos);
+        (self.yaw, self.prev_yaw) = (yaw, yaw);
+        (self.pitch, self.prev_pitch) = (pitch, pitch);
+        self.lerp.snap(pos, yaw, pitch);
+    }
+
+    /// `LinearInterpolationHandler.setInterpolationLength` (a display's teleport duration).
+    pub(crate) fn set_interpolation_steps(&mut self, steps: u8) {
+        self.lerp.set_steps(steps);
     }
 
     /// The present (pos, yaw, pitch): what `LerpState` keeps for the part a packet lacks.
@@ -373,7 +389,9 @@ impl EntityStore {
     pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.lerp.on_delta(delta, e.current());
+                if let Some(snap) = e.lerp.on_delta(delta, e.current()) {
+                    e.snap_to(snap);
+                }
                 e.on_ground = on_ground;
             }
         }
@@ -384,7 +402,10 @@ impl EntityStore {
     pub fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.lerp.interpolate_to(None, Some((yaw, pitch)), e.current());
+                let current = e.current();
+                if let Some(snap) = e.lerp.interpolate_to(None, Some((yaw, pitch)), current) {
+                    e.snap_to(snap);
+                }
                 e.on_ground = on_ground;
             }
         }
@@ -399,17 +420,17 @@ impl EntityStore {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
                 e.on_ground = on_ground;
-                if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
-                    e.pos = pos;
-                    e.prev_pos = pos;
-                    e.yaw = yaw;
-                    e.prev_yaw = yaw;
-                    e.pitch = pitch;
-                    e.prev_pitch = pitch;
-                    e.lerp.snap(pos, yaw, pitch);
+                // A display's zero-step window snaps as well (`interpolateTo` with
+                // `interpolationSteps == 0`).
+                let snap = if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
+                    Some((pos, yaw, pitch))
                 } else {
+                    let current = e.current();
                     e.lerp
-                        .interpolate_to(Some(pos), Some((yaw, pitch)), e.current());
+                        .interpolate_to(Some(pos), Some((yaw, pitch)), current)
+                };
+                if let Some(snap) = snap {
+                    e.snap_to(snap);
                 }
             }
         }
@@ -501,6 +522,8 @@ impl EntityStore {
         if crate::arrow::is_arrow(e.kind) {
             crate::arrow::on_metadata(e, entries);
         }
+        // `Display.onSyncedDataUpdated`: flag what the next tick rebuilds.
+        crate::display::on_metadata(e, entries);
         // `onSyncedDataUpdated` for the living-flags byte: a use started or stopped.
         if e.is_living && e.metadata.living != old_living {
             crate::using_item::on_living_flags(e);
@@ -633,6 +656,10 @@ impl EntityStore {
                 pitch: &mut slot.pitch,
                 prev_pitch: &mut slot.prev_pitch,
             });
+            // `Display.tick`: the render state rebuilt from the synched data that changed.
+            if let Some(display) = slot.display.as_mut() {
+                display.tick(&slot.metadata, slot.tick_count);
+            }
             // `ItemEntity.tick`: gravity, move, drag, between position packets.
             if slot.is_item {
                 crate::item_entity::tick(slot, world);
