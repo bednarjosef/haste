@@ -64,6 +64,10 @@ fn linear_fog_value(dist: f32, start: f32, end: f32) -> f32 {
 
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
+    return lit_vertex(v);
+}
+
+fn lit_vertex(v: VertexIn) -> VertexOut {
     var out: VertexOut;
     out.clip = camera.view_proj * vec4<f32>(v.pos, 1.0);
     out.uv = v.uv;
@@ -80,6 +84,16 @@ fn vs_main(v: VertexIn) -> VertexOut {
         linear_fog_value(spherical, camera.fog_env_start, camera.fog_env_end),
         linear_fog_value(cylindrical, camera.fog_rd_start, camera.fog_rd_end),
     );
+    return out;
+}
+
+// The see-through text pass (vanilla `TEXT_SEE_THROUGH`, the `core/text` shader without the
+// world snippet): the vertex colour unlit by the light texture and never fogged.
+@vertex
+fn vs_unlit(v: VertexIn) -> VertexOut {
+    var out = lit_vertex(v);
+    out.light_color = vec3<f32>(1.0);
+    out.fog = 0.0;
     return out;
 }
 

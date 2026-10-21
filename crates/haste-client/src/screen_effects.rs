@@ -30,6 +30,7 @@ mod probe;
 mod spyglass;
 #[cfg(test)]
 mod tests;
+mod vignette;
 mod water;
 
 pub use camera_overlay::camera_overlay;
@@ -126,6 +127,9 @@ pub struct ViewEffects {
     /// The totem pop's item while its countdown runs (`LevelExtractor` copies the active
     /// `ItemActivation`); the renderer poses and draws it each frame. `None` when idle.
     pub item_activation: Option<haste_render::entity::ItemActivation>,
+    /// The world border's warning strength at the camera (`Hud.extractVignette`'s
+    /// `borderWarningStrength`): 0 outside the warning distance, 1 at the edge.
+    pub border_warning: f32,
 }
 
 impl ViewEffects {
@@ -169,15 +173,15 @@ pub struct Frame<'a> {
 impl Frame<'_> {
     /// This frame's screen-effect commands, in vanilla's draw order: the level pass's block,
     /// water and fire overlays (`ScreenEffectRenderer.submit`) first, then the HUD's camera
-    /// overlays (`Hud.extractCameraOverlays`: the item overlay, the freeze outline, the
-    /// spyglass scope, then the portal tint or the confusion overlay).
+    /// overlays (`Hud.extractCameraOverlays`: the vignette, the item overlay, the freeze outline,
+    /// the spyglass scope, then the portal tint or the confusion overlay).
     ///
     /// They are inserted one by one at the front of the HUD frame's command list, so this walks
-    /// them back to front and the HUD's own commands (the vignette, crosshair, hotbar) stay on
-    /// top. Inserting rather than a scratch buffer keeps a frame free of both passes.
+    /// them back to front and the HUD's own commands (the crosshair, hotbar) stay on top.
+    /// Inserting rather than a scratch buffer keeps a frame free of both passes.
     pub fn append_to(&self, out: &mut Vec<GuiCommand>) {
         // Every overlay is prepended, so this walks vanilla's draw order back to front and the
-        // HUD's own commands (the vignette, crosshair, hotbar) stay on top.
+        // HUD's own commands (the crosshair, hotbar) stay on top.
 
         // `Hud.extractCameraOverlays`, drawn last: the portal tint or the confusion overlay.
         let portal = lerp(
@@ -221,6 +225,8 @@ impl Frame<'_> {
                 );
             }
         }
+        // `Hud.extractVignette`, in every view: below the item, freeze and portal overlays above.
+        out.insert(0, self.vignette_overlay(self.effects.border_warning));
         // `ScreenEffectRenderer.submit`, the level pass: fire and water in first person
         // (never for a spectator), then the block the camera is inside.
         if self.effects.on_fire && self.first_person && !self.effects.spectator {

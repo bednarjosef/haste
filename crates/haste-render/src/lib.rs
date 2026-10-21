@@ -33,6 +33,7 @@ pub mod timing;
 pub mod tint;
 pub mod vertex;
 pub mod weather;
+pub mod world_border;
 
 pub use block_particles::{BlockParticleSprite, BlockParticleTable};
 pub use blockentity::{

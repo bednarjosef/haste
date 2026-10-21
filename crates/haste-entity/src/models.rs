@@ -214,6 +214,10 @@ pub(crate) fn model_for_entity(
             Default::default(),
         );
     }
+    // The fence knot's one cube (`LeashKnotRenderer` draws `LeashKnotModel`).
+    if crate::leash::is_knot(e.kind) {
+        return (crate::leash_knot::model(), false, Default::default());
+    }
     // Registry table first (shared per type, head flag precomputed), then the box. Babies use
     // the row's baby layer, like vanilla's AgeableMobRenderer.submit. Variant mobs
     // (cat/wolf/frog/pig/cow/chicken) instead resolve their look from the synced variant

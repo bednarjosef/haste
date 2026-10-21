@@ -31,7 +31,7 @@ highlight, debug sample) are marked "debug" and are fine to ignore.
 | `handleTickingStep` | missing | none found | low |
 | `handleSetHeldSlot` | done | crates/haste-client/src/player.rs (SetHeldSlot arm); ui/packets.rs:302 | — |
 | `handleMoveEntity` (pos/rot/posrot) | done | crates/haste-client/src/net/entities.rs | — |
-| `handleMinecartAlongTrack` (smooth minecart steps) | missing | none found | medium (minecarts jump between packets) |
+| `handleMinecartAlongTrack` (smooth minecart steps) | done | crates/haste-client/src/net/minecart.rs; the walk in crates/haste-entity/src/new_minecart_behavior.rs | — |
 | `handleRotateMob` | done | crates/haste-client/src/net/entities.rs (RotateHead) | — |
 | `handleRemoveEntities` | done | crates/haste-client/src/net/entities.rs | — |
 | `handleMovePlayer` (PlayerPosition) | done | crates/haste-client/src/player.rs (PlayerPosition arm) | — |
@@ -92,7 +92,7 @@ highlight, debug sample) are marked "debug" and are fine to ignore.
 | `handlePlayerCombatEnd` / `handlePlayerCombatEnter` | missing | none found | none (no-op in vanilla) |
 | `handlePlayerCombatKill` | done | crates/haste-client/src/ui/packets.rs:279; Handlers.java:399 | — |
 | `handleChangeDifficulty` | missing | none found | low (difficulty icon on death screen) |
-| `handleSetCamera` (spectate another entity) | missing | none found | medium (spectator teleport view, death camera) |
+| `handleSetCamera` (spectate another entity) | done (no creeper/spider/enderman post effect) | crates/haste-client/src/net/entities.rs (`handle_set_camera`), crates/haste-client/src/game/camera_entity.rs | low (the spectated mob's post effect is not drawn) |
 | `handleInitializeBorder` / `SetBorderCenter` / `SetBorderSize` / `SetBorderLerpSize` | done (collision only) | crates/haste-client/src/net/effects.rs:45-51 | partial: the wall itself is not drawn (see §9) |
 | `handleSetBorderWarningDistance` / `WarningDelay` | missing | none found; crates/haste-client/src/world_border.rs:7 keeps only centre+diameter | low (no red vignette near the border) |
 | `handleCustomPayload` (play phase) | missing | none found (config-phase payload handled) | low |
@@ -129,7 +129,7 @@ highlight, debug sample) are marked "debug" and are fine to ignore.
 
 Count: about 85 done, 4 partial (border visuals, report details), 16 missing with player impact,
 plus debug-only misses. The misses that matter: `Explode`, `MapItemData`, `Cooldown`,
-`SetCamera`, `SetEntityLink`, `MoveMinecartAlongTrack`, `ShowDialog`, `TickingState`.
+`SetEntityLink`, `MoveMinecartAlongTrack`, `ShowDialog`, `TickingState`.
 
 ## 2. Entity renderers (`EntityRenderers` registrations, 161 types) and layers
 
@@ -271,7 +271,7 @@ Count: ~15 done, 2 missing (spectator menu, dialogs), 1 partial.
 | Movement effects: levitation, slow falling, jump boost, speed (via synced attributes) | done | crates/haste-physics/src/movement.rs:576-583, 526; net/player_state.rs attributes | — |
 | Blindness/darkness fog; water/lava/powder snow/nether/end fog | done | crates/haste-render/src/fog/{blindness,water,lava,powder_snow,atmospheric}.rs | — |
 | Dolphin's grace | partial | no explicit code; swim speed modifiers would have to arrive via `UpdateAttributes` — not verified | low |
-| Spectator camera (`SetCamera` spectate) | missing | none found | medium |
+| Spectator camera (`SetCamera` spectate) | done | crates/haste-client/src/game/camera_entity.rs, crates/haste-client/src/player/camera.rs | — |
 | Totem of undying animation (particles, hand flash) | missing | only the particle wire id exists | medium |
 | Trident riptide spin | missing | none found | low |
 
@@ -350,7 +350,8 @@ usual size; otherwise it says how to split.
 14. **Ambient sound loops**: cave/underwater/biome ambience (`AmbientLoopHandler`,
     `BiomeAmbientSoundsHandler`, `UnderwaterAmbientSoundHandler` equivalents). One worker
     (needs a small ambient-sound scheduler in haste-client/src/sound/).
-15. **Minecart movement smoothing**: `handleMinecartAlongTrack`. One worker.
+15. ~~**Minecart movement smoothing**: `handleMinecartAlongTrack`.~~ Done (`NewMinecartBehavior`'s
+    track walk, the riding camera and the passenger offset).
 16. **World border visuals**: `WorldBorderRenderer` (the wall) + warning-distance vignette
     (needs `SetBorderWarningDistance/Delay` stored). One worker.
 17. **End crystal**: `EndCrystalRenderer` (crystal model + beam to the dragon; the beam pairs

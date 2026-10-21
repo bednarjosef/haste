@@ -32,6 +32,8 @@ impl Session {
                 world.set_biome_zoom_seed(l.spawn.hashed_seed);
                 self.is_flat = l.spawn.is_flat;
                 self.view_distance = l.view_distance;
+                // `handleLogin`: `setCameraEntity(player)`.
+                self.camera = Default::default();
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
@@ -58,6 +60,14 @@ impl Session {
                 // constant dimension layer).
                 self.dimension_music_volume =
                     crate::app::biomes::audio::dimension_music_volume(regs, &dim);
+                // A new `LocalPlayer`, so new ambient handlers; a new level also stops
+                // every sound (`Minecraft.updateLevelInEngines`). Its dimension type's
+                // `audio/ambient_sounds` is the attribute's new constant layer.
+                let dimension_changed = self.dimension.name != dim.name;
+                self.ambient_sound_handlers
+                    .respawn(&mut self.ticking_sounds, dimension_changed);
+                self.ambient_sounds_layers.dimension =
+                    crate::app::biomes::ambient_sounds::dimension_ambient_sounds(regs, &dim);
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding. A new level also starts
                 // with vanilla's default border until its initialize_border arrives.
@@ -71,6 +81,8 @@ impl Session {
                 self.health_seen = false;
                 self.player
                     .set_vehicle(None, SeatPoint::ZERO, None, None, None);
+                // `handleRespawn`: the new player becomes the camera entity.
+                self.camera = Default::default();
             }
             P::PlayerPosition(p) => {
                 // The server's position corrections a player feels as rubber-banding;

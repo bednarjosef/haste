@@ -266,6 +266,9 @@ pub struct LocalPlayer {
     /// halves the distance to the pose's eye height, and the render lerps the two values.
     camera_eye: f32,
     camera_eye_old: f32,
+    /// The camera entity when it is not us (vanilla `Minecraft.getCameraEntity`), set by the
+    /// session before each tick (see the `camera` module).
+    camera_entity: Option<crate::game::camera_entity::CameraEntitySnapshot>,
     look_offset: (f32, f32),
     last_input_look: (f32, f32),
     /// The previous tick's forward impulse (`forward && !back`), for the sprint double tap's
@@ -357,6 +360,7 @@ impl LocalPlayer {
             prev_pos: DVec3::ZERO,
             camera_eye: 0.0,
             camera_eye_old: 0.0,
+            camera_entity: None,
             look_offset: (0.0, 0.0),
             last_input_look: (0.0, 0.0),
             last_input_forward: false,
@@ -459,20 +463,6 @@ impl LocalPlayer {
             ((t - 100.0) / 500.0).clamp(0.0, 1.0)
         };
         a * 0.6 + b * 0.39999998
-    }
-
-    /// Eye position and look angles interpolated by partial tick, for the camera. The eye
-    /// height is the camera's own smoothed pair (vanilla `Camera.setup` lerps
-    /// `eyeHeightOld`/`eyeHeight`, not the entity's eye height).
-    pub fn camera(&self, partial_tick: f32) -> (DVec3, f32, f32) {
-        let t = partial_tick.clamp(0.0, 1.0);
-        let pos = self.prev_pos.lerp(self.state.pos, t as f64);
-        let eye = self.camera_eye_old + (self.camera_eye - self.camera_eye_old) * t;
-        (
-            pos + DVec3::new(0.0, f64::from(eye), 0.0),
-            self.state.yaw,
-            self.state.pitch,
-        )
     }
 
     /// Consumes the packets about the local player. Returns false for packets it does not handle.
@@ -873,7 +863,7 @@ impl LocalPlayer {
         // while the player has no position yet: the camera halves its distance to the target
         // each tick (`eyeHeight += (getEyeHeight() - eyeHeight) * 0.5`).
         self.camera_eye_old = self.camera_eye;
-        self.camera_eye += (self.eye_height() as f32 - self.camera_eye) * 0.5;
+        self.camera_eye += (self.camera_eye_target() - self.camera_eye) * 0.5;
         self.flush_pending_accept(out);
         if !self.level_ready_gate(ctx.world, out) {
             // `Minecraft.tick` ends with ClientTickEnd every tick a level exists — before
@@ -980,9 +970,7 @@ impl LocalPlayer {
         if self.sprint_trigger_time > 0 {
             self.sprint_trigger_time -= 1;
         }
-        let mut phys_input = *input;
-        phys_input.yaw = input.yaw + self.look_offset.0;
-        phys_input.pitch = (input.pitch + self.look_offset.1).clamp(-90.0, 90.0);
+        let mut phys_input = self.movement_input(input);
         // What the physics tick's sprint rules cannot see (vanilla `isSprintingPossible`'s
         // blindness and food terms, `isSlowDueToUsingItem`).
         self.state.sprint_blocked =
@@ -1186,8 +1174,10 @@ impl LocalPlayer {
             self.sent.sprinting = self.state.sprinting;
         }
 
-        // 6. Movement.
-        self.send_movement(out);
+        // 6. Movement (`LocalPlayer.sendPosition`: only while we are the camera entity).
+        if self.is_controlled_camera() {
+            self.send_movement(out);
+        }
 
         // 6. End of tick.
         out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
@@ -1336,6 +1326,7 @@ impl TickCtx<'_> {
     }
 }
 
+mod camera;
 pub mod climbable;
 mod creative_flight;
 pub mod interact;

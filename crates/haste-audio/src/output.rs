@@ -28,9 +28,11 @@ use rodio::{Decoder, Player, Source};
 use tracing::warn;
 
 mod decoded;
+mod instances;
 mod system;
 
 use decoded::{decode, CachedSamples, DecodedSource, LruCache, StereoSamples};
+pub use instances::{InstancePlay, SoundHandle};
 pub use system::SoundSystem;
 
 /// How many decoded non-streamed sounds the worker keeps.
@@ -56,6 +58,9 @@ struct PlayRequest {
     assets: Option<haste_assets::Assets>,
     /// `stream: true` (music): decoded on the fly, never cached.
     stream: bool,
+    /// Play on from the start at the end, for as long as the sound is not stopped (a
+    /// looping sound instance, vanilla's `Channel.setLooping` or the looping stream).
+    looping: bool,
     /// Initial (left, right) gains and pitch; kept in sync on `tick`.
     gains: (f32, f32),
     pitch: f32,
@@ -182,6 +187,22 @@ impl Worker {
     /// file with more than one channel passes through interleaved (stereo), not averaged
     /// down to mono.
     fn decode(&mut self, request: &PlayRequest) -> Option<DecodedSource> {
+        if request.stream && request.looping {
+            // Vanilla's `SoundBufferLibrary.getStream(path, true)`: a stream that starts
+            // over at its end.
+            let bytes = self.read(request)?;
+            let looped = rodio::decoder::DecoderBuilder::new()
+                .with_data(Cursor::new(bytes))
+                .with_hint("ogg")
+                .build_looped();
+            return match looped {
+                Ok(decoder) => Some(DecodedSource::StreamedLooping(decoder)),
+                Err(e) => {
+                    warn!("cannot decode {}: {e}", request.path);
+                    None
+                }
+            };
+        }
         if request.stream {
             let bytes = self.read(request)?;
             match Decoder::new_vorbis(Cursor::new(bytes)) {
@@ -202,9 +223,9 @@ impl Worker {
             sound
         };
         Some(if cached.channels > 1 {
-            DecodedSource::Stereo(StereoSamples::new(&cached))
+            DecodedSource::Stereo(StereoSamples::new(&cached).looping(request.looping))
         } else {
-            DecodedSource::Cached(CachedSamples::new(&cached))
+            DecodedSource::Cached(CachedSamples::new(&cached).looping(request.looping))
         })
     }
 

@@ -47,6 +47,14 @@ pub struct Session {
     /// The dimension type's `audio/music_volume` (vanilla's constant dimension layer of
     /// the environment attribute system): the base the camera's biome overrides each tick.
     pub dimension_music_volume: f32,
+    /// The `audio/ambient_sounds` attribute's layers for the current level (the
+    /// dimension type's value, each synced biome's override), read at the player's
+    /// position by the biome ambient sounds handler.
+    pub ambient_sounds_layers: crate::app::biomes::ambient_sounds::AmbientSoundsLayers,
+    /// The local player's ambient sound handlers (vanilla `LocalPlayer.ambientSoundHandlers`).
+    pub ambient_sound_handlers: crate::sound::AmbientSoundHandlers,
+    /// The ticking sound instances they start (vanilla `SoundEngine.tickingSounds`).
+    pub ticking_sounds: crate::sound::TickingSounds,
     /// The camera's `MUSIC_VOLUME` as of the last tick (vanilla
     /// `Minecraft.getMusicVolume`): `dimension_music_volume` overridden by the camera's
     /// biome, clamped to the attribute's unit range (`biomes::audio` resolves it).
@@ -164,6 +172,9 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Firework bursts queued by entity status 17 since the last tick (drained by the game
+    /// thread into the particle pool).
+    pub firework_bursts: Vec<fireworks::FireworkBurst>,
     /// The totem pops in progress (vanilla `TrackingEmitter`s the status 35 adds), ticked by
     /// the game thread into the particle pool, and their random (vanilla's level random).
     pub totem_emitters: Vec<crate::game::totem_emitter::TotemEmitter>,
@@ -198,7 +209,7 @@ pub struct Session {
     /// The world border (`minecraft:initialize_border` and the `set_border_*` packets): the
     /// interaction step gates its packets on it (`useItemOn` fails without a packet outside
     /// it, `startDestroyBlock` returns false).
-    world_border: crate::world_border::WorldBorder,
+    pub(crate) world_border: crate::world_border::WorldBorder,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
     /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
@@ -234,6 +245,9 @@ pub struct Session {
     /// The remote uses' sound-request scratch (see `net::remote_use`): drawn in vanilla's
     /// order with the particles, then dropped — the server's sound packets carry the sound.
     remote_use_sounds: Vec<crate::sound::SoundRequest>,
+    /// The camera entity (vanilla `Camera.entity`): the player, or the entity a spectator
+    /// spectates (`set_camera`, see [`crate::game::camera_entity`]).
+    pub camera: crate::game::camera_entity::CameraEntity,
 }
 
 impl Session {
@@ -259,6 +273,9 @@ impl Session {
             biome_audio: Vec::new(),
             dimension_music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
             music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
+            ambient_sounds_layers: Default::default(),
+            ambient_sound_handlers: Default::default(),
+            ticking_sounds: Default::default(),
             breaking: HashMap::new(),
             lids: HashMap::new(),
             lid_states: None,
@@ -302,6 +319,7 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            firework_bursts: Vec::new(),
             totem_emitters: Vec::new(),
             totem_rng: haste_audio::random::LegacyRandom::new(
                 std::time::SystemTime::now()
@@ -336,6 +354,7 @@ impl Session {
             mounted_message: false,
             remote_use: HashMap::new(),
             remote_use_sounds: Vec::new(),
+            camera: Default::default(),
         }
     }
 
@@ -408,6 +427,12 @@ impl Session {
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.remote_use.clear();
+                // A new level and player: the ambient handlers start over and every sound
+                // stops (`Minecraft.updateLevelInEngines`); the dimension layer re-resolves.
+                self.ambient_sound_handlers
+                    .respawn(&mut self.ticking_sounds, true);
+                self.ambient_sounds_layers.dimension =
+                    crate::app::biomes::ambient_sounds::dimension_ambient_sounds(regs, &dim);
                 self.dimension = dim;
                 self.world_border = crate::world_border::WorldBorder::default();
                 self.entity_id = EntityId(l.entity_id);
@@ -526,10 +551,12 @@ mod effects;
 mod entities;
 mod explosion;
 mod explosion_tracker;
+pub(crate) mod fireworks;
 mod fov;
 mod item_world;
 mod lightmap;
 mod maps;
+mod minecart;
 mod misc;
 pub(crate) mod pack_prompt;
 mod particles;
