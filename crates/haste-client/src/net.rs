@@ -547,6 +547,7 @@ mod fov;
 mod item_world;
 mod lightmap;
 mod maps;
+mod minecart;
 mod misc;
 pub(crate) mod pack_prompt;
 mod particles;

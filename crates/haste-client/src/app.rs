@@ -838,7 +838,7 @@ fn frame_view<'w>(
     Option<&'w haste_render::WeatherFrame>,
 ) {
     let partial = game::partial_tick(view.tick_at, now);
-    let eye = game::interpolate(view.prev_eye, view.eye, partial);
+    let eye = game::camera_eye(view, shared, partial);
     let look = (
         yaw + view.look_offset.0,
         (pitch + view.look_offset.1).clamp(-90.0, 90.0),

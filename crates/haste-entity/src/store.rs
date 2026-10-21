@@ -70,7 +70,10 @@ pub struct Entity {
     pub dimensions: (f32, f32),
     pub metadata: Metadata,
     pub equipment: Vec<(u8, ItemStackData)>,
-    lerp: LerpState,
+    pub(crate) lerp: LerpState,
+    /// A minecart's `NewMinecartBehavior` (the `minecart_improvements` experiment); `None`
+    /// for every other entity and for carts on the old behaviour.
+    pub new_minecart: Option<Box<crate::new_minecart_behavior::NewMinecartBehavior>>,
     /// Cached nametag from `player_info`.
     pub nametag: Option<String>,
     /// True when the entity type is player-like (humanoid model). Until world-and-data's registry lands we
@@ -188,7 +191,7 @@ impl Entity {
 
     /// `Entity.snapTo`: jump to the values with no interpolation (the old position and
     /// rotation move too, so no frame draws the gap) and drop any smoothing in flight.
-    fn snap_to(&mut self, (pos, yaw, pitch): (DVec3, f32, f32)) {
+    pub(crate) fn snap_to(&mut self, (pos, yaw, pitch): (DVec3, f32, f32)) {
         (self.pos, self.prev_pos) = (pos, pos);
         (self.yaw, self.prev_yaw) = (yaw, yaw);
         (self.pitch, self.prev_pitch) = (pitch, pitch);
@@ -198,11 +201,6 @@ impl Entity {
     /// `LinearInterpolationHandler.setInterpolationLength` (a display's teleport duration).
     pub(crate) fn set_interpolation_steps(&mut self, steps: u8) {
         self.lerp.set_steps(steps);
-    }
-
-    /// The present (pos, yaw, pitch): what `LerpState` keeps for the part a packet lacks.
-    fn current(&self) -> (DVec3, f32, f32) {
-        (self.pos, self.yaw, self.pitch)
     }
 
     /// Body yaw between the last two ticks (`Mth.rotLerp(partial, yBodyRotO, yBodyRot)`).
@@ -387,27 +385,18 @@ impl EntityStore {
 
     /// Short delta move (`delta` already converted from 1/4096-block units by the caller).
     pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                if let Some(snap) = e.lerp.on_delta(delta, e.current()) {
-                    e.snap_to(snap);
-                }
-                e.on_ground = on_ground;
-            }
+        if let Some(e) = self.get_mut(id) {
+            e.move_by_delta(delta);
+            e.on_ground = on_ground;
         }
     }
 
     /// A rotation from a move packet (`ClientPacketListener.handleMoveEntity` ->
     /// `Entity.moveOrInterpolateTo(yRot, xRot)`): eased over 3 ticks with the position.
     pub fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, on_ground: bool) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                let current = e.current();
-                if let Some(snap) = e.lerp.interpolate_to(None, Some((yaw, pitch)), current) {
-                    e.snap_to(snap);
-                }
-                e.on_ground = on_ground;
-            }
+        if let Some(e) = self.get_mut(id) {
+            e.move_or_interpolate_to(None, Some((yaw, pitch)));
+            e.on_ground = on_ground;
         }
     }
 
@@ -417,21 +406,18 @@ impl EntityStore {
     /// (squared distance over `TELEPORT_SNAP_DISTANCE_SQ`), in which case it `snapTo`s: both
     /// `prev_pos` and `pos` jump, so the renderer never draws a frame travelling the gap.
     pub fn teleport(&mut self, id: EntityId, pos: DVec3, yaw: f32, pitch: f32, on_ground: bool) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.on_ground = on_ground;
-                // A display's zero-step window snaps as well (`interpolateTo` with
-                // `interpolationSteps == 0`).
-                let snap = if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
-                    Some((pos, yaw, pitch))
-                } else {
-                    let current = e.current();
-                    e.lerp
-                        .interpolate_to(Some(pos), Some((yaw, pitch)), current)
-                };
-                if let Some(snap) = snap {
-                    e.snap_to(snap);
-                }
+        if let Some(e) = self.get_mut(id) {
+            e.on_ground = on_ground;
+            if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
+                e.pos = pos;
+                e.prev_pos = pos;
+                e.yaw = yaw;
+                e.prev_yaw = yaw;
+                e.pitch = pitch;
+                e.prev_pitch = pitch;
+                e.lerp.snap(pos, yaw, pitch);
+            } else {
+                e.move_or_interpolate_to(Some(pos), Some((yaw, pitch)));
             }
         }
     }
@@ -439,32 +425,26 @@ impl EntityStore {
     /// `rotate_head`: `ClientPacketListener.handleRotateMob` -> `LivingEntity.lerpHeadTo(yaw, 3)`.
     /// The head does not turn now; `tick` eases it over the next three ticks.
     pub fn set_head_yaw(&mut self, id: EntityId, yaw: f32) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.lerp_head_yaw = yaw;
-                e.lerp_head_steps = HEAD_LERP_STEPS;
-            }
+        if let Some(e) = self.get_mut(id) {
+            e.lerp_head_yaw = yaw;
+            e.lerp_head_steps = HEAD_LERP_STEPS;
         }
     }
 
     pub fn set_velocity(&mut self, id: EntityId, v: DVec3) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.velocity = v;
-                // `Projectile.lerpMotion`: a moving arrow leaves the ground it was stuck in.
-                if crate::arrow::is_arrow(e.kind) && v.length_squared() > 0.0 {
-                    e.arrow_in_ground = false;
-                }
+        if let Some(e) = self.get_mut(id) {
+            e.velocity = v;
+            // `Projectile.lerpMotion`: a moving arrow leaves the ground it was stuck in.
+            if crate::arrow::is_arrow(e.kind) && v.length_squared() > 0.0 {
+                e.arrow_in_ground = false;
             }
         }
     }
 
     /// `hurt_animation` / `damage_event`: (re)start the 10-tick red flash.
     pub fn mark_hurt(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.hurt_ticks = HURT_TICKS;
-            }
+        if let Some(e) = self.get_mut(id) {
+            e.hurt_ticks = HURT_TICKS;
         }
     }
 
@@ -473,40 +453,32 @@ impl EntityStore {
     /// server's `remove_entities`. Health reaching 0 in the metadata starts it too
     /// (`LivingEntity.isDeadOrDying` -> `tickDeath`); the first of the two wins.
     pub fn mark_dead(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.start_death();
-            }
+        if let Some(e) = self.get_mut(id) {
+            e.start_death();
         }
     }
 
     /// Entity event 4: a melee attack animation (`IronGolem.handleEntityEvent` sets
     /// `attackAnimationTick = 10`; several mobs share the status).
     pub fn mark_attack(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.attack_ticks = 10;
-            }
+        if let Some(e) = self.get_mut(id) {
+            e.attack_ticks = 10;
         }
     }
 
     /// Entity event 32 (`ArmorStand.handleEntityEvent`): the armour stand was hit; its
     /// render-side wobble counts from now (`lastHit = gameTime`).
     pub fn mark_hit(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.last_hit = e.tick_count as i64;
-            }
+        if let Some(e) = self.get_mut(id) {
+            e.last_hit = e.tick_count as i64;
         }
     }
 
     /// Entity event 70 (`MinecartTNT.handleEntityEvent` -> `primeFuse`): the TNT cart's fuse
     /// starts at 80 ticks and counts down client-side (`MinecartTNT.tick`).
     pub fn prime_tnt_minecart(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                crate::minecart::prime(&mut e.metadata);
-            }
+        if let Some(e) = self.get_mut(id) {
+            crate::minecart::prime(&mut e.metadata);
         }
     }
 
@@ -570,12 +542,10 @@ impl EntityStore {
     }
 
     pub fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                match e.equipment.iter_mut().find(|(s, _)| *s == slot) {
-                    Some(x) => x.1 = item,
-                    None => e.equipment.push((slot, item)),
-                }
+        if let Some(e) = self.get_mut(id) {
+            match e.equipment.iter_mut().find(|(s, _)| *s == slot) {
+                Some(x) => x.1 = item,
+                None => e.equipment.push((slot, item)),
             }
         }
     }
@@ -660,6 +630,8 @@ impl EntityStore {
             if let Some(display) = slot.display.as_mut() {
                 display.tick(&slot.metadata, slot.tick_count);
             }
+            // `AbstractMinecart.tick` -> `NewMinecartBehavior.tick`: the track walk.
+            crate::new_minecart_behavior::tick(slot);
             // `ItemEntity.tick`: gravity, move, drag, between position packets.
             if slot.is_item {
                 crate::item_entity::tick(slot, world);
@@ -740,15 +712,19 @@ impl EntityStore {
 
     /// `swing_animation`: an entity swung a hand.
     pub fn swing(&mut self, id: EntityId, hand: i32, animation: i32, duration: i32) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.swing.start(hand, animation, duration);
-            }
+        if let Some(e) = self.get_mut(id) {
+            e.swing.start(hand, animation, duration);
         }
     }
 
     pub fn get(&self, id: EntityId) -> Option<&Entity> {
         self.slot(id).and_then(|i| self.slots[i as usize].as_ref())
+    }
+
+    /// The entity with this id, mutably: the per-entity packet updates.
+    pub(crate) fn get_mut(&mut self, id: EntityId) -> Option<&mut Entity> {
+        let i = self.slot(id)?;
+        self.slots[i as usize].as_mut()
     }
 
     /// The current positions of the entities that trail smoke

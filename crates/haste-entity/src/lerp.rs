@@ -8,9 +8,14 @@
 //! flight; a packet without position or without rotation keeps the in-flight value for the part
 //! it lacks. `prev_*`/current pairs bracket each tick's step so the renderer can interpolate with
 //! the partial tick (`Entity.getYRot(partialTicks)` / `getXRot(partialTicks)`).
+//!
+//! A minecart on the new behaviour has no interpolation (`AbstractMinecart
+//! .createInterpolationHandler` returns `InterpolationHandler.NO_OP`): its packets set the
+//! position and rotation at once (`Entity.moveOrInterpolateTo`), and its smooth movement comes
+//! from the track steps instead ([`crate::new_minecart_behavior`]).
 use haste_core::DVec3;
 
-use crate::store::rot_lerp;
+use crate::store::{rot_lerp, Entity};
 
 /// `LinearInterpolationHandler.DEFAULT_INTERPOLATION_STEPS`.
 pub const INTERPOLATION_STEPS: u8 = 3;
@@ -26,6 +31,8 @@ pub(crate) struct LerpState {
     /// `AbstractInterpolationHandler.interpolationSteps`: the window length, 3 for most
     /// entities; a display entity's comes from its teleport duration (0 snaps).
     steps: u8,
+    /// `InterpolationHandler.NO_OP`: targets are never eased toward.
+    no_op: bool,
 }
 
 impl LerpState {
@@ -36,24 +43,21 @@ impl LerpState {
             target_pitch: pitch,
             remaining: 0,
             steps: INTERPOLATION_STEPS,
+            no_op: false,
         }
+    }
+
+    /// Switches to `InterpolationHandler.NO_OP` (a minecart on the new behaviour): packets
+    /// apply at once from now on.
+    pub fn set_no_op(&mut self) {
+        self.no_op = true;
+        self.remaining = 0;
     }
 
     /// `LinearInterpolationHandler.setInterpolationLength`: the next window's length (the one
     /// in flight keeps its remaining steps).
     pub fn set_steps(&mut self, steps: u8) {
         self.steps = steps;
-    }
-
-    /// A short-delta move arrived (`delta` in blocks): the delta codec's base is the last
-    /// target, so the new target is the old one plus the delta. `current` is the entity's
-    /// present (pos, yaw, pitch), the rotation to keep when no interpolation is in flight.
-    pub fn on_delta(
-        &mut self,
-        delta: DVec3,
-        current: (DVec3, f32, f32),
-    ) -> Option<(DVec3, f32, f32)> {
-        self.interpolate_to(Some(self.target + delta), None, current)
     }
 
     /// `AbstractInterpolationHandler.interpolateTo`: head for `pos` and/or `rot` over 3 steps.
@@ -126,4 +130,34 @@ pub(crate) struct LerpTarget<'a> {
     pub prev_yaw: &'a mut f32,
     pub pitch: &'a mut f32,
     pub prev_pitch: &'a mut f32,
+}
+
+impl Entity {
+    /// `Entity.moveOrInterpolateTo`: hand the packet's position and/or rotation to the
+    /// interpolation (which may ask for a snap, for a zero-step window), or, for the no-op
+    /// handler, set them at once. The no-op handler still keeps the position as the base later
+    /// short-delta moves add to.
+    pub(crate) fn move_or_interpolate_to(&mut self, pos: Option<DVec3>, rot: Option<(f32, f32)>) {
+        if self.lerp.no_op {
+            if let Some(pos) = pos {
+                self.lerp.target = pos;
+                self.pos = pos;
+            }
+            if let Some((yaw, pitch)) = rot {
+                self.yaw = yaw;
+                self.pitch = pitch;
+            }
+            return;
+        }
+        let current = (self.pos, self.yaw, self.pitch);
+        if let Some(snap) = self.lerp.interpolate_to(pos, rot, current) {
+            self.snap_to(snap);
+        }
+    }
+
+    /// A short-delta move arrived (`delta` in blocks): the delta codec's base is the last
+    /// target, so the new position is the old target plus the delta.
+    pub(crate) fn move_by_delta(&mut self, delta: DVec3) {
+        self.move_or_interpolate_to(Some(self.lerp.target + delta), None);
+    }
 }
