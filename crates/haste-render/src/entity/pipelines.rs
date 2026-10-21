@@ -431,6 +431,7 @@ impl EntityRenderer {
             atlas,
             shelf: Shelf::default(),
             textures: HashMap::new(),
+            glyph_pages: Default::default(),
             vertex_buffer,
             vertex_capacity,
             vertices: Vec::new(),
