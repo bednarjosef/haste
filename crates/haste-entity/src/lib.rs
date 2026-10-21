@@ -10,6 +10,7 @@ pub mod boat;
 pub mod decoration;
 pub mod dims;
 pub mod dragon_fireball;
+pub mod entity;
 pub mod item_entity;
 pub mod lerp;
 pub mod local_player;
