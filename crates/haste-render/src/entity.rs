@@ -57,6 +57,7 @@ mod thrown_item;
 #[cfg(test)]
 mod thrown_item_tests;
 mod tnt;
+mod world_glyph;
 
 mod armor_stand;
 mod hand;
