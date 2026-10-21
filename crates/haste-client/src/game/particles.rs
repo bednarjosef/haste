@@ -127,6 +127,20 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
                 [0.0; 3],
             ));
         }
+        // `EvokerFangs.tick`'s crit burst, on the tick the bite's `lifeTicks` reaches 14.
+        let rng = &mut driver.session.totem_rng;
+        for (pos, width) in shared.entities.read().fangs_crit_bursts() {
+            haste_entity::evoker_fangs::crit_burst(
+                pos,
+                width,
+                || rng.next_double(),
+                |c| {
+                    let vel = [c.vel.x as f32, c.vel.y as f32, c.vel.z as f32];
+                    let crit = haste_core::Identifier::minecraft("crit");
+                    ambient.push(haste_render::ParticleSpawn::client(crit, c.pos, vel));
+                },
+            );
+        }
         // The totem pops (`TrackingEmitter.tick`): each emitter follows its entity's box and
         // is dropped once it has lived its 30 ticks, or its entity is gone.
         let entities = shared.entities.read();

@@ -79,3 +79,38 @@ fn progress_is_one_once_the_bite_is_over() {
         1.0
     );
 }
+
+#[test]
+fn the_crit_burst_falls_on_the_tick_life_reaches_14() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::new(2.0, 64.0, 3.0)));
+    s.mark_fangs_attack(EntityId(1));
+    let mut burst_ticks = Vec::new();
+    for tick in 1..=22 {
+        s.tick();
+        if s.fangs_crit_bursts().next().is_some() {
+            burst_ticks.push(tick);
+        }
+    }
+    // 22 - 8 = 14: the eighth tick after the bite starts, and only that one.
+    assert_eq!(burst_ticks, vec![8]);
+}
+
+#[test]
+fn the_crit_burst_spreads_twelve_crits_over_the_box_a_block_up() {
+    use crate::evoker_fangs::{crit_burst, CRIT_COUNT};
+    let pos = DVec3::new(10.0, 64.0, -5.0);
+    // Every draw at 1.0 puts each crit at the box's +x/+z corner, at the top of its height
+    // range and at full speed; every draw at 0.0 at the opposite extremes.
+    let mut high = Vec::new();
+    crit_burst(pos, 0.5, || 1.0, |c| high.push(c));
+    assert_eq!(high.len(), CRIT_COUNT);
+    let c = high[0];
+    assert!((c.pos - DVec3::new(10.25, 64.0 + 0.05 + 1.0 + 1.0, -4.75)).length() < 1e-9);
+    assert!((c.vel - DVec3::new(0.3, 0.6, 0.3)).length() < 1e-9);
+    let mut low = Vec::new();
+    crit_burst(pos, 0.5, || 0.0, |c| low.push(c));
+    let c = low[0];
+    assert!((c.pos - DVec3::new(9.75, 64.0 + 0.05 + 1.0, -5.25)).length() < 1e-9);
+    assert!((c.vel - DVec3::new(-0.3, 0.3, -0.3)).length() < 1e-9);
+}

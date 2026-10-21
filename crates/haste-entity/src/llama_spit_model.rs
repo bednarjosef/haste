@@ -2,6 +2,8 @@
 //! (`minecraft:llama_spit#main`, one part): the lift before the yaw, then `rotY(yRot - 90)`
 //! and `rotZ(xRot)`. The generic path flips the model with `rotZ(pi)` and turns it by
 //! `180 - yaw`, so the spit's body op cancels the flip and the instance yaw is `270 - yRot`.
+//! The layer is drawn about the entity's origin, so the loader keeps it unshifted
+//! (`model_dump::UNSHIFTED_LAYERS`). `LlamaSpitRenderer` sets no shadow (radius 0).
 
 use haste_core::math::Vec3;
 use haste_core::model::{BodyOp, BodyTransform};

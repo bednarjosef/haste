@@ -4,8 +4,8 @@
 //! (`minecraft:evoker_fangs#main`) comes from the model data.
 
 use haste_core::math::Vec3;
-use haste_core::model::{BodyOp, BodyTransform, PoseOverrides};
-use haste_core::parts;
+use haste_core::model::{BodyOp, BodyTransform, CubeModel, ModelPart, PoseOverrides};
+use haste_core::parts::{self, PartId};
 
 /// `EvokerFangsModel.setupAnim`'s values for one bite progress.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,24 +46,35 @@ pub fn root_y(pre_scale: f32) -> f32 {
     24.0 - 20.0 * pre_scale
 }
 
-/// The pose overrides for the jaws and the base.
-pub fn overrides(p: FangsPose) -> PoseOverrides {
+/// The pose overrides for the jaws and the base. Vanilla assigns the jaws' `zRot` outright,
+/// while `PoseOverrides` rotations add to the part's rest pose, so the rest `zRot` the layer
+/// gives each jaw (`EvokerFangsModel.createBodyLayer`, read from `model`) is subtracted; the
+/// jaws' other angles keep their rest values like vanilla's.
+pub fn overrides(p: FangsPose, model: &CubeModel) -> PoseOverrides {
     let mut o = PoseOverrides::default();
-    o.set_rotation(
-        parts::intern("upper_jaw"),
-        Vec3::new(0.0, 0.0, p.upper_jaw_z),
-    );
-    o.set_rotation(
-        parts::intern("lower_jaw"),
-        Vec3::new(0.0, 0.0, p.lower_jaw_z),
-    );
+    for (name, z) in [("upper_jaw", p.upper_jaw_z), ("lower_jaw", p.lower_jaw_z)] {
+        let id = parts::intern(name);
+        let rest_z = find_part(&model.root, id).map_or(0.0, |part| part.rotation.z);
+        o.set_rotation(id, Vec3::new(0.0, 0.0, z - rest_z));
+    }
     o.set_offset(parts::intern("base"), Vec3::new(0.0, p.base_rise, 0.0));
     o
 }
 
-/// The whole-model transform. `EvokerFangsRenderer.submit` translates by -1.501 blocks before
-/// its flip, which leaves the model 1.501 blocks up after it; the root's height (`rootY / 16`
-/// blocks, pixels scaled) brings it back down, so the net lift is `1.501 - rootY / 16`.
+/// A part of the model by id (the dump interns part names).
+fn find_part(part: &ModelPart, id: PartId) -> Option<&ModelPart> {
+    if part.id == id {
+        return Some(part);
+    }
+    part.children.iter().find_map(|c| find_part(c, id))
+}
+
+/// The whole-model transform. `EvokerFangsRenderer.submit` translates by -1.501 blocks after
+/// its flip, which is 1.501 blocks up in front of the generic path's flip; the root's height
+/// (`rootY / 16` blocks, unscaled: the root's scale applies below its own translation) brings
+/// it back down, so the net lift is `1.501 - rootY / 16`. The layer is loaded without the
+/// ground-plane shift (`model_dump::UNSHIFTED_LAYERS`), since this transform already carries
+/// vanilla's whole offset.
 pub fn body(p: FangsPose) -> BodyTransform {
     let mut b = BodyTransform::default();
     b.push(BodyOp::Translate(Vec3::new(

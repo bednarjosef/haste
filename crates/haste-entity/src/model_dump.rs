@@ -34,9 +34,15 @@ const KNOWN_VERSION: u32 = 1;
 /// - the boats', whose renderer does not sit them on the ground plane at all
 ///   (`AbstractBoatRenderer.submit` lifts them 0.375 blocks instead of
 ///   `LivingEntityRenderer`'s -1.501, so their `PartPose` values are already relative to that
-///   origin; see `crate::boat`).
+///   origin; see `crate::boat`);
+/// - the evoker fangs' and the llama spit's, whose renderers do their own placement
+///   (`EvokerFangsRenderer.submit` flips and translates by -1.501 itself, carried whole by
+///   `crate::evoker_fangs_model::body`; `LlamaSpitRenderer.submit` draws the layer unflipped
+///   about the entity's origin), so shifting them too would move them by 1.5 blocks.
 const UNSHIFTED_LAYERS: &[&str] = &[
     "minecraft:copper_golem#main",
+    "minecraft:evoker_fangs#main",
+    "minecraft:llama_spit#main",
     "minecraft:boat/acacia#main",
     "minecraft:chest_boat/acacia#main",
     "minecraft:boat/bamboo#main",

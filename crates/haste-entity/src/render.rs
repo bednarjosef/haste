@@ -144,7 +144,7 @@ impl EntityStore {
                 crate::evoker_fangs_model::pose(slot.fangs.animation_progress(partial_tick))
             });
             let mut pose = if let Some(f) = fangs {
-                crate::evoker_fangs_model::overrides(f)
+                crate::evoker_fangs_model::overrides(f, &model)
             } else if is_boat {
                 crate::boat::setup_anim(slot, &model, partial_tick)
             } else if is_armor_stand {
