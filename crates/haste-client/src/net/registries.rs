@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use haste_core::Identifier;
+use haste_core::{Identifier, RegistryIndex};
 use haste_data::GameData;
 use haste_protocol::nbt::NbtCompound;
 use haste_protocol::SyncedRegistries;
@@ -152,4 +152,34 @@ pub fn overworld_clock_id(regs: &SyncedRegistries) -> i32 {
                 .position(|e| e.id == Identifier::minecraft("overworld"))
         })
         .map_or(0, |i| i as i32)
+}
+
+impl super::Session {
+    /// Sets the `minecraft:entity_type` registry entries in id order: the synced registry when
+    /// the server sent one, else the static one from the game data (`registries.json`). The
+    /// two agree on vanilla servers (both are the registry's own order); mods that add entity
+    /// types are unknown here and ride on the default seat, never a panic.
+    pub fn set_entity_type_names(&mut self, names: Vec<Identifier>) {
+        self.entity_type_names = names;
+    }
+
+    /// Sets the `minecraft:attribute` registry entries in id order (see [`attribute_names`]).
+    pub fn set_attribute_names(&mut self, names: Vec<Identifier>) {
+        self.attribute_names = Some(names);
+    }
+
+    /// Whether a spawned entity's registry index names the firework rocket type.
+    pub(super) fn is_firework_type(&self, kind: RegistryIndex) -> bool {
+        self.entity_type_names
+            .get(kind.0 as usize)
+            .is_some_and(|n| n.path() == "firework_rocket")
+    }
+
+    /// Whether a spawned entity's registry index names the lightning bolt type (its tick sets
+    /// the sky flash).
+    pub(super) fn is_lightning_type(&self, kind: RegistryIndex) -> bool {
+        self.entity_type_names
+            .get(kind.0 as usize)
+            .is_some_and(|n| n.path() == "lightning_bolt")
+    }
 }

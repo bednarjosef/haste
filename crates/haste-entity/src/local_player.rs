@@ -206,6 +206,7 @@ pub fn equipment_by_slot(
                     item: Some(item),
                     asset: equippable.and_then(|x| x.asset.clone()),
                     dye: components.dyed_color(&stack.components_raw),
+                    layer: None,
                 });
             }
             _ => {}

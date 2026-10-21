@@ -148,6 +148,16 @@ pub trait EntitySink {
     fn mark_hit(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::wake_up`: the leave-bed animation (animate action 0) on a sleeping player.
+    /// Default no-op.
+    fn wake_up(&mut self, id: EntityId) {
+        let _ = id;
+    }
+    /// `EntityStore::is_living` (`instanceof LivingEntity`). Default: not living.
+    fn is_living(&self, id: EntityId) -> bool {
+        let _ = id;
+        false
+    }
     /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
@@ -181,6 +191,10 @@ pub trait EntitySink {
     }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        None
+    }
+    /// `Entity.getEyeY` of an entity (`EntityStore::eye_y`). None in fakes.
+    fn entity_eye_y(&self, _id: EntityId) -> Option<f64> {
         None
     }
     /// The entity's equipment slots (vanilla `LivingEntity` equipment): (wire slot, stack)
@@ -333,6 +347,12 @@ impl EntitySink for EntityStore {
     fn mark_hit(&mut self, id: EntityId) {
         EntityStore::mark_hit(self, id)
     }
+    fn wake_up(&mut self, id: EntityId) {
+        EntityStore::wake_up(self, id)
+    }
+    fn is_living(&self, id: EntityId) -> bool {
+        EntityStore::is_living(self, id)
+    }
     fn use_new_minecart_behavior(&mut self, id: EntityId) {
         EntityStore::use_new_minecart_behavior(self, id)
     }
@@ -370,6 +390,9 @@ impl EntitySink for EntityStore {
     }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
+    }
+    fn entity_eye_y(&self, id: EntityId) -> Option<f64> {
+        EntityStore::eye_y(self, id)
     }
     fn equipment(&self, id: EntityId) -> Option<&[(u8, ItemStackData)]> {
         self.get(id).map(|e| e.equipment.as_slice())

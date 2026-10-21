@@ -165,7 +165,7 @@ pub struct Entity {
 pub struct EntityStore {
     pub(crate) slots: Vec<Option<Entity>>,
     free: Vec<u32>,
-    by_id: AHashMap<EntityId, u32>,
+    pub(crate) by_id: AHashMap<EntityId, u32>,
     pub(crate) dims: EntityDimensions,
     players: AHashMap<Uuid, PlayerInfo>,
     /// Who rides whom (`set_passengers`).

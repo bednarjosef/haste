@@ -1,5 +1,6 @@
-// The leftover packets: the world clock (`set_time`), the server's `disconnect` reason and
-// the sound packets recorded for the game thread's sound output.
+// The leftover packets: the world clock (`set_time`), the server's `disconnect` reason, the
+// default spawn position (`set_default_spawn_position`) and the sound packets recorded for the
+// game thread's sound output.
 
 use haste_protocol::{ClientboundPlay, SyncedRegistries};
 
@@ -40,6 +41,9 @@ impl Session {
                 }
             }
             P::MapItemData(m) => self.apply_map_item_data(&m),
+            P::SetDefaultSpawnPosition(s) => self.set_respawn_data(&s),
+            P::ChangeDifficulty(c) => self.set_difficulty(&c),
+            P::ServerData(s) => self.set_server_data(&s),
             _ => return Some(p),
         }
         None

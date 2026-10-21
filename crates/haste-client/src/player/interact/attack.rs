@@ -78,6 +78,8 @@ impl LocalPlayer {
                 // the attack ticker), `resetAttackStrengthTicker` (both tickers) and
                 // `destroyDelay` 5 in creative. No missTime.
                 out.push(ServerboundPlay::Attack(sb::Attack { entity_id: id.0 }));
+                // `Player.attack`'s critical check reads the charge before `onAttack` resets it.
+                self.queue_critical_hit(id, world, env);
                 self.hand.reset_attack_strength_ticker();
                 if self.game_mode == GameMode::Creative {
                     self.int.destroy_delay = DESTROY_DELAY;
