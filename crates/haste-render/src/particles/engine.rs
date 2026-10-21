@@ -141,9 +141,8 @@ impl Particles {
             return;
         };
         let flash = self.firework_kind(&Identifier::minecraft("flash"));
-        self.starters.push(firework::Starter::new(
-            pos, vel, explosions, spark, flash,
-        ));
+        self.starters
+            .push(firework::Starter::new(pos, vel, explosions, spark, flash));
     }
 
     /// A firework type's pool index and behaviour; an unknown type logs once and is `None`.

@@ -122,7 +122,13 @@ fn twinkle_hides_the_odd_thirds_after_the_first_third() {
     }
     // From a third on, hidden where `(age + 60) / 3` is odd: 21 (27), 24 is shown (28),
     // 27 hidden (29), 30 shown (30).
-    for (age, hidden) in [(20, false), (21, true), (24, false), (27, true), (30, false)] {
+    for (age, hidden) in [
+        (20, false),
+        (21, true),
+        (24, false),
+        (27, true),
+        (30, false),
+    ] {
         spark.age = age as f32;
         assert_eq!(firework::hidden(&spark), hidden, "age {age}");
     }
