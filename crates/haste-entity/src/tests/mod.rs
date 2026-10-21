@@ -19,6 +19,7 @@ mod armor_stand;
 mod arrow;
 mod boat;
 mod connectivity;
+mod fishing_hook;
 mod hurt;
 mod item_entity;
 mod local_player;
