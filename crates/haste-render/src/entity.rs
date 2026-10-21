@@ -72,10 +72,22 @@ mod tnt;
 mod world_glyph;
 
 mod armor_stand;
+mod arrow_layer;
+mod bee_stinger_layer;
 mod hand;
 mod humanoid;
 mod item_display;
 mod model_parts;
+mod parrot_on_shoulder;
+#[cfg(test)]
+mod parrot_on_shoulder_tests;
+mod stuck_in_body;
+#[cfg(test)]
+mod stuck_in_body_tests;
+mod stuck_layers;
+mod tick_pair;
+pub use stuck_layers::{StuckInput, StuckModels};
+pub use tick_pair::TickPair;
 mod vertex;
 
 pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matrix};
@@ -204,29 +216,6 @@ fn body_matrix(b: &BodyTransform) -> Mat4 {
     m
 }
 
-/// A per-tick value the renderer lerps by partial tick, the way a vanilla render state
-/// extracts one (`Mth.lerp(partialTicks, xO, x)`): the value at the start and at the end of the
-/// last game tick. The client owns the tick, the renderer only interpolates it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TickPair {
-    /// The value at the end of the previous tick (vanilla's `oX` field).
-    pub start: f32,
-    /// The value at the end of the last tick.
-    pub end: f32,
-}
-
-impl TickPair {
-    /// A value that never changes.
-    pub const fn fixed(v: f32) -> TickPair {
-        TickPair { start: v, end: v }
-    }
-
-    /// `Mth.lerp(partial, start, end)` at `partial` (0..1) through the tick.
-    pub fn at(self, partial: f32) -> f32 {
-        self.start + (self.end - self.start) * partial
-    }
-}
-
 /// What the first-person view holds (vanilla `FirstPersonHandsAndItemsRenderState`): see
 /// [`first_person`](self::first_person).
 pub use first_person::FirstPerson;
@@ -332,6 +321,9 @@ pub struct EntityRenderer {
     map_decoration_rects: HashMap<u32, Option<[u32; 4]>>,
     /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
     map_decoration_names: Vec<Identifier>,
+    /// This frame's stuck and shoulder state (by id) and the models they draw (`set_stuck`).
+    stuck: Vec<StuckInput>,
+    stuck_models: StuckModels,
     pub drawn: u32,
     /// The leash ropes to draw this frame (set by the client through [`Self::set_leash_lines`]).
     leash_lines: Vec<leash::LeashLine>,
@@ -520,6 +512,7 @@ impl EntityRenderer {
                 }
             }
             self.emit_equipment(e, root, light, assets);
+            self.emit_stuck(e, root, light, assets);
             // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
             if e.display_fire {
                 self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
