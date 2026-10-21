@@ -19,12 +19,13 @@ pub(super) fn convert(world: &dyn BlockView, lines: &[EntityLeash], out: &mut Ve
     }));
 }
 
-/// `(sky, block)` light at the block containing a rope end.
+/// `(block, sky)` light at the block containing a rope end: the lightmap's u is block light and
+/// its v is sky light (the order `EntityRenderer` reads them in).
 fn light_at(world: &dyn BlockView, p: DVec3) -> (u8, u8) {
     let pos = BlockPos::new(
         p.x.floor() as i32,
         (p.y + 0.5).floor() as i32,
         p.z.floor() as i32,
     );
-    (world.sky_light(pos), world.block_light(pos))
+    (world.block_light(pos), world.sky_light(pos))
 }
