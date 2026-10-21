@@ -157,6 +157,8 @@ public final class Bridge {
         // vanilla advances the frame timer every frame (Minecraft.renderFrame), in a world or not: the
         // title panorama spins by its real-time delta
         Delta.frame(partial);
+        // the sounds Rust played since the last frame reach the sound event listeners (the subtitles)
+        SoundImpl.frame();
         if (Mirror.inWorld()) {
             Proxies.hud.extractRenderState(Proxies.graphics, Delta.INSTANCE);
             GfxImpl.POSE.reset();
@@ -168,6 +170,8 @@ public final class Bridge {
         if (!(s instanceof net.minecraft.client.gui.screens.debug.DebugOptionsScreen)) {
             Proxies.hud.extractDebugOverlay(Proxies.graphics);
         }
+        // then the subtitles the HUD deferred, on top of everything (vanilla Gui.extractRenderState)
+        Proxies.hud.extractDeferredSubtitles();
         GfxImpl.end();
         return GuiBatch.frame(GfxImpl.cursor, GfxImpl.blurAfter, GfxImpl.panorama, GfxImpl.panoramaSpin);
     }

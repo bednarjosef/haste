@@ -25,6 +25,7 @@ mod launch_options;
 mod loader;
 mod natives;
 mod proxies;
+pub mod sound_manager;
 
 pub use error::JvmError;
 pub use gui::{GuiPipeline, ScreenKind};

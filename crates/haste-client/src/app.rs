@@ -421,8 +421,8 @@ pub fn set_hud_from_args(hud: &str) -> anyhow::Result<()> {
 }
 
 impl Session {
-    /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
-    /// silent so they neither make noise nor measure the audio thread). `address` is the server
+    /// `sound`: the audio output (the device for the window only; screenshots and the benchmark
+    /// have none, scripts a silent one: no noise, no audio thread). `address` is the server
     /// (`--server`, or the address chosen on the multiplayer screen in menu mode).
     /// `existing_ui`: menu mode's UI over its already-started JVM, reused for the HUD so the
     /// screens and chat history survive the transition into the game.
@@ -430,7 +430,7 @@ impl Session {
         username: &str,
         render_distance: Option<u8>,
         address: &str,
-        sound: bool,
+        sound: crate::sound::SoundOutput,
         existing_ui: Option<crate::ui::Ui>,
     ) -> anyhow::Result<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -472,11 +472,7 @@ impl Session {
         driver.session.fov_effect_scale = options.fov_effect_scale;
         let (biomes, biome_climates, type_names, sounds, painting_variants, mob_variants) = {
             let regs = driver.connection().registries();
-            let sounds = if sound {
-                crate::sound::open_sounds(regs, &data, &options.sound)
-            } else {
-                None
-            };
+            let sounds = crate::sound::open_sounds(sound, regs, &data, &options.sound);
             (
                 net::synced_biome_count(regs).unwrap_or(64),
                 biomes::biome_climates(regs),
@@ -1946,7 +1942,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         &args.username,
         args.render_distance,
         args.server.as_deref().unwrap(),
-        false,
+        crate::sound::SoundOutput::Off,
         None,
     )?;
     let shared = session.shared.clone();
@@ -2229,7 +2225,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &args.username,
             args.render_distance,
             address,
-            false,
+            crate::sound::SoundOutput::Silent,
             None,
         )?),
         None => None,
@@ -2471,7 +2467,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 &args.username,
                                 args.render_distance,
                                 &address,
-                                false,
+                                crate::sound::SoundOutput::Silent,
                                 Some(for_game),
                             ) {
                                 Ok(s) => {
@@ -2514,7 +2510,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                         &args.username,
                                         args.render_distance,
                                         &address,
-                                        false,
+                                        crate::sound::SoundOutput::Silent,
                                         Some(for_game),
                                     ) {
                                         Ok(s) => {
@@ -2951,7 +2947,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
             &args.username,
             args.render_distance,
             address,
-            true,
+            crate::sound::SoundOutput::Device,
             None,
         )?),
         None => None,
@@ -3329,8 +3325,9 @@ impl App {
                     .as_ref()
                     .map(|w| w.address())
                     .unwrap_or_else(|| plain_address.clone());
+                let device = crate::sound::SoundOutput::Device;
                 let _ = tx.send(
-                    Session::join(&username, render_distance, &address, true, Some(for_game))
+                    Session::join(&username, render_distance, &address, device, Some(for_game))
                         .map(|s| (s, world)),
                 );
             })
