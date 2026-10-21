@@ -10,6 +10,7 @@
 
 pub mod chunk;
 pub mod decoration;
+pub mod display;
 pub mod entity;
 pub mod game;
 pub mod gui;

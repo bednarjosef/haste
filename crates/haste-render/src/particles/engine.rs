@@ -474,6 +474,12 @@ impl Particles {
             p.vel.z *= 1.1;
         }
         p.vel *= b.friction;
+        if b.source == "TotemParticle" {
+            // SimpleAnimatedParticle.tick: the alpha fades over the second half of the life.
+            if let Some(alpha) = super::totem::fade_alpha(p.age, p.lifetime) {
+                p.alpha = alpha;
+            }
+        }
         // Per-tick colour fade (`CritParticle.tick`'s yellowing).
         for k in 0..3 {
             p.color[k] *= b.color_fade[k];
@@ -506,6 +512,10 @@ pub(super) fn spawn_color(
             (rng.next_f32() * 0.2 + 0.8) * base[1] * factor,
             (rng.next_f32() * 0.2 + 0.8) * base[2] * factor,
         ];
+    }
+    if behaviour.source == "TotemParticle" {
+        // TotemParticle's constructor rolls its own colour (gold or green).
+        color = super::totem::totem_color(rng);
     }
     if let Some(scale) = behaviour.color_scale {
         color = [

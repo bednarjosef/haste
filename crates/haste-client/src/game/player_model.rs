@@ -94,15 +94,22 @@ pub fn push_local_instance(
     if !super::camera_entity::draws_local_player(view) {
         return;
     }
+    // `EntityRenderer.extractRenderState`'s `passengerOffset`: riding a cart that walks its
+    // track steps, we are drawn moved with the walk (read before the model lock is taken).
+    let offset = super::cart_camera::passenger_offset(view, shared, partial);
     let model = shared.local_model.lock();
-    instances.push(player_instance(
+    let mut inst = player_instance(
         local.0,
         &model,
         view,
         partial,
         skin,
         &shared.data.item_components,
-    ));
+    );
+    if let Some(offset) = offset {
+        inst.pos += offset;
+    }
+    instances.push(inst);
 }
 
 /// The local player's own render instance for third person (and the GUI's inventory preview,

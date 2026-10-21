@@ -4,8 +4,10 @@
 //! spawner, command block, or the custom block from the synched data), the track-following
 //! rotation and hurt wobble, and the TNT cart's swell and white flash.
 //!
-//! The old-behavior render path only (see `haste-entity`'s `minecart` module): the cart is
-//! posed from the rail positions the game side snapped per frame.
+//! Both render paths: the old behaviour's (`oldRender`, posed from the rail positions the game
+//! side snapped per frame, see `haste-entity`'s `minecart` module) and the new behaviour's
+//! (`newRender`, whose pose the game side hands over as the instance's body ops, see
+//! `haste-entity`'s `new_minecart_behavior`).
 
 use super::*;
 
@@ -18,6 +20,41 @@ pub(crate) enum DisplayGeometry {
     Chest(crate::blockentity::ChestMaterial),
     /// A blockstate's baked quads, each with its model ref's x/y rotation.
     Model(Arc<Vec<(haste_assets::BakedQuad, i32, i32)>>),
+}
+
+/// The render path's pose (`isNewRender`): `newRender` for a cart on the new behaviour, whose
+/// pose the entity side handed over as body ops (already at the track walk's point and
+/// rotation), else `oldRender`.
+pub(crate) fn cart_pose(e: &EntityInstance, cart: &haste_core::model::MinecartDecoration) -> Mat4 {
+    if e.body.len > 0 {
+        body_matrix(&e.body)
+    } else {
+        old_render(e, cart)
+    }
+}
+
+/// `AbstractMinecartRenderer.oldRender`: the cart sits on the rail's line, rotated to face
+/// along it; off the rails (or on a zero-length direction) the entity's own yaw/pitch pose it.
+fn old_render(e: &EntityInstance, cart: &haste_core::model::MinecartDecoration) -> Mat4 {
+    let mut m = Mat4::IDENTITY;
+    let (mut rotation, mut x_rot) = (e.yaw, e.pitch);
+    if let Some((pos, front, back)) = cart.rail {
+        let mid = (front.y + back.y) / 2.0;
+        m *= Mat4::from_translation(Vec3::new(
+            (pos.x - e.pos.x) as f32,
+            (mid - e.pos.y) as f32,
+            (pos.z - e.pos.z) as f32,
+        ));
+        let dir = (back - front).as_vec3();
+        if dir.length_squared() > 0.0 {
+            let dir = dir.normalize();
+            rotation = dir.z.atan2(dir.x).to_degrees();
+            x_rot = dir.y.atan() * 73.0;
+        }
+    }
+    m * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
+        * Mat4::from_rotation_y((180.0 - rotation).to_radians())
+        * Mat4::from_rotation_z(-x_rot.to_radians())
 }
 
 /// `TntRenderer.getSwellAmount`: `(1 - fuse/10)` clamped to 0..1, to the fourth power, times
@@ -42,8 +79,8 @@ pub(crate) fn tnt_lit(fuse: f32) -> bool {
 pub(crate) const TNT_WHITE_OVERLAY: f32 = 63.0 / 255.0;
 
 impl EntityRenderer {
-    /// Poses one minecart, following vanilla `AbstractMinecartRenderer.submit` (the old
-    /// render path): the per-entity jitter, the rail-snapped position and rotation, the hurt
+    /// Poses one minecart, following vanilla `AbstractMinecartRenderer.submit`: the
+    /// per-entity jitter, the new or old render path's position and rotation, the hurt
     /// wobble, the cargo block, then the cart model at scale (-1, -1, 1).
     pub(super) fn emit_minecart(
         &mut self,
@@ -62,27 +99,7 @@ impl EntityRenderer {
             (((seed >> 20 & 7) as f32 + 0.5) / 8.0 - 0.5) * 0.004,
             (((seed >> 24 & 7) as f32 + 0.5) / 8.0 - 0.5) * 0.004,
         );
-        let mut m = Mat4::from_translation(base + jitter);
-        // `oldRender`: the cart sits on the rail's line, rotated to face along it; off the
-        // rails (or on a zero-length direction) the entity's own yaw/pitch pose it.
-        let (mut rotation, mut x_rot) = (e.yaw, e.pitch);
-        if let Some((pos, front, back)) = cart.rail {
-            let mid = (front.y + back.y) / 2.0;
-            m *= Mat4::from_translation(Vec3::new(
-                (pos.x - e.pos.x) as f32,
-                (mid - e.pos.y) as f32,
-                (pos.z - e.pos.z) as f32,
-            ));
-            let dir = (back - front).as_vec3();
-            if dir.length_squared() > 0.0 {
-                let dir = dir.normalize();
-                rotation = dir.z.atan2(dir.x).to_degrees();
-                x_rot = dir.y.atan() * 73.0;
-            }
-        }
-        m *= Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
-            * Mat4::from_rotation_y((180.0 - rotation).to_radians())
-            * Mat4::from_rotation_z(-x_rot.to_radians());
+        let mut m = Mat4::from_translation(base + jitter) * cart_pose(e, cart);
         // The hurt wobble (`hurtTime` counting down from 10, scaled by the accumulated
         // damage, around the cart's long axis).
         if cart.hurt_time > 0.0 {

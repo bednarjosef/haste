@@ -32,7 +32,12 @@ impl Session {
                 if self.is_lightning_type(s.kind) {
                     self.lightmap.lightning();
                 }
-                entities.spawn(&s)
+                entities.spawn(&s);
+                // `AbstractMinecart`'s constructor picks its behaviour from the level's
+                // features (the store leaves every other type alone).
+                if super::minecart::use_experimental_movement(regs) {
+                    entities.use_new_minecart_behavior(s.id);
+                }
             }
             P::RemoveEntities(r) => {
                 let ids: Vec<EntityId> = r.entity_ids.iter().map(|i| EntityId(*i)).collect();
@@ -175,6 +180,7 @@ impl Session {
                 };
                 entities.teleport(id, pos, yaw, pitch, t.on_ground);
             }
+            P::MoveMinecartAlongTrack(m) => Self::handle_minecart_along_track(&m, entities),
             P::RotateHead(h) => entities.set_head_yaw(EntityId(h.entity_id), h.head_yaw),
             P::SwingAnimation(s) => {
                 entities.swing(EntityId(s.entity_id), s.hand, s.animation, s.duration)
@@ -204,6 +210,10 @@ impl Session {
             // Entity status 70 primes a TNT minecart's fuse (MinecartTNT.handleEntityEvent).
             P::EntityEvent(e) if e.status == 70 => {
                 entities.prime_tnt_minecart(EntityId(e.entity_id))
+            }
+            // Entity status 35: the totem of undying popped (`handleEntityEvent`'s TOTEM case).
+            P::EntityEvent(e) if e.status == 35 => {
+                super::totem::start_totem(self, EntityId(e.entity_id), entities)
             }
             P::SetEntityData(d) => {
                 // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air

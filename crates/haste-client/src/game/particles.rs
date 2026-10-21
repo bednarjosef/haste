@@ -116,6 +116,25 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
                 [0.0; 3],
             ));
         }
+        // The totem pops (`TrackingEmitter.tick`): each emitter follows its entity's box and
+        // is dropped once it has lived its 30 ticks, or its entity is gone.
+        let entities = shared.entities.read();
+        let own = driver.session.entity_id;
+        let own_pos = driver.session.player.state.pos;
+        let mut totems = std::mem::take(&mut driver.session.totem_emitters);
+        totems.retain_mut(|t| {
+            let (pos, size) = if t.entity == own {
+                // Our own entity is not in the store: the local player's box.
+                (own_pos, (0.6, 1.8))
+            } else {
+                match (entities.get(t.entity), entities.entity_type_info(t.entity)) {
+                    (Some(e), Some((_, size))) => (e.pos, size),
+                    _ => return false,
+                }
+            };
+            t.tick(pos, size, &mut driver.session.totem_rng, &mut ambient)
+        });
+        driver.session.totem_emitters = totems;
     }
     for s in &ambient {
         particles.spawn(s, camera, None);

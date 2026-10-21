@@ -47,6 +47,15 @@ impl EntityStore {
             // (`AbstractMinecartRenderer`, `ThrownItemRenderer`, `DragonFireballRenderer`),
             // but keep the entity's own interpolated position. Arrows too (`ArrowRenderer`),
             // keeping the entity's own position.
+            // `DisplayRenderer`: a display draws only once its render state exists, with the
+            // shadow its interpolated state casts.
+            let display = match slot.display {
+                Some(_) => match crate::display::decoration(slot, partial_tick) {
+                    Some(d) => Some(d),
+                    None => continue,
+                },
+                None => None,
+            };
             let minecart_variant = crate::minecart::variant_for_kind(slot.kind);
             let minecart = minecart_variant
                 .map(|v| crate::minecart::decoration(&slot.metadata, v, partial_tick));
@@ -58,6 +67,10 @@ impl EntityStore {
                 || crate::arrow::is_arrow(slot.kind);
             let decoration = minecart
                 .map(haste_core::model::Decoration::Minecart)
+                .or_else(|| {
+                    let d = display.as_ref()?.0.clone();
+                    Some(haste_core::model::Decoration::Display(d))
+                })
                 .or_else(|| {
                     thrown
                         .and_then(|t| crate::thrown_item::decoration(&t, &slot.metadata))
@@ -167,6 +180,8 @@ impl EntityStore {
             let shadow_strength = type_name
                 .map(crate::registry::shadow_strength_for_name)
                 .unwrap_or(1.0);
+            let (shadow_radius, shadow_strength) =
+                display.map_or((shadow_radius, shadow_strength), |(_, r, s)| (r, s));
             let invisible = slot.metadata.shared.invisible;
             // `EntityRenderer.extractNameTags`/`shouldShowName`: players always show their name
             // (`Player.shouldShowName`), mobs only a visible custom name (`LivingEntity`), both
@@ -237,6 +252,19 @@ impl EntityStore {
                 equipment,
                 head_item,
             };
+            if minecart_variant.is_some() {
+                minecart_render_pose(&mut inst, slot, partial_tick);
+            }
+            // `EntityRenderer.extractRenderState`'s `passengerOffset`: a passenger of a cart
+            // walking its track steps rides along with the walk.
+            if let Some(offset) = self
+                .riding
+                .vehicle_of(slot.id)
+                .and_then(|v| self.get(v))
+                .and_then(|cart| crate::new_minecart_behavior::passenger_offset(cart, partial_tick))
+            {
+                inst.pos += offset;
+            }
             if slot.is_player_type {
                 crate::avatar::dress_tracked(
                     &self.player_skin(slot.uuid),
@@ -247,5 +275,22 @@ impl EntityStore {
             }
             out.push(inst);
         }
+    }
+}
+
+/// `AbstractMinecartRenderer.extractRenderState`'s behaviour split: a cart on the new
+/// behaviour is drawn at its track walk's point and rotation with `newRender`'s pose (carried
+/// as the instance's body ops); one on the old behaviour keeps its interpolated position and
+/// rotation and no body ops, and is posed from the rails the client snaps per frame
+/// (`oldRender`).
+fn minecart_render_pose(inst: &mut EntityInstance, slot: &Entity, partial_tick: f32) {
+    match crate::new_minecart_behavior::render_pose(slot, partial_tick) {
+        Some((pos, y_rot, x_rot)) => {
+            inst.pos = pos;
+            inst.yaw = y_rot;
+            inst.pitch = x_rot;
+            inst.body = crate::new_minecart_behavior::new_render(y_rot, x_rot);
+        }
+        None => inst.body = haste_core::model::BodyTransform::default(),
     }
 }

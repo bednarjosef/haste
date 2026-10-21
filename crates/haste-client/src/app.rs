@@ -838,7 +838,7 @@ fn frame_view<'w>(
 ) {
     let partial = game::partial_tick(view.tick_at, now);
     // The player's eye and look, or the spectated entity's (`Camera.alignWithEntity`).
-    let (eye, look) = game::camera_entity::frame_eye(view, partial, (yaw, pitch));
+    let (eye, look) = game::camera_entity::frame_eye(view, shared, partial, (yaw, pitch));
     // The world is read for the third-person camera and the fog environment (the fluid and
     // biome at the camera), held for the rest of this function.
     let world = shared.world.read();
@@ -2121,7 +2121,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
-        frame::apply_cloud_options(&mut renderer, &session.options);
+        frame::apply_view_options(&mut renderer, &session.options, view.world_border);
         {
             let snapshot = shared
                 .particle_snapshots
@@ -2887,7 +2887,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
         renderer.set_view_scale(options.entity_distance_scaling);
-        frame::apply_cloud_options(&mut renderer, &options);
+        frame::apply_view_options(&mut renderer, &options, view.world_border);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);

@@ -172,6 +172,10 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// The totem pops in progress (vanilla `TrackingEmitter`s the status 35 adds), ticked by
+    /// the game thread into the particle pool, and their random (vanilla's level random).
+    pub totem_emitters: Vec<crate::game::totem_emitter::TotemEmitter>,
+    pub totem_rng: haste_audio::random::LegacyRandom,
     /// Block particles queued since the last tick (our own break and mining start, and the
     /// server's `level_event`s), drained by the game thread into the shared pool.
     pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
@@ -202,7 +206,7 @@ pub struct Session {
     /// The world border (`minecraft:initialize_border` and the `set_border_*` packets): the
     /// interaction step gates its packets on it (`useItemOn` fails without a packet outside
     /// it, `startDestroyBlock` returns false).
-    world_border: crate::world_border::WorldBorder,
+    pub(crate) world_border: crate::world_border::WorldBorder,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
     /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
@@ -312,6 +316,13 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            totem_emitters: Vec::new(),
+            totem_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
             block_particle_requests: Vec::new(),
             item_particle_requests: Vec::new(),
             explosions: explosion_tracker::ExplosionTracker::default(),
@@ -540,6 +551,7 @@ mod fov;
 mod item_world;
 mod lightmap;
 mod maps;
+mod minecart;
 mod misc;
 pub(crate) mod pack_prompt;
 mod particles;
@@ -550,6 +562,7 @@ mod remote_use;
 mod session_tick;
 mod sinks;
 mod sync_block_state;
+mod totem;
 mod vehicle;
 mod weather;
 mod world;

@@ -16,6 +16,7 @@ use haste_protocol::haste_core::entity::{
 };
 use haste_protocol::haste_core::game::DimensionInfo;
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId};
+use haste_protocol::packets::play::clientbound::MinecartStep;
 use haste_world::World;
 
 /// What the driver needs from the world (`haste_world::World`).
@@ -150,6 +151,16 @@ pub trait EntitySink {
     /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
+    }
+    /// `EntityStore::use_new_minecart_behavior`: a minecart spawned in a level with the
+    /// `minecart_improvements` feature runs `NewMinecartBehavior`. Default no-op.
+    fn use_new_minecart_behavior(&mut self, id: EntityId) {
+        let _ = id;
+    }
+    /// `EntityStore::handle_minecart_along_track`: a new-behaviour cart's track steps
+    /// (`move_minecart_along_track`). Default no-op.
+    fn handle_minecart_along_track(&mut self, id: EntityId, steps: &[MinecartStep]) {
+        let _ = (id, steps);
     }
     /// `EntityStore::set_metadata`.
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]);
@@ -311,6 +322,23 @@ impl EntitySink for EntityStore {
     }
     fn mark_hit(&mut self, id: EntityId) {
         EntityStore::mark_hit(self, id)
+    }
+    fn use_new_minecart_behavior(&mut self, id: EntityId) {
+        EntityStore::use_new_minecart_behavior(self, id)
+    }
+    fn handle_minecart_along_track(&mut self, id: EntityId, steps: &[MinecartStep]) {
+        // The wire's steps as the entity crate's (`NewMinecartBehavior.MinecartStep`), straight
+        // into the cart's waiting list: no allocation beyond the packet once it has grown.
+        let steps = steps
+            .iter()
+            .map(|s| haste_entity::new_minecart_behavior::MinecartStep {
+                position: s.pos,
+                movement: s.velocity,
+                y_rot: s.yaw,
+                x_rot: s.pitch,
+                weight: s.weight,
+            });
+        EntityStore::handle_minecart_along_track(self, id, steps)
     }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)

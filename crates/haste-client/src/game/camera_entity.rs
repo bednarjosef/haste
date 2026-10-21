@@ -166,16 +166,22 @@ pub struct CameraEntityView {
 
 /// The frame's camera eye and look before the perspective moves it (vanilla `Camera
 /// .alignWithEntity`'s first step): the spectated entity's interpolated eye and view
-/// rotation, or else the player's interpolated eye with the input layer's look plus the
+/// rotation, or else the player's eye (moved with a new-behaviour cart's walk while riding
+/// one, see `cart_camera`) with the input layer's look plus the
 /// server's rotation offset (the player turns at frame rate while it ticks at 20 Hz).
-pub fn frame_eye(view: &ViewState, partial: f32, input_look: (f32, f32)) -> (DVec3, (f32, f32)) {
+pub fn frame_eye(
+    view: &ViewState,
+    shared: &super::shared::Shared,
+    partial: f32,
+    input_look: (f32, f32),
+) -> (DVec3, (f32, f32)) {
     match &view.camera_entity {
         Some(c) => {
             let (eye, yaw, pitch) = c.entity.camera_at(partial, c.eye_heights);
             (eye, (yaw, pitch))
         }
         None => (
-            super::interpolate(view.prev_eye, view.eye, partial),
+            super::camera_eye(view, shared, partial),
             (
                 input_look.0 + view.look_offset.0,
                 (input_look.1 + view.look_offset.1).clamp(-90.0, 90.0),
