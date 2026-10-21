@@ -10,16 +10,27 @@ impl EntityRenderer {
         i: haste_core::RegistryIndex,
         assets: &mut Assets,
     ) -> Option<Arc<haste_assets::ItemModel>> {
-        if let Some(m) = self.item_models.get(&i.0) {
+        self.item_model_cast_for(i, false, assets)
+    }
+
+    /// The item's model for a holder whose `fishing_rod/cast` property is `cast`
+    /// (`ItemModelResolver` picks the definition's branch for it), cached per variant.
+    pub(super) fn item_model_cast_for(
+        &mut self,
+        i: haste_core::RegistryIndex,
+        cast: bool,
+        assets: &mut Assets,
+    ) -> Option<Arc<haste_assets::ItemModel>> {
+        if let Some(m) = self.item_models.get(&(i.0, cast)) {
             return m.clone();
         }
         let m = self
             .item_names
             .get(i.0 as usize)
             .filter(|n| n.path() != "air")
-            .and_then(|n| assets.item_model(n).ok())
+            .and_then(|n| assets.item_model_cast(n, cast).ok())
             .map(Arc::new);
-        self.item_models.insert(i.0, m.clone());
+        self.item_models.insert((i.0, cast), m.clone());
         m
     }
     /// Poses a dropped item entity (`minecraft:item`) into the vertex buffer, following

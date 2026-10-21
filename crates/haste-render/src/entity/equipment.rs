@@ -46,10 +46,11 @@ impl EntityRenderer {
         // Held items: vanilla draws the right hand first, then the left.
         for (i, item) in e.hands.iter().enumerate() {
             let Some(idx) = *item else { continue };
-            let Some(model) = self.item_model_for(idx, assets) else {
+            let left = i == 1;
+            let cast = self.rod_is_cast(e.id, !left);
+            let Some(model) = self.item_model_cast_for(idx, cast, assets) else {
                 continue;
             };
-            let left = i == 1;
             let arm = if left {
                 parts::LEFT_ARM
             } else {

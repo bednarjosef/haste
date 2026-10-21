@@ -22,6 +22,7 @@ mod camera_view;
 mod connectivity;
 mod evoker_fangs;
 mod evoker_fangs_model;
+mod fishing_hook;
 mod hurt;
 mod item_entity;
 mod llama_spit_model;

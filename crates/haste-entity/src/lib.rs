@@ -18,6 +18,8 @@ pub mod evoker_fangs;
 pub mod evoker_fangs_model;
 pub mod eye;
 mod firework_rocket;
+pub mod fishing_bobber;
+pub mod fishing_hook;
 pub mod item_entity;
 pub mod leash;
 pub mod leash_knot;

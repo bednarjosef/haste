@@ -93,6 +93,12 @@ pub struct PartTransformation {
 impl Assets {
     /// The GUI model of an item (`minecraft:stone` -> `items/stone.json`).
     pub fn item_model(&mut self, item: &Identifier) -> Result<ItemModel> {
+        self.item_model_cast(item, false)
+    }
+
+    /// The GUI model of an item for a holder whose `minecraft:fishing_rod/cast` property is
+    /// `cast` (the rod's hook is out): the branch the item definition takes for it.
+    pub fn item_model_cast(&mut self, item: &Identifier, cast: bool) -> Result<ItemModel> {
         let key = crate::assets::asset_key(item, "items", ".json");
         let bytes = self.read_asset(&key)?;
         let json: serde_json::Value =
@@ -101,7 +107,7 @@ impl Assets {
             .get("model")
             .context("item definition without `model`")?;
         let mut leaves = Vec::new();
-        collect_leaves(root, None, &mut leaves);
+        collect_leaves(root, None, cast, &mut leaves);
         let mut parts = Vec::with_capacity(leaves.len());
         for leaf in leaves {
             parts.push(self.item_part(&leaf)?);
@@ -247,97 +253,6 @@ fn parse_rgb(v: &serde_json::Value) -> Option<u32> {
     Some(0xFF00_0000 | c(0) << 16 | c(1) << 8 | c(2))
 }
 
-struct Leaf {
-    model: Option<String>,
-    tints: Vec<serde_json::Value>,
-    special: bool,
-    transformation: Option<PartTransformation>,
-}
-
-fn node_type(node: &serde_json::Value) -> &str {
-    node.get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("")
-        .trim_start_matches("minecraft:")
-}
-
-fn collect_leaves(
-    node: &serde_json::Value,
-    transformation: Option<PartTransformation>,
-    out: &mut Vec<Leaf>,
-) {
-    let transformation = node
-        .get("transformation")
-        .and_then(parse_transformation)
-        .or(transformation);
-    match node_type(node) {
-        "model" => out.push(Leaf {
-            model: node.get("model").and_then(|m| m.as_str()).map(String::from),
-            tints: node
-                .get("tints")
-                .and_then(|t| t.as_array())
-                .cloned()
-                .unwrap_or_default(),
-            special: false,
-            transformation,
-        }),
-        "special" => out.push(Leaf {
-            model: node.get("base").and_then(|m| m.as_str()).map(String::from),
-            tints: Vec::new(),
-            special: true,
-            transformation,
-        }),
-        "composite" => {
-            for m in node
-                .get("models")
-                .and_then(|m| m.as_array())
-                .into_iter()
-                .flatten()
-            {
-                collect_leaves(m, transformation, out);
-            }
-        }
-        "condition" => {
-            if let Some(n) = node.get("on_false") {
-                collect_leaves(n, transformation, out);
-            }
-        }
-        "select" => {
-            let first_case = node
-                .get("cases")
-                .and_then(|c| c.as_array())
-                .and_then(|c| c.first())
-                .and_then(|c| c.get("model"));
-            if let Some(n) = node.get("fallback").or(first_case) {
-                collect_leaves(n, transformation, out);
-            }
-        }
-        "range_dispatch" => {
-            // Property value 0 for a default stack: the entry with the largest threshold <= 0.
-            let entry = node
-                .get("entries")
-                .and_then(|e| e.as_array())
-                .into_iter()
-                .flatten()
-                .filter(|e| {
-                    e.get("threshold")
-                        .and_then(|t| t.as_f64())
-                        .is_some_and(|t| t <= 0.0)
-                })
-                .max_by(|a, b| {
-                    let t = |e: &serde_json::Value| e["threshold"].as_f64().unwrap_or(0.0);
-                    t(a).total_cmp(&t(b))
-                })
-                .and_then(|e| e.get("model"));
-            if let Some(n) = entry.or(node.get("fallback")) {
-                collect_leaves(n, transformation, out);
-            }
-        }
-        // `empty`, `bundle/selected_item`, unknown types: nothing to draw.
-        _ => {}
-    }
-}
-
 fn parse_transformation(v: &serde_json::Value) -> Option<PartTransformation> {
     let arr = |k: &str| -> Option<Vec<f32>> {
         v.get(k)?
@@ -368,8 +283,10 @@ fn parse_transformation(v: &serde_json::Value) -> Option<PartTransformation> {
 }
 
 mod generated;
+mod leaves;
 
 use generated::generated_layer_quads;
+use leaves::{collect_leaves, Leaf};
 
 /// Model elements to quads (0..1 block units, face-local UVs), the same geometry rules as
 /// block baking without a blockstate rotation.
@@ -410,7 +327,7 @@ mod model_tests {
     fn leaves(json: &str) -> Vec<Leaf> {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         let mut out = Vec::new();
-        collect_leaves(&v["model"], None, &mut out);
+        collect_leaves(&v["model"], None, false, &mut out);
         out
     }
 

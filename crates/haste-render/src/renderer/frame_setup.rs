@@ -171,6 +171,11 @@ impl Renderer {
         self.entity.set_view_scale(scale);
     }
 
+    /// This frame's fishing bobbers (vanilla `FishingHookRenderer`): drawn with the entities.
+    pub fn set_fishing_bobbers(&mut self, bobbers: &[crate::entity::FishingBobber]) {
+        self.entity.set_fishing_bobbers(bobbers);
+    }
+
     /// This frame's stuck arrows, stingers and shoulder parrots, sorted by entity id, with the
     /// stinger and parrot models the layers draw (`haste_entity::stuck_models`).
     pub fn set_stuck(

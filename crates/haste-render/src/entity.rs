@@ -33,6 +33,7 @@ mod equipment_tests;
 mod experience_orb;
 mod falling_block;
 mod first_person;
+mod fishing_bobber;
 mod flame;
 #[cfg(test)]
 mod flame_tests;
@@ -123,7 +124,8 @@ use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
 pub(crate) use item_entity::{
-    item_entity_bob, item_entity_copies, item_entity_lift, item_entity_spin,
+    entity_phase, item_entity_bob, item_entity_copies, item_entity_lift, item_entity_spin,
+    seeded_float,
 };
 
 /// Vanilla renders the player model at 15/16 scale.
@@ -153,29 +155,6 @@ pub enum ItemDisplay {
     Ground,
     /// `on_shelf` (`ShelfRenderer`: items on a shelf block, small and sunk into the board).
     OnShelf,
-}
-
-/// The per-entity phase `ItemEntity.bobOffs` stands in for: vanilla draws it from the
-/// entity's random at spawn, in [0, 2pi); ours hashes the entity id (indistinguishable
-/// to a player).
-pub(crate) fn entity_phase(id: EntityId) -> f32 {
-    let mut h = (id.0 as u32).wrapping_mul(0x9E37_79B9);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xC2B2_AE35);
-    (h >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU
-}
-
-/// A deterministic [0,1) stream for the stack-copy offsets (vanilla reseeds Java's
-/// `Random` with `getSeedForItemStack` — the item — each frame, so the offsets are
-/// stable per item type; matching Java's sequence exactly is not required, only the
-/// stability and the range).
-pub(crate) fn seeded_float(seed: u32, i: u32) -> f32 {
-    let mut h = seed
-        .wrapping_mul(0x85EB_CA6B)
-        .wrapping_add(i.wrapping_mul(0xC2B2_AE35));
-    h ^= h >> 13;
-    h = h.wrapping_mul(0x27D4_EB2F);
-    (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
 /// The vertex range the upload after `append_block_entities` must cover: only the tail
@@ -225,6 +204,7 @@ fn body_matrix(b: &BodyTransform) -> Mat4 {
 /// What the first-person view holds (vanilla `FirstPersonHandsAndItemsRenderState`): see
 /// [`first_person`](self::first_person).
 pub use first_person::FirstPerson;
+pub use fishing_bobber::{BobberOwner, FishingBobber, LINE_POINTS};
 pub use item_activation::{item_activation_pose, ItemActivation};
 
 /// A name tag to draw: world anchor (above the head) and the text.
@@ -271,7 +251,8 @@ pub struct EntityRenderer {
     /// hand pass by `prepare_hand` in every perspective.
     item_activation: Option<ItemActivation>,
     item_names: Vec<Identifier>,
-    item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
+    /// Item models by registry index and the `fishing_rod/cast` property they resolve with.
+    item_models: HashMap<(u32, bool), Option<Arc<haste_assets::ItemModel>>>,
     /// The first-person arm models, by left, [`FirstPerson::slim`] and
     /// [`FirstPerson::sleeve`] (built once on first use; the left arm serves the two-handed
     /// map pose).
@@ -329,6 +310,8 @@ pub struct EntityRenderer {
     map_decoration_rects: HashMap<u32, Option<[u32; 4]>>,
     /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
     map_decoration_names: Vec<Identifier>,
+    /// This frame's fishing bobbers (set by the client; the list is reused, not rebuilt).
+    fishing_bobbers: Vec<FishingBobber>,
     /// This frame's stuck and shoulder state (by id) and the models they draw (`set_stuck`).
     stuck: Vec<StuckInput>,
     stuck_models: StuckModels,
@@ -549,6 +532,7 @@ impl EntityRenderer {
                 }
             }
         }
+        self.emit_fishing_bobbers(camera, orientation, assets);
         // `LeashFeatureRenderer`: the ropes after the entities, on the white texel so the
         // colour is the rope's own.
         if !self.leash_lines.is_empty() {

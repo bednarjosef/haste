@@ -88,8 +88,14 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             false,
             &view,
         );
-        let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, session.local, partial, &view);
+        let (entities, block_entities) = feed.entities(
+            &shared,
+            &mut renderer,
+            session.local,
+            partial,
+            &view,
+            Some(camera),
+        );
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -282,8 +288,14 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
-        let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, session.local, partial_tick, &view);
+        let (entities, block_entities) = feed.entities(
+            &shared,
+            &mut renderer,
+            session.local,
+            partial_tick,
+            &view,
+            Some(camera),
+        );
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
