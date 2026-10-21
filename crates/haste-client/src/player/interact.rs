@@ -53,6 +53,7 @@ mod block_classes;
 mod consumable;
 mod consume_effects;
 pub(crate) mod cooldowns;
+mod crit;
 mod destroy;
 mod drop;
 mod effects;
@@ -157,6 +158,8 @@ pub struct Interaction {
     pub attrs: InteractAttributes,
     /// Block being broken, its face and the held item it started with, progress 0..1.
     pub(crate) destroying: Option<(BlockPos, Direction, ItemStackData)>,
+    /// Entities the local player critically hit this tick, drained by the session.
+    pub(crate) crit_hits: Vec<haste_core::EntityId>,
     progress: f32,
     /// Vanilla `MultiPlayerGameMode.destroyTicks`: how many `continueDestroyBlock` calls have
     /// added progress to the current break (the press tick's `continueAttack` counts, so a
@@ -558,7 +561,7 @@ impl LocalPlayer {
                 .is_some_and(|s| s.contains(&index))
     }
 
-    fn eye(&self) -> DVec3 {
+    pub(super) fn eye(&self) -> DVec3 {
         self.state.pos + DVec3::new(0.0, self.attrs.eye_height_for(self.state.pose), 0.0)
     }
 }

@@ -3,7 +3,7 @@
 //! `store.rs` to keep that file within the size limit; a pure move.
 
 use haste_core::math::Vec3;
-use haste_core::model::EntityInstance;
+use haste_core::model::{BodyTransform, EntityInstance};
 
 use crate::store::{Entity, EntityStore, HURT_TICKS};
 
@@ -92,7 +92,11 @@ impl EntityStore {
                         self.default_tnt_state,
                     )
                 });
-            let pos = if non_hanging {
+            // The fence knot sits at the box centre of its block (`crate::leash::knot_center`).
+            let knot = crate::leash::is_knot(slot.kind);
+            let pos = if knot {
+                crate::leash::knot_center(slot.prev_pos.lerp(slot.pos, partial_tick as f64))
+            } else if non_hanging {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             } else {
                 match &decoration {
@@ -131,7 +135,7 @@ impl EntityStore {
             let is_boat = slot.is_boat && !slot.is_player_type;
             let is_armor_stand = !slot.is_player_type
                 && crate::registry::entity_type_name(slot.kind) == Some("minecraft:armor_stand");
-            let pose = if is_boat {
+            let mut pose = if is_boat {
                 crate::boat::setup_anim(slot, &model, partial_tick)
             } else if is_armor_stand {
                 crate::armor_stand::pose(slot, slot.yaw_at(partial_tick))
@@ -145,6 +149,8 @@ impl EntityStore {
             // `setupRotations` for everything else.
             let mut body = if is_boat {
                 crate::boat::body_transform(slot, partial_tick)
+            } else if knot {
+                BodyTransform::default()
             } else if is_armor_stand {
                 crate::armor_stand::body_transform(slot, partial_tick)
             } else {
@@ -162,8 +168,11 @@ impl EntityStore {
             };
             // Living models turn with their body yaw; a non-living box follows its yaw
             // (`Entity.getYRot(partialTicks)`).
+            // `LeashKnotRenderer.submit` turns the knot by no yaw at all.
             let yaw = if has_head {
                 slot.body_yaw_at(partial_tick)
+            } else if knot {
+                0.0
             } else {
                 slot.yaw_at(partial_tick)
             };
@@ -215,7 +224,25 @@ impl EntityStore {
             let (hands, equipment, head_item) = if humanoid {
                 crate::local_player::equipment_of(slot, &self.item_components)
             } else {
-                ([None, None], Vec::new(), None)
+                // The mobs' own equipment layers (body armour, saddles, llama decor), each on
+                // its renderer's layer model; the saddles' reins show only while ridden.
+                let pieces = crate::mount_equipment::pieces(
+                    type_name,
+                    is_baby,
+                    &slot.equipment,
+                    &self.item_components,
+                );
+                if pieces
+                    .iter()
+                    .any(|p| p.slot == haste_core::model::EquipmentSlot::Saddle)
+                {
+                    let ridden = self
+                        .riding
+                        .passengers_of(slot.id)
+                        .is_some_and(|p| !p.is_empty());
+                    crate::mount_equipment::saddle_setup_anim(type_name, ridden, &mut pose);
+                }
+                ([None, None], pieces, None)
             };
             let mut inst = EntityInstance {
                 id: slot.id,

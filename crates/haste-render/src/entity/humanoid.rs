@@ -233,7 +233,8 @@ pub(crate) fn elytra_model() -> Arc<CubeModel> {
         .clone()
 }
 
-/// The missing item model vanilla's `ModelBakery.MissingModels` bakes (`MissingCuboidModel`):/// a unit cube with the missingno texture and no display transforms, so it draws centred on
+/// The missing item model vanilla's `ModelBakery.MissingModels` bakes (`MissingCuboidModel`):
+/// a unit cube with the missingno texture and no display transforms, so it draws centred on
 /// the origin like any `NO_TRANSFORM` item. Built once; unknown items are rare (modded ids).
 pub(super) fn missing_item_model() -> std::sync::Arc<haste_assets::ItemModel> {
     static MISSING: std::sync::OnceLock<std::sync::Arc<haste_assets::ItemModel>> =
@@ -285,6 +286,11 @@ pub(super) fn missing_texture() -> image::RgbaImage {
             image::Rgba([0, 0, 0, 255])
         }
     })
+}
+
+/// `haste:white`: a plain white texel, so a vertex colour draws as itself (the leash rope).
+pub(super) fn white_texture() -> image::RgbaImage {
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 255, 255, 255]))
 }
 
 /// `haste:` placeholder texture: light grey with a darker 1 px border per 8 px cell.
