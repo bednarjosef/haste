@@ -513,6 +513,9 @@ impl Session {
         let Some(p) = self.apply_animate(p, entities) else {
             return;
         };
+        let Some(p) = self.apply_look_at(p, entities) else {
+            return;
+        };
         self.apply_misc(p, entities, regs);
     }
 }
@@ -535,6 +538,7 @@ mod explosion_tracker;
 mod fov;
 mod item_world;
 mod lightmap;
+mod look_at;
 mod maps;
 mod misc;
 pub(crate) mod pack_prompt;

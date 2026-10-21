@@ -617,7 +617,7 @@ impl LocalPlayer {
         true
     }
 
-    fn set_look(&mut self, yaw: f32, pitch: f32) {
+    pub(crate) fn set_look(&mut self, yaw: f32, pitch: f32) {
         let pitch = pitch.clamp(-90.0, 90.0);
         self.state.yaw = yaw;
         self.state.pitch = pitch;

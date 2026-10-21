@@ -168,6 +168,10 @@ pub trait EntitySink {
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         None
     }
+    /// `Entity.getEyeY` of an entity (`EntityStore::eye_y`). None in fakes.
+    fn entity_eye_y(&self, _id: EntityId) -> Option<f64> {
+        None
+    }
     /// The entity's equipment slots (vanilla `LivingEntity` equipment): (wire slot, stack)
     /// pairs, for the saddle a steered mount must wear. None in fakes.
     fn equipment(&self, _id: EntityId) -> Option<&[(u8, ItemStackData)]> {
@@ -329,6 +333,9 @@ impl EntitySink for EntityStore {
     }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
+    }
+    fn entity_eye_y(&self, id: EntityId) -> Option<f64> {
+        EntityStore::eye_y(self, id)
     }
     fn equipment(&self, id: EntityId) -> Option<&[(u8, ItemStackData)]> {
         self.get(id).map(|e| e.equipment.as_slice())
