@@ -22,6 +22,7 @@ pub mod registry;
 pub mod render;
 pub mod riding;
 pub mod skin;
+pub mod spin_attack;
 pub mod store;
 pub mod thrown_item;
 pub mod trident;

@@ -20,6 +20,12 @@ fn is_cape_layer(model: &CubeModel) -> bool {
         .any(|p| p.name == "body" && p.children.iter().any(|c| c.name == "cape"))
 }
 
+/// Whether an overlay model is the riptide spin layer (`SpinAttackEffectLayer`: its root holds
+/// the rotating `box0` and `box1`, built by haste-entity's `spin_attack`).
+fn is_spin_layer(model: &CubeModel) -> bool {
+    model.root.children.iter().any(|p| p.name == "box0")
+}
+
 impl EntityRenderer {
     /// The transform an overlay layer draws through and its hurt flash: `root` and the
     /// entity's flash for every layer but the cape, which follows `CapeLayer.submit`: nothing
@@ -32,6 +38,9 @@ impl EntityRenderer {
         root: Mat4,
         assets: &mut Assets,
     ) -> Option<(Mat4, f32)> {
+        if is_spin_layer(model) {
+            return Some((root, 0.0));
+        }
         if !is_cape_layer(model) {
             return Some((root, e.hurt));
         }

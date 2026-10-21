@@ -56,14 +56,17 @@ impl MobFlags {
 }
 
 /// `LivingEntity.DATA_LIVING_ENTITY_FLAGS` (index 8, the first of `LivingEntity`'s slots
-/// after `Entity`'s eight; a byte). Only the bits the client's use tracking reads:
-/// `setLivingEntityFlag(1, ...)` starts a use, `2` marks the off hand as the used one.
+/// after `Entity`'s eight; a byte). Only the bits the client reads: `setLivingEntityFlag(1, ...)`
+/// starts a use, `2` marks the off hand as the used one, `4` is `isAutoSpinAttack` (the riptide
+/// spin).
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct LivingFlags {
     /// `isUsingItem` (bit 1).
     pub using_item: bool,
     /// `getUsedItemHand` answers the off hand for bit 2.
     pub use_offhand: bool,
+    /// `LivingEntity.isAutoSpinAttack` (bit 4).
+    pub auto_spin_attack: bool,
 }
 
 impl LivingFlags {
@@ -72,6 +75,7 @@ impl LivingFlags {
         LivingFlags {
             using_item: b & 0x01 != 0,
             use_offhand: b & 0x02 != 0,
+            auto_spin_attack: b & 0x04 != 0,
         }
     }
 }

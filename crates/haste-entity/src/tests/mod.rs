@@ -29,6 +29,7 @@ mod models;
 mod registry;
 mod riding;
 mod setup_rotations;
+mod spin_attack;
 mod store;
 mod thrown_item;
 mod trident;

@@ -211,4 +211,5 @@ pub(crate) fn dress_tracked(
         CapeState::default()
     };
     dress(inst, skin, ModelParts::of(&e.metadata), &cape);
+    crate::spin_attack::dress(inst, &e.metadata, e.tick_count as f32 + partial);
 }
