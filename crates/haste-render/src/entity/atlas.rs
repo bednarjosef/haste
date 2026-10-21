@@ -44,6 +44,10 @@ impl EntityRenderer {
             let image = if id.namespace() == "haste" {
                 if id.path() == "missing" {
                     missing_texture()
+                } else if id.path() == "white" {
+                    // A solid texel: a vertex colour alone (the fishing line's black) draws
+                    // through the entity pipeline by sampling its middle.
+                    image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]))
                 } else {
                     placeholder_texture()
                 }

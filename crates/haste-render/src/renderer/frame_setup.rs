@@ -164,6 +164,11 @@ impl Renderer {
         self.entity.set_view_scale(scale);
     }
 
+    /// This frame's fishing bobbers (vanilla `FishingHookRenderer`): drawn with the entities.
+    pub fn set_fishing_bobbers(&mut self, bobbers: &[crate::entity::FishingBobber]) {
+        self.entity.set_fishing_bobbers(bobbers);
+    }
+
     /// Vanilla `Options.cloudStatus` (options.txt `renderClouds`): OFF draws no cloud pass,
     /// FAST the flat cells, FANCY the extruded boxes.
     pub fn set_cloud_status(&mut self, status: crate::clouds::CloudStatus) {

@@ -2,6 +2,7 @@
 //! which dirty sections are handed to the renderer's mesher, and the per-frame entity and
 //! block-entity instances.
 
+mod fishing;
 mod promotion;
 
 use std::collections::{HashMap, HashSet};
@@ -128,6 +129,7 @@ pub struct WorldFeed {
     be_instances: Vec<BlockEntityInstance>,
     /// The game thread's last extracted block entity tick frame (cloned per frame, an `Arc`).
     be_frame: Arc<BlockEntityTickFrame>,
+    fishing: fishing::FishingFeed,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -440,6 +442,7 @@ impl WorldFeed {
         let own_skin = {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
+            self.fishing.collect(&store, partial);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
         game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);
@@ -477,6 +480,7 @@ impl WorldFeed {
             // The minecarts' rail snapping reads the level (`OldMinecartBehavior.getPos`),
             // so it happens here too, per frame.
             haste_entity::minecart::snap_rails(&mut self.instances, &*world, &shared.data.blocks);
+            self.fishing.light_and_set(&world, renderer);
         }
         (&self.instances, &self.be_instances)
     }

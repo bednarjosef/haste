@@ -30,6 +30,7 @@ mod equipment;
 mod experience_orb;
 mod falling_block;
 mod first_person;
+mod fishing_bobber;
 mod flame;
 #[cfg(test)]
 mod flame_tests;
@@ -223,6 +224,7 @@ impl TickPair {
 /// What the first-person view holds (vanilla `FirstPersonHandsAndItemsRenderState`): see
 /// [`first_person`](self::first_person).
 pub use first_person::FirstPerson;
+pub use fishing_bobber::{FishingBobber, LINE_POINTS};
 
 /// A name tag to draw: world anchor (above the head) and the text.
 #[derive(Clone, Debug)]
@@ -319,6 +321,8 @@ pub struct EntityRenderer {
     map_decoration_rects: HashMap<u32, Option<[u32; 4]>>,
     /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
     map_decoration_names: Vec<Identifier>,
+    /// This frame's fishing bobbers (set by the client; the list is reused, not rebuilt).
+    fishing_bobbers: Vec<FishingBobber>,
     pub drawn: u32,
 }
 
@@ -332,6 +336,11 @@ impl EntityRenderer {
     /// `options.entityDistanceScaling`, 0.5..=5.0, default 1.0).
     pub fn set_view_scale(&mut self, scale: f32) {
         self.view_scale = scale;
+    }
+    /// This frame's fishing bobbers, copied into the renderer's reused list.
+    pub fn set_fishing_bobbers(&mut self, bobbers: &[FishingBobber]) {
+        self.fishing_bobbers.clear();
+        self.fishing_bobbers.extend_from_slice(bobbers);
     }
     /// Poses every entity into the vertex buffer. `skip` is the entity the camera is (not drawn
     /// in first person). Positions are camera-relative (`camera` subtracted in f64) like the
@@ -544,6 +553,7 @@ impl EntityRenderer {
                 }
             }
         }
+        self.emit_fishing_bobbers(camera, orientation, assets);
         if self.vertices.len() > self.vertex_capacity {
             self.vertex_capacity = self.vertices.len().next_power_of_two();
             self.vertex_buffer = make_vertex_buffer(&self.device, self.vertex_capacity);
