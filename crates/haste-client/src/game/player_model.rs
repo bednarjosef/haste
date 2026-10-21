@@ -169,6 +169,8 @@ fn player_instance(
         hands,
         equipment,
         head_item,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     super::skins::dress_local(&mut inst, skin, view, partial);
     inst

@@ -35,6 +35,8 @@ pub(super) struct HeldItem {
     pub(super) swap_key: u64,
     /// The stack's `minecraft:map_id` component, for the held map view.
     pub(super) map_id: Option<i32>,
+    /// The stack's glint (`ItemStack.hasFoil`), for the first-person item.
+    pub(super) foil: haste_core::model::FoilType,
 }
 
 /// A key over what `ItemStack.matchesIgnoringComponents(a, b, DataComponentType::
@@ -110,6 +112,12 @@ impl Interaction {
             .unwrap_or(0.0);
         let swap_key = swap_key(&stack, &patch);
         let map_id = crate::net::map_id_of(&stack, &tables);
+        let foil = match (stack.item, self.item_components.as_ref()) {
+            (Some(item), Some(ic)) if !stack.is_empty() => {
+                ic.foil_type(item, &crate::game::item_foil::foil_patch(&patch), false)
+            }
+            _ => haste_core::model::FoilType::None,
+        };
         tracing::debug!(
             "held item components: attack_speed {attack_speed} ({} delay ticks), efficiency {efficiency}",
             if attack_speed > 0.0 { 20.0 / attack_speed } else { 20.0 / 4.0 }
@@ -124,6 +132,7 @@ impl Interaction {
             minimum_attack_charge,
             swap_key,
             map_id,
+            foil,
         });
     }
 
@@ -179,6 +188,12 @@ impl LocalPlayer {
                 .as_ref()
                 .filter(|h| h.stack == *stack)
                 .and_then(|h| h.map_id),
+            foil: self
+                .int
+                .components
+                .as_ref()
+                .filter(|h| h.stack == *stack)
+                .map_or(haste_core::model::FoilType::None, |h| h.foil),
         }
     }
 

@@ -30,6 +30,7 @@ pub(crate) mod camera_entity;
 mod cart_camera;
 mod hud;
 mod input;
+pub(crate) mod item_foil;
 pub(crate) mod item_uses;
 mod level;
 mod maps;

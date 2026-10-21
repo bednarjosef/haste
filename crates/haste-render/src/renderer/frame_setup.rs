@@ -50,6 +50,12 @@ impl Renderer {
         self.frame_game_time = game_time;
     }
 
+    /// The `glintSpeed` and `glintStrength` accessibility options (0.0..=1.0 each; vanilla
+    /// defaults 0.5 and 0.75): how fast the enchantment glint scrolls and how bright it is.
+    pub fn set_glint_options(&mut self, speed: f64, strength: f64) {
+        self.glint_options = (speed.clamp(0.0, 1.0), strength.clamp(0.0, 1.0));
+    }
+
     /// The first-person view: arm (empty hand) or held item; None draws nothing (third person,
     /// spectator). Stays until changed.
     pub fn set_first_person(&mut self, fp: Option<crate::entity::FirstPerson>) {

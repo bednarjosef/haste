@@ -55,6 +55,7 @@ fn decodes_every_opcode() {
         8,
         9,
         64,
+        1,
         SCISSOR_PUSH,
         1,
         2,
@@ -148,7 +149,8 @@ fn decodes_every_opcode() {
             item: RegistryIndex(7),
             x: 8,
             y: 9,
-            count: 64
+            count: 64,
+            foil: FoilType::Standard,
         }
     );
     assert_eq!(

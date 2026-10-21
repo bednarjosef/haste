@@ -135,6 +135,8 @@ pub struct ItemFrameDecoration {
     pub glow: bool,
     /// The framed item (`DATA_ITEM`), by item registry index.
     pub item: Option<RegistryIndex>,
+    /// The framed stack's glint (`ItemStack.hasFoil`).
+    pub item_foil: crate::model::FoilType,
     /// The framed stack's `minecraft:map_id` component (`ItemFrame.getFramedMapId`): the map
     /// whose contents the frame draws instead of the item model, when its data has arrived.
     pub map_id: Option<i32>,

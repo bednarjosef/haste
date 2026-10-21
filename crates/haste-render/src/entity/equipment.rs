@@ -31,6 +31,16 @@ pub(crate) fn layer_tint(
     }
 }
 
+/// `EquipmentLayerRenderer.renderLayers`'s `renderShaderGlint`: the first layer drawn of a
+/// piece with foil takes the armour glint (`armorCutoutNoCullGlint`), the rest none. `pending`
+/// is cleared once a layer took it.
+pub(crate) fn mark_armor_glint(layer: &mut [EntityVertex], pending: &mut bool) {
+    if *pending {
+        crate::glint::mark(layer, crate::glint::GlintMode::Armor);
+        *pending = false;
+    }
+}
+
 impl EntityRenderer {
     /// Draws an entity's equipment on top of its model (already emitted at `root`): the held
     /// items (`ItemInHandLayer`) and armour (`HumanoidArmorLayer`). Unknown items and equipment
@@ -72,7 +82,15 @@ impl EntityRenderer {
                 ItemDisplay::ThirdPersonRight
             };
             let mut out = std::mem::take(&mut self.vertices);
-            self.emit_item(&mut out, &model, item_root, light, display, assets);
+            self.emit_item(
+                &mut out,
+                &model,
+                item_root,
+                light,
+                display,
+                e.hand_foils[i],
+                assets,
+            );
             self.vertices = out;
         }
         // Armour, in vanilla's order (`HumanoidArmorLayer.submit`: chest, legs, feet, head).
@@ -109,11 +127,14 @@ impl EntityRenderer {
                 None => humanoid_armor(slot),
             };
             let mut out = std::mem::take(&mut self.vertices);
+            // `EquipmentLayerRenderer.renderLayers`: the glint rides on the first layer drawn.
+            let mut glint = piece.foil.has_foil();
             for layer in info.layers_of(layer_type) {
                 let Some(tint) = layer_tint(layer, piece.dye) else {
                     continue;
                 };
                 let rect = self.texture_rect(&layer.texture, assets);
+                let start = out.len();
                 // A small stand's armour goes through the small layer's per-part scale (the
                 // armour model is authored with big cubes and small pivots, like the body).
                 match stand_small {
@@ -144,16 +165,19 @@ impl EntityRenderer {
                         tint,
                     ),
                 }
+                mark_armor_glint(&mut out[start..], &mut glint);
             }
             // Wings (`WingsLayer`): an elytra on the chest draws the WINGS layers on the elytra
             // model, pushed 0.125 blocks back (the wings' flap animation is not modelled yet).
             if slot == haste_core::model::EquipmentSlot::Chest {
                 let elytra = elytra_model();
                 let wings_root = root * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.125));
+                let mut glint = piece.foil.has_foil();
                 for layer in info.layers_of("wings") {
                     let Some(tint) = layer_tint(layer, piece.dye) else {
                         continue;
                     };
+                    let start = out.len();
                     let texture = cape::player_elytra_texture(e)
                         .filter(|_| layer.use_player_texture)
                         .unwrap_or(&layer.texture);
@@ -169,6 +193,7 @@ impl EntityRenderer {
                         e.hurt,
                         tint,
                     );
+                    mark_armor_glint(&mut out[start..], &mut glint);
                 }
             }
             self.vertices = out;
@@ -198,6 +223,7 @@ impl EntityRenderer {
                         head_root,
                         light,
                         ItemDisplay::Head,
+                        e.head_item_foil,
                         assets,
                     );
                     self.vertices = out;

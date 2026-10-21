@@ -340,7 +340,17 @@ public final class GfxImpl {
     public static void item(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) {
         if (s == null || s.isEmpty()) return;
         POSE.sync();
-        GuiBatch.op(GuiBatch.ITEM, itemId(s), POSE.scaleX(x, y), POSE.scaleY(x, y), s.getCount());
+        GuiBatch.op(GuiBatch.ITEM, itemId(s), POSE.scaleX(x, y), POSE.scaleY(x, y), s.getCount(), foil(s));
+    }
+
+    /**
+     * The stack's glint as the item model picks it (vanilla {@code ItemStackRenderState.FoilType}'s order):
+     * 0 none ({@code ItemStack.hasFoil} false), 2 special for the compasses and the clock
+     * ({@code CuboidItemModelWrapper.hasSpecialAnimatedTexture}), 1 standard otherwise.
+     */
+    static int foil(ItemStack s) {
+        if (!s.hasFoil()) return 0;
+        return s.is(net.minecraft.tags.ItemTags.COMPASSES) || s.is(net.minecraft.world.item.Items.CLOCK) ? 2 : 1;
     }
 
     /** Index of the stack's item in the {@code minecraft:item} registry (the same numbering as Rust's). */

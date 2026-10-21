@@ -3,6 +3,7 @@
 //! block-entity instances.
 
 mod frame_maps;
+mod item_foils;
 mod leash_lines;
 mod promotion;
 
@@ -151,6 +152,15 @@ pub struct WorldFeed {
     /// stack's components when its bytes last changed (a per-frame compare, a decode only
     /// on change; the entity store keeps no component tables).
     frame_map_ids: HashMap<EntityId, (haste_core::entity::ItemStackData, Option<i32>)>,
+    /// Each shown stack's glint by entity and slot, decoded when the stack last changed
+    /// (`item_foils`).
+    item_foils: HashMap<
+        (EntityId, u8),
+        (
+            haste_core::entity::ItemStackData,
+            haste_core::model::FoilType,
+        ),
+    >,
 }
 
 /// Lets the mesh worker threads capture section snapshots from the shared world under its
@@ -456,6 +466,8 @@ impl WorldFeed {
         game::pickup::instances(shared, partial, &mut self.instances);
         // The item frames' map ids, from each framed stack's component patch.
         self.patch_frame_maps(shared);
+        // The glint of every item they show, from each stack's component patch.
+        self.patch_item_foils(shared, local.0);
         // Entity light rides on the instances themselves (sampled once, where they are built;
         // the renderer holds no world reference and no longer keeps a per-frame light map).
         {

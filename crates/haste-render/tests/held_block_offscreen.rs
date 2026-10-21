@@ -148,6 +148,7 @@ fn held_block_is_a_solid_cube() {
                 slim: false,
                 sleeve: true,
                 item: Some(item_index(&data, name)),
+                foil: Default::default(),
                 map: None,
                 offhand_empty: true,
                 light: (15, 0),

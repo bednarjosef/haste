@@ -80,11 +80,13 @@ pub struct GuiVertex {
     pub color: [u8; 4],
     /// Atlas rectangle x, y, w, h; w == 0 means an untextured (solid colour) vertex.
     pub rect: [u16; 4],
+    /// The enchantment glint this vertex draws ([`crate::glint::GlintMode`], 0 for none).
+    pub glint: u32,
 }
 
 impl GuiVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
-        0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4, 3 => Uint16x4
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4, 3 => Uint16x4, 4 => Uint32
     ];
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<GuiVertex>() as u64,
@@ -130,6 +132,8 @@ pub struct GuiRenderer {
     pipelines: [wgpu::RenderPipeline; 4],
     bind_group: wgpu::BindGroup,
     bind_layout: wgpu::BindGroupLayout,
+    /// The glint textures and uniform the bind group holds (kept for atlas regrowth).
+    glint: Arc<crate::glint::Glint>,
     uniforms: wgpu::Buffer,
     atlas: wgpu::Texture,
     /// The atlas texture's current side.

@@ -177,6 +177,7 @@ pub fn build(
                 // Filled in by the client from the framed stack's component patch (the
                 // component tables live there, not in this crate).
                 map_id: None,
+                item_foil: Default::default(),
             }))
         }
         crate::registry::DecorationKind::Painting => {

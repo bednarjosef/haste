@@ -76,6 +76,7 @@ impl EntityRenderer {
                     root,
                     item_light,
                     ItemDisplay::Fixed,
+                    f.item_foil,
                     assets,
                 );
             }

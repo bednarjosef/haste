@@ -179,6 +179,8 @@ fn entities_offscreen() {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let boxed = EntityInstance {
         id: EntityId(2),
@@ -210,6 +212,8 @@ fn entities_offscreen() {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let mut entities = vec![player, boxed];
     let camera = Camera {
@@ -534,12 +538,15 @@ fn dropped_items_offscreen() {
             item,
             count,
             age: 0.0,
+            foil: Default::default(),
         }),
         overlays: Default::default(),
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 1.7, -2.5),
@@ -661,6 +668,8 @@ fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstan
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }
 }
 
@@ -714,6 +723,7 @@ fn frames_and_paintings_offscreen() {
                 glow,
                 item,
                 map_id: None,
+                item_foil: Default::default(),
             }),
         )
     };
@@ -807,6 +817,8 @@ fn entity_shadows_offscreen() {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let zombie = EntityInstance {
         id: EntityId(2),
@@ -838,6 +850,8 @@ fn entity_shadows_offscreen() {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let entities = vec![pig, zombie];
     let camera = Camera {
@@ -992,6 +1006,7 @@ fn equipment_offscreen() {
             asset: eq.asset.clone(),
             dye: None,
             layer: None,
+            foil: Default::default(),
         });
     }
     // A leather chestplate with a dye: exercises the `dyed_color` tint path.
@@ -1029,6 +1044,8 @@ fn equipment_offscreen() {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let mut armed = bare.clone();
     armed.hands = [Some(sword), None];

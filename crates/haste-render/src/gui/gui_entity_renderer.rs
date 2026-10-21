@@ -77,6 +77,7 @@ impl GuiRenderer {
                     uv: v.uv,
                     color: [c, c, c, 255],
                     rect: v.rect,
+                    glint: 0,
                 });
             }
         }

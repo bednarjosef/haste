@@ -24,10 +24,22 @@ pub(super) struct PreparedQuad {
     pub(super) uv: [[f32; 2]; 4],
     pub(super) tex: TexKey,
     pub(super) color: [u8; 4],
+    /// The glint this quad draws when the stack has foil: its texture's sheet
+    /// ([`crate::glint::item_glint_mode`]), resolved once with the model.
+    pub(super) glint: crate::glint::GlintMode,
 }
 
 impl GuiRenderer {
-    pub(super) fn item(&mut self, o: [f32; 2], item: u32, x: f32, y: f32, assets: &mut Assets) {
+    /// A slot item at (x, y); `foil` draws the enchantment glint on its quads.
+    pub(super) fn item(
+        &mut self,
+        o: [f32; 2],
+        item: u32,
+        x: f32,
+        y: f32,
+        foil: haste_core::model::FoilType,
+        assets: &mut Assets,
+    ) {
         let prepared = match self.items.get(&item) {
             Some(p) => p.clone(),
             None => {
@@ -64,7 +76,12 @@ impl GuiRenderer {
             let r = rect.map(|v| v as f32);
             let pos = q.pos.map(|p| [p[0] + x + o[0], p[1] + y + o[1]]);
             let uv = q.uv.map(|t| [r[0] + t[0] * r[2], r[1] + t[1] * r[3]]);
-            self.quad(pos, uv, [q.color; 4], rect);
+            let glint = if foil.has_foil() {
+                q.glint
+            } else {
+                crate::glint::GlintMode::None
+            };
+            self.quad_glint(pos, uv, [q.color; 4], rect, glint as u32);
         }
     }
 }
@@ -160,6 +177,10 @@ pub(super) fn prepare_item(model: &ItemModel) -> PreparedItem {
                 PreparedQuad {
                     pos: p.map(|v| [v.x, v.y]),
                     uv,
+                    glint: crate::glint::item_glint_mode(
+                        haste_core::model::FoilType::Standard,
+                        &tex,
+                    ),
                     tex: TexKey::ItemTexture(tex),
                     color,
                 },

@@ -114,6 +114,7 @@ impl EntityRenderer {
             Mat4::from_mat3(shade) * pose,
             (15, 15),
             ItemDisplay::Fixed,
+            haste_core::model::FoilType::None,
             assets,
         );
         // Back from the shade frame to view space (a rotation: the winding is kept).

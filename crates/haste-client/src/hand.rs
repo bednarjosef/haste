@@ -163,6 +163,8 @@ pub struct HeldStack {
     /// The stack's `minecraft:map_id` component: the hand draws the map itself when set
     /// (`FirstPersonHandsAndItemsRenderer.submitArmWithItem`'s MAP_ID branch).
     pub map: Option<i32>,
+    /// The stack's glint (`ItemStack.hasFoil`): the shown item draws it.
+    pub foil: haste_core::model::FoilType,
 }
 
 impl HeldStack {
@@ -172,6 +174,7 @@ impl HeldStack {
             item,
             swap_key: 0,
             map: None,
+            foil: haste_core::model::FoilType::None,
         }
     }
 }
@@ -464,6 +467,11 @@ impl Hand {
     /// The map id of the stack the hand shows, when it is a map (see [`HeldStack::map`]).
     pub fn shown_map(&self) -> Option<i32> {
         self.equip.item.map
+    }
+
+    /// The glint of the stack the hand shows (see [`HeldStack::foil`]).
+    pub fn shown_foil(&self) -> haste_core::model::FoilType {
+        self.equip.item.foil
     }
 
     /// The swing progress at the ends of the last tick (0 when not swinging).

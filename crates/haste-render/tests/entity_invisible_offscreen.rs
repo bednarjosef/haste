@@ -151,6 +151,8 @@ fn invisible_entities_offscreen() {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let mut invisible = visible.clone();
     invisible.id = EntityId(2);
@@ -181,6 +183,7 @@ fn invisible_entities_offscreen() {
         asset: chest_eq.asset.clone(),
         dye: None,
         layer: None,
+        foil: Default::default(),
     }];
 
     // Warm up the lazy atlas, then the empty scene to compare against.
@@ -287,6 +290,8 @@ fn decoration(
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }
 }
 
@@ -344,6 +349,7 @@ fn invisible_item_frame_offscreen() {
                 glow: false,
                 item,
                 map_id: None,
+                item_foil: Default::default(),
             },
         )
     };

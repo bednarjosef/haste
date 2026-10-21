@@ -200,6 +200,7 @@ fn frame(items: &[(RegistryIndex, &str)]) -> GuiFrame {
             x,
             y: 53,
             count: 1,
+            foil: Default::default(),
         });
         c.push(text(x + 11, 62, "64", 0xFFFF_FFFF, true));
     }

@@ -15,6 +15,7 @@ impl EntityRenderer {
         assets: &mut Assets,
         baked: Arc<haste_assets::BakedBlockModels>,
         terrain_atlas: Arc<haste_assets::AtlasBuilder>,
+        glint: &crate::glint::Glint,
     ) -> EntityRenderer {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("entity-atlas"),
@@ -30,50 +31,67 @@ impl EntityRenderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        // Group 1: the entity atlas, then the enchantment glint's textures, sampler and
+        // uniform (bindings 1-4, read only by the glint entry points).
+        let [g0, g1, g2, g3] = crate::glint::Glint::layout_entries(1);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("entity-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                g0,
+                g1,
+                g2,
+                g3,
+            ],
         });
+        let atlas_view = atlas.create_view(&Default::default());
+        let [e0, e1, e2, e3] = glint.entries(1);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("entity-bind"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(
-                    &atlas.create_view(&Default::default()),
-                ),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                e0,
+                e1,
+                e2,
+                e3,
+            ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("entity"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../entity.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(crate::glint::ENTITY_SHADER.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("entity-pipeline-layout"),
             bind_group_layouts: &[Some(camera_layout), Some(&layout), Some(lightmap_layout)],
             immediate_size: 0,
         });
+        // The entity pass draws the glint inside the same draw (`vs_glint`/`fs_glint`: the
+        // vertices of a glinting item or armour piece carry its glint mode).
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("entity"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some("vs_glint"),
                 compilation_options: Default::default(),
                 buffers: &[Some(EntityVertex::LAYOUT)],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some("fs_glint"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,

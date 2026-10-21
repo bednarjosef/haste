@@ -50,6 +50,7 @@ fn instance(p: &PickupParticle, partial: f32) -> EntityInstance {
                 item,
                 count,
                 age: p.age,
+                foil: Default::default(),
             }),
             None,
         ),
@@ -92,6 +93,8 @@ fn instance(p: &PickupParticle, partial: f32) -> EntityInstance {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }
 }
 

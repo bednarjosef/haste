@@ -10,12 +10,43 @@ use haste_core::Identifier;
 
 use super::*;
 
+/// The GUI's bind group: the uniforms, the atlas, then the glint (built again when the atlas
+/// grows).
+pub(super) fn gui_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    atlas_view: &wgpu::TextureView,
+    glint: &crate::glint::Glint,
+) -> wgpu::BindGroup {
+    let [g0, g1, g2, g3] = glint.entries(2);
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gui-bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(atlas_view),
+            },
+            g0,
+            g1,
+            g2,
+            g3,
+        ],
+    })
+}
+
 impl GuiRenderer {
     pub fn new(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         target_format: wgpu::TextureFormat,
         font: Arc<BitmapFont>,
+        glint: Arc<crate::glint::Glint>,
     ) -> GuiRenderer {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gui-atlas"),
@@ -40,6 +71,7 @@ impl GuiRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let [g0, g1, g2, g3] = crate::glint::Glint::layout_entries(2);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gui-layout"),
             entries: &[
@@ -63,25 +95,17 @@ impl GuiRenderer {
                     },
                     count: None,
                 },
+                // The enchantment glint on items (bindings 2-5, `glint.rs`).
+                g0,
+                g1,
+                g2,
+                g3,
             ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gui-bind"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-            ],
-        });
+        let bind_group = gui_bind_group(&device, &layout, &uniforms, &atlas_view, &glint);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gui"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../gui.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(crate::glint::GUI_SHADER.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gui-pipeline-layout"),
@@ -171,6 +195,7 @@ impl GuiRenderer {
             pipelines,
             bind_group,
             bind_layout: layout,
+            glint,
             uniforms,
             atlas,
             atlas_size: GUI_ATLAS_START,

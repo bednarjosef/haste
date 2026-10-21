@@ -208,6 +208,7 @@ pub(crate) fn pieces(
                 layer_type: row.layer_type,
                 cracks,
             }),
+            foil: Default::default(),
         });
     }
     out

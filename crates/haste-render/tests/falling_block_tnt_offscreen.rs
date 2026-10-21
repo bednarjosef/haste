@@ -77,6 +77,8 @@ fn instance(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstance
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }
 }
 

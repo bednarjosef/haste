@@ -387,22 +387,13 @@ impl GuiRenderer {
             },
         );
         self.queue.submit([encoder.finish()]);
-        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gui-bind"),
-            layout: &self.bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &atlas.create_view(&Default::default()),
-                    ),
-                },
-            ],
-        });
+        self.bind_group = gui_renderer::gui_bind_group(
+            &self.device,
+            &self.bind_layout,
+            &self.uniforms,
+            &atlas.create_view(&Default::default()),
+            &self.glint,
+        );
         self.atlas = atlas;
         self.atlas_size = size;
         tracing::debug!("GUI atlas grown to {size}x{size}");

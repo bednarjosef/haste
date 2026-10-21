@@ -23,12 +23,20 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
+// The enchantment glint on items (glint.rs, glint.wgsl; the armour texture is bound but
+// unused here).
+@group(0) @binding(2) var glint_item: texture_2d<f32>;
+@group(0) @binding(3) var glint_armor: texture_2d<f32>;
+@group(0) @binding(4) var glint_sampler: sampler;
+@group(0) @binding(5) var<uniform> glint: GlintParams;
 
 struct VertexIn {
     @location(0) pos: vec2<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) rect: vec4<u32>,
+    // The glint mode (`GlintMode`, 0: none).
+    @location(4) glint: u32,
 };
 
 struct VertexOut {
@@ -36,6 +44,8 @@ struct VertexOut {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) rect: vec4<u32>,
+    @location(3) @interpolate(flat) glint_mode: u32,
+    @location(4) glint_uv: vec2<f32>,
 };
 
 @vertex
@@ -45,6 +55,11 @@ fn vs_main(v: VertexIn) -> VertexOut {
     out.uv = v.uv;
     out.color = v.color;
     out.rect = v.rect;
+    out.glint_mode = v.glint;
+    out.glint_uv = vec2<f32>(0.0);
+    if (v.glint != GLINT_NONE) {
+        out.glint_uv = glint_coords(v.glint, v.uv, v.rect, glint.translate);
+    }
     return out;
 }
 
@@ -67,6 +82,13 @@ fn gui_color(in: VertexOut, linearize: bool) -> vec4<f32> {
         c = textureLoad(atlas, texel, 0) * in.color;
         if (c.a <= 0.0) {
             discard;
+        }
+        // An item with foil (vanilla's GUI items draw through the item pipelines' `GLINT`
+        // define): the glint texel scaled by `GlintAlpha`, squared, added to the stored colour;
+        // the alpha raised to at least `GlintAlpha`.
+        if (in.glint_mode != GLINT_NONE) {
+            let g = textureSampleLevel(glint_item, glint_sampler, in.glint_uv, 0.0) * glint.alpha;
+            c = vec4<f32>(c.rgb + g.rgb * g.rgb, max(c.a, glint.alpha));
         }
     }
     if (linearize) {

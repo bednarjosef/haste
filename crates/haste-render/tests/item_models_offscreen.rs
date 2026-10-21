@@ -47,6 +47,7 @@ fn gui_slots_draw_flat_items_with_the_item_model() {
             x: 13 + 20 * n as i32,
             y: 53,
             count: 1,
+            foil: Default::default(),
         });
     }
     commands.push(GuiCommand::Item {
@@ -54,6 +55,7 @@ fn gui_slots_draw_flat_items_with_the_item_model() {
         x: 13,
         y: 80,
         count: 1,
+        foil: Default::default(),
     });
     let gui = GuiFrame {
         commands,
@@ -192,6 +194,7 @@ fn held_item_draws_the_item_model_not_the_block_model() {
             slim: false,
             sleeve: true,
             item: Some(item_index(&data, name)),
+            foil: Default::default(),
             map: None,
             offhand_empty: true,
             light: (15, 0),
