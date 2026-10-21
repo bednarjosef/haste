@@ -236,6 +236,10 @@ pub struct Session {
     /// The remote uses' sound-request scratch (see `net::remote_use`): drawn in vanilla's
     /// order with the particles, then dropped — the server's sound packets carry the sound.
     remote_use_sounds: Vec<crate::sound::SoundRequest>,
+    /// The default spawn point the server sent (`set_default_spawn_position`; vanilla
+    /// `LevelData.RespawnData`, the compass's target). Starts at the overworld's origin, as
+    /// vanilla's `RespawnData.DEFAULT` does.
+    pub respawn: respawn::RespawnData,
 }
 
 impl Session {
@@ -333,6 +337,7 @@ impl Session {
             mounted_message: false,
             remote_use: HashMap::new(),
             remote_use_sounds: Vec::new(),
+            respawn: respawn::RespawnData::default(),
         }
     }
 
@@ -538,6 +543,7 @@ pub mod pickup;
 mod player_state;
 mod registries;
 mod remote_use;
+mod respawn;
 mod session_tick;
 mod sinks;
 mod sync_block_state;
