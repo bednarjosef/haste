@@ -179,6 +179,9 @@ pub struct Session {
     /// the game thread into the particle pool, and their random (vanilla's level random).
     pub totem_emitters: Vec<crate::game::totem_emitter::TotemEmitter>,
     pub totem_rng: haste_audio::random::LegacyRandom,
+    /// The seeds of the firework burst sounds (`playLocalSound` seeds each instance with the
+    /// level random's `nextLong()`).
+    pub firework_sound_rng: haste_audio::random::LegacyRandom,
     /// Block particles queued since the last tick (our own break and mining start, and the
     /// server's `level_event`s), drained by the game thread into the shared pool.
     pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
@@ -319,6 +322,12 @@ impl Session {
             firework_bursts: Vec::new(),
             totem_emitters: Vec::new(),
             totem_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
+            firework_sound_rng: haste_audio::random::LegacyRandom::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos() as i64)

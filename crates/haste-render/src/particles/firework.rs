@@ -104,6 +104,11 @@ pub(super) struct Starter {
     lifetime: i32,
     spark: Kind,
     flash: Option<Kind>,
+    /// `Starter.twinkleDelay`: an explosion twinkles, so the twinkle sound follows the end.
+    twinkle_delay: bool,
+    /// `Starter.playSound`: the blast and twinkle sounds play (the rocket's status 17 says so;
+    /// the packet's silent flag is not decoded yet, so every burst plays).
+    play_sound: bool,
 }
 
 impl Starter {
@@ -117,7 +122,8 @@ impl Starter {
         flash: Option<Kind>,
     ) -> Starter {
         let mut lifetime = explosions.len() as i32 * 2 - 1;
-        if explosions.iter().any(|e| e.twinkle) {
+        let twinkle_delay = explosions.iter().any(|e| e.twinkle);
+        if twinkle_delay {
             lifetime += 15;
         }
         Starter {
@@ -128,12 +134,39 @@ impl Starter {
             lifetime,
             spark,
             flash,
+            twinkle_delay,
+            play_sound: true,
         }
     }
 
     /// `Starter.tick`: on each even life inside the explosions, emits that explosion's sparks
-    /// and the flash. `false` once the starter is done (the caller removes it).
-    pub(super) fn tick(&mut self, out: &mut Vec<ParticleState>, rng: &mut Rng) -> bool {
+    /// and the flash; on the first tick the blast sound, and once done the twinkle sound.
+    /// `camera` decides the far variants. `false` once the starter is done (the caller removes
+    /// it).
+    pub(super) fn tick(
+        &mut self,
+        out: &mut Vec<ParticleState>,
+        rng: &mut Rng,
+        camera: DVec3,
+        sounds: &mut Vec<FireworkSound>,
+    ) -> bool {
+        if self.life == 0 && self.play_sound {
+            let large = self.explosions.len() >= 3
+                || self
+                    .explosions
+                    .iter()
+                    .any(|e| matches!(e.shape, FireworkShape::LargeBall));
+            sounds.push(FireworkSound {
+                kind: if large {
+                    FireworkSoundKind::LargeBlast
+                } else {
+                    FireworkSoundKind::Blast
+                },
+                far: is_far(self.pos, camera),
+                pos: self.pos,
+                pitch: 0.95 + rng.next_f32() * 0.1,
+            });
+        }
         if self.life % 2 == 0 && self.life / 2 < self.explosions.len() as i32 {
             let explosion = &self.explosions[(self.life / 2) as usize];
             let black = [BLACK_FIREWORK];
@@ -166,7 +199,63 @@ impl Starter {
             }
         }
         self.life += 1;
-        self.life <= self.lifetime
+        if self.life > self.lifetime {
+            if self.twinkle_delay && self.play_sound {
+                sounds.push(FireworkSound {
+                    kind: FireworkSoundKind::Twinkle,
+                    far: is_far(self.pos, camera),
+                    pos: self.pos,
+                    pitch: 0.9 + rng.next_f32() * 0.15,
+                });
+            }
+            return false;
+        }
+        true
+    }
+}
+
+/// `FireworkParticles.Starter.isFarAwayFromCamera`: 16 blocks or more from the camera.
+fn is_far(pos: DVec3, camera: DVec3) -> bool {
+    (camera - pos).length_squared() >= 256.0
+}
+
+/// Which of a burst's sounds (`SoundEvents.FIREWORK_ROCKET_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FireworkSoundKind {
+    /// `ENTITY_FIREWORK_ROCKET_BLAST`: a burst of one or two small explosions.
+    Blast,
+    /// `ENTITY_FIREWORK_ROCKET_LARGE_BLAST`: three or more explosions, or a large ball.
+    LargeBlast,
+    /// `ENTITY_FIREWORK_ROCKET_TWINKLE`: the end of a burst with a twinkling explosion.
+    Twinkle,
+}
+
+/// A firework sound queued by a burst (`Starter.tick`'s `playLocalSound`, `AMBIENT`, volume
+/// 20): the client plays it at `pos` with `pitch`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FireworkSound {
+    pub kind: FireworkSoundKind,
+    /// The far variant (`*_far`), the burst being 16 blocks or more from the camera.
+    pub far: bool,
+    pub pos: DVec3,
+    pub pitch: f32,
+}
+
+impl FireworkSound {
+    /// The sound event's id: `entity.firework_rocket.*`, with `_far` for the far variant.
+    pub fn event(&self) -> &'static str {
+        match (self.kind, self.far) {
+            (FireworkSoundKind::Blast, false) => "minecraft:entity.firework_rocket.blast",
+            (FireworkSoundKind::Blast, true) => "minecraft:entity.firework_rocket.blast_far",
+            (FireworkSoundKind::LargeBlast, false) => {
+                "minecraft:entity.firework_rocket.large_blast"
+            }
+            (FireworkSoundKind::LargeBlast, true) => {
+                "minecraft:entity.firework_rocket.large_blast_far"
+            }
+            (FireworkSoundKind::Twinkle, false) => "minecraft:entity.firework_rocket.twinkle",
+            (FireworkSoundKind::Twinkle, true) => "minecraft:entity.firework_rocket.twinkle_far",
+        }
     }
 }
 
@@ -443,6 +532,11 @@ impl Particles {
         let flash = self.firework_kind(&Identifier::minecraft("flash"));
         self.starters
             .push(Starter::new(pos, vel, explosions, spark, flash));
+    }
+
+    /// The firework sounds the bursts queued since the last drain, in the order they played.
+    pub fn drain_firework_sounds(&mut self) -> std::vec::Drain<'_, FireworkSound> {
+        self.firework_sounds.drain(..)
     }
 
     /// `FireworkRocketEntity.tick`'s client trail: one `FIREWORK` particle at the rocket every

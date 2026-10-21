@@ -156,6 +156,23 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
     }
     driver.session.ambient_spawns = ambient;
     particles.tick(camera);
+    // The firework bursts' sounds (`Starter.tick`'s `playLocalSound`), queued by the tick above
+    // and played at the burst: category AMBIENT (index 8), volume 20, the pitch the burst drew.
+    for s in particles.drain_firework_sounds() {
+        driver
+            .session
+            .sound_requests
+            .push(crate::sound::SoundRequest::Play(
+                crate::sound::PlayRequest {
+                    sound: crate::sound::SoundRef::Inline(s.event().to_owned()),
+                    category: 8,
+                    pos: crate::sound::SoundPos::Fixed(s.pos),
+                    volume: 20.0,
+                    pitch: s.pitch,
+                    seed: driver.session.firework_sound_rng.next_long(),
+                },
+            ));
+    }
     // The render snapshot for the coming frames (vanilla's per-frame
     // `ParticleEngine.extract` folded into the tick: light sampled at the tick
     // position, see `build_snapshot`), published while the locks are still held —

@@ -2,6 +2,7 @@ mod explosion_emitter;
 mod firework;
 mod firework_perf;
 mod firework_rocket;
+mod firework_sound;
 mod item_particle;
 mod snapshot;
 mod terrain_particle;

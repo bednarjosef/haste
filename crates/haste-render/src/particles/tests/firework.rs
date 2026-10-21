@@ -25,12 +25,17 @@ fn explosion(shape: FireworkShape, twinkle: bool, trail: bool) -> FireworkExplos
     }
 }
 
+/// One starter tick with the camera on the burst and its sounds discarded.
+fn tick_at_origin(starter: &mut Starter, out: &mut Vec<ParticleState>, rng: &mut Rng) -> bool {
+    starter.tick(out, rng, DVec3::ZERO, &mut Vec::new())
+}
+
 /// Ticks a starter until it is done, returning how many ticks it ran and every particle it
 /// emitted.
 fn run(starter: &mut Starter, rng: &mut Rng) -> (i32, Vec<ParticleState>) {
     let mut out = Vec::new();
     let mut ticks = 0;
-    while starter.tick(&mut out, rng) {
+    while tick_at_origin(starter, &mut out, rng) {
         ticks += 1;
     }
     (ticks + 1, out)
@@ -63,10 +68,10 @@ fn burst_emits_seventy_sparks_on_the_first_tick_only() {
     let one = [explosion(FireworkShape::Burst, false, false)];
     let mut starter = Starter::new(DVec3::ZERO, DVec3::ZERO, &one, firework_kind(), None);
     let mut out = Vec::new();
-    starter.tick(&mut out, &mut rng);
+    tick_at_origin(&mut starter, &mut out, &mut rng);
     assert_eq!(out.len(), 70);
     // Life 1 is odd: no explosion, so nothing more is emitted.
-    starter.tick(&mut out, &mut rng);
+    tick_at_origin(&mut starter, &mut out, &mut rng);
     assert_eq!(out.len(), 70);
 }
 
@@ -98,7 +103,7 @@ fn spark_lifetime_is_forty_eight_to_fifty_nine() {
     let one = [explosion(FireworkShape::SmallBall, false, false)];
     let mut starter = Starter::new(DVec3::ZERO, DVec3::ZERO, &one, firework_kind(), None);
     let mut out = Vec::new();
-    starter.tick(&mut out, &mut rng);
+    tick_at_origin(&mut starter, &mut out, &mut rng);
     assert!(!out.is_empty());
     for p in &out {
         // SparkParticle: 48 + nextInt(12).
@@ -112,7 +117,7 @@ fn twinkle_hides_the_odd_thirds_after_the_first_third() {
     let one = [explosion(FireworkShape::SmallBall, true, false)];
     let mut starter = Starter::new(DVec3::ZERO, DVec3::ZERO, &one, firework_kind(), None);
     let mut out = Vec::new();
-    starter.tick(&mut out, &mut rng);
+    tick_at_origin(&mut starter, &mut out, &mut rng);
     let mut spark = out.swap_remove(0);
     spark.lifetime = 60.0;
     // Before a third of the life: shown.
@@ -140,7 +145,7 @@ fn non_twinkling_sparks_are_never_hidden() {
     let one = [explosion(FireworkShape::SmallBall, false, false)];
     let mut starter = Starter::new(DVec3::ZERO, DVec3::ZERO, &one, firework_kind(), None);
     let mut out = Vec::new();
-    starter.tick(&mut out, &mut rng);
+    tick_at_origin(&mut starter, &mut out, &mut rng);
     for mut spark in out {
         for age in 0..60 {
             spark.age = age as f32;
@@ -155,7 +160,7 @@ fn trail_children_appear_on_even_ticks_before_half_life() {
     let one = [explosion(FireworkShape::SmallBall, false, true)];
     let mut starter = Starter::new(DVec3::ZERO, DVec3::ZERO, &one, firework_kind(), None);
     let mut out = Vec::new();
-    starter.tick(&mut out, &mut rng);
+    tick_at_origin(&mut starter, &mut out, &mut rng);
     let spark = out.swap_remove(0);
     let life = spark.lifetime as i32;
     let mut parent = spark;
