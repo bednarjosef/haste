@@ -26,8 +26,16 @@ pub(super) fn first_person_hand(
     let (width, height) = renderer.size();
     let yaw = f64::from(camera.yaw.to_radians());
     let pitch = f64::from(camera.pitch.to_radians());
-    let forward = DVec3::new(-yaw.sin() * pitch.cos(), -pitch.sin(), yaw.cos() * pitch.cos());
-    let up = DVec3::new(-yaw.sin() * pitch.sin(), pitch.cos(), yaw.cos() * pitch.sin());
+    let forward = DVec3::new(
+        -yaw.sin() * pitch.cos(),
+        -pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    );
+    let up = DVec3::new(
+        -yaw.sin() * pitch.sin(),
+        pitch.cos(),
+        yaw.cos() * pitch.sin(),
+    );
     let left = up.cross(forward);
     let aspect = f64::from(width) / f64::from(height.max(1));
     let (from, to) = view.first_person.map_or((0.0, 0.0), |fp| fp.attack);
@@ -49,19 +57,18 @@ pub(super) struct FishingFeed {
 impl FishingFeed {
     /// Collects the store's bobbers at `partial` (`fishing_bobber::bobbers`), with the local
     /// player's model (locked here, under the store's read lock) as the owner of our own bobber.
-    /// `camera` is the frame's camera in first person (`None` otherwise): our own line's hand
-    /// then comes from it (`first_person_hand`), with the view's swing and the window's size.
+    /// `first_person` is the frame's camera and view in first person (`None` otherwise): our
+    /// own line's hand then comes from them (`first_person_hand`), with the window's size.
     pub(super) fn collect(
         &mut self,
         store: &EntityStore,
         shared: &Shared,
         local: EntityId,
         partial: f32,
-        camera: Option<Camera>,
-        view: &game::ViewState,
+        first_person: Option<(Camera, &game::ViewState)>,
         renderer: &Renderer,
     ) {
-        let hand = camera.map(|c| first_person_hand(&c, view, partial, renderer));
+        let hand = first_person.map(|(c, view)| first_person_hand(&c, view, partial, renderer));
         let model = shared.local_model.lock();
         let local = (local, &*model);
         fishing_bobber::bobbers(store, local, hand.as_ref(), partial, &mut self.bobbers);

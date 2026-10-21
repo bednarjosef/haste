@@ -13,8 +13,8 @@ use haste_core::{DVec3, Vec3};
 
 use crate::dims::EntityDimensions;
 use crate::fishing_hook::{
-    fraction, hand_pos_first_person, hand_pos_third_person, holding_arm_is_right, line_origin_offset,
-    string_point, NearPlane, STRING_SEGMENTS,
+    fraction, hand_pos_first_person, hand_pos_third_person, holding_arm_is_right,
+    line_origin_offset, string_point, NearPlane, STRING_SEGMENTS,
 };
 use crate::store::{Entity, EntityStore};
 

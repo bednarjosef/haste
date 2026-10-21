@@ -245,9 +245,14 @@ impl App {
             hud_hidden,
             view.first_person,
         );
-        let (entities, block_entities) =
-            self.feed
-                .entities(&session.shared, renderer, session.local, partial, &view, matches!(self.perspective, game::Perspective::FirstPerson).then_some(camera));
+        let (entities, block_entities) = self.feed.entities(
+            &session.shared,
+            renderer,
+            session.local,
+            partial,
+            &view,
+            matches!(self.perspective, game::Perspective::FirstPerson).then_some(camera),
+        );
         let block_target = view.block_target;
         self.breaking.clear();
         self.breaking

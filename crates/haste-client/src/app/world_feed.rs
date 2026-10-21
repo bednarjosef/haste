@@ -5,6 +5,8 @@
 mod fishing;
 mod promotion;
 
+use promotion::has_all_neighbours;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +19,10 @@ use haste_render::{
 };
 use haste_world::World;
 
-use super::{biomes, block_entity_extract::{self, BlockEntityTickFrame}};
+use super::{
+    biomes,
+    block_entity_extract::{self, BlockEntityTickFrame},
+};
 use crate::game::{self, Shared};
 
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
@@ -49,34 +54,6 @@ fn section_state(world: &World, pos: SectionPos) -> SectionLoadState {
 pub(crate) fn camera_section(c: &haste_render::Camera) -> SectionPos {
     let p = c.pos.floor().as_ivec3();
     SectionPos::new(p.x >> 4, p.y >> 4, p.z >> 4)
-}
-
-/// Vanilla `SectionUpdateTracker.hasAllNeighbors`: the eight horizontal neighbour
-/// chunks of the section are loaded (vanilla also requires their light, which Haste
-/// applies with the chunk). A chunk outside the server's reach around the camera never
-/// loads, so it does not count as missing — otherwise the outermost ring of the view
-/// would never have its first build and settle would never finish.
-fn has_all_neighbours(
-    world: &World,
-    pos: SectionPos,
-    camera: SectionPos,
-    server_reach: i32,
-) -> bool {
-    (-1..=1).all(|dx| {
-        (-1..=1).all(|dz| {
-            let (nx, nz) = (pos.x + dx, pos.z + dz);
-            (dx == 0 && dz == 0)
-                || world.chunk(ChunkPos::new(nx, nz)).is_some()
-                // Vanilla's chunk-send shape (ChunkTrackingView.isWithinDistance without
-                // neighbours): a chunk outside the rounded square never loads, so it does
-                // not count as missing.
-                || {
-                    let ex = ((nx - camera.x).abs() - 1).max(0) as i64;
-                    let ez = ((nz - camera.z).abs() - 1).max(0) as i64;
-                    ex * ex + ez * ez >= server_reach as i64 * server_reach as i64
-                }
-        })
-    })
 }
 
 /// Feeds dirty sections to the renderer within a per-frame time budget, nearest first,
@@ -442,7 +419,14 @@ impl WorldFeed {
         let own_skin = {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
-            self.fishing.collect(&store, shared, local.0, partial, first_person, view, renderer);
+            self.fishing.collect(
+                &store,
+                shared,
+                local.0,
+                partial,
+                first_person.map(|camera| (camera, view)),
+                renderer,
+            );
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
         game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);
