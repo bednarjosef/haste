@@ -49,6 +49,7 @@ mod snapshot;
 mod terrain_particle;
 #[cfg(test)]
 mod tests;
+mod totem;
 
 use glam::DVec3;
 use haste_core::{BlockStateId, Identifier};

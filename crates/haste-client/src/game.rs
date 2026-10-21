@@ -39,6 +39,9 @@ mod settle_diet;
 mod shared;
 mod sound;
 mod tracked_world;
+// The sources sit beside the crate root (`main.rs` is not ours to edit); the path keeps them here.
+#[path = "totem_emitter.rs"]
+pub(crate) mod totem_emitter;
 mod view;
 mod weather;
 
