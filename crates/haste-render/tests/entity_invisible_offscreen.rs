@@ -180,6 +180,7 @@ fn invisible_entities_offscreen() {
         item: Some(chest),
         asset: chest_eq.asset.clone(),
         dye: None,
+        layer: None,
     }];
 
     // Warm up the lazy atlas, then the empty scene to compare against.
