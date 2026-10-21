@@ -94,3 +94,91 @@ fn trident_kind_resolves_only_for_the_trident() {
         assert_eq!(is_trident(*k), *v == "minecraft:trident");
     }
 }
+
+/// The trident layer as the recorder dumps it (`TridentModel.createLayer`): the pole and its
+/// middle spike, enough to place the tip and the butt.
+const TRIDENT_DUMP: &str = r#"{
+  "version": 1,
+  "layers": [
+    {
+      "layer": "minecraft:trident#main",
+      "texture_width": 32,
+      "texture_height": 32,
+      "parts": [
+        {
+          "name": "pole",
+          "pivot": [0.0, 0.0, 0.0],
+          "cubes": [
+            {"origin": [-0.5, 2.0, -0.5], "size": [1.0, 25.0, 1.0], "u": 0.0, "v": 6.0}
+          ],
+          "children": [
+            {
+              "name": "middle_spike",
+              "pivot": [0.0, 0.0, 0.0],
+              "cubes": [
+                {"origin": [-0.5, -4.0, -0.5], "size": [1.0, 4.0, 1.0], "u": 0.0, "v": 0.0}
+              ],
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}"#;
+
+/// A point of the loaded trident model in blocks from the entity's position, through the
+/// pole's pivot, the body transform and the generic path's flip and sixteenths.
+fn world_point(yaw: f32, pitch: f32, model_point: Vec3) -> Vec3 {
+    let lib = crate::model_dump::ModelLibrary::parse(TRIDENT_DUMP.as_bytes()).unwrap();
+    let model = lib.get("minecraft:trident#main", 1.0).unwrap();
+    let pole = &model.root.children[0];
+    full_matrix(&body_transform(yaw, pitch)).transform_point3(pole.pivot + model_point) / 16.0
+}
+
+#[test]
+fn the_trident_layer_keeps_its_origin_at_the_entity() {
+    // `ThrownTridentRenderer` draws the model at the entity's position (no -1.501 drop): the
+    // loader must not shift the pole's pivot to the feet-at-zero convention.
+    let lib = crate::model_dump::ModelLibrary::parse(TRIDENT_DUMP.as_bytes()).unwrap();
+    let model = lib.get("minecraft:trident#main", 1.0).unwrap();
+    assert_eq!(model.root.children[0].pivot, Vec3::ZERO);
+}
+
+#[test]
+fn a_trident_stuck_straight_down_has_its_tines_in_the_ground() {
+    // Thrown straight down, `Projectile.updateRotation` turns xRot to -90: the tip of the
+    // middle spike is 4/16 below the entity and the butt of the pole 27/16 above it.
+    assert_near(
+        world_point(0.0, -90.0, Vec3::new(0.0, -4.0, 0.0)),
+        Vec3::new(0.0, -0.25, 0.0),
+    );
+    assert_near(
+        world_point(0.0, -90.0, Vec3::new(0.0, 27.0, 0.0)),
+        Vec3::new(0.0, 27.0 / 16.0, 0.0),
+    );
+}
+
+#[test]
+fn a_level_trident_lies_along_its_flight_through_the_entity() {
+    // Level flight towards +Z (yRot 0, xRot 0): the tip 4/16 ahead, the butt 27/16 behind,
+    // both at the entity's height.
+    assert_near(
+        world_point(0.0, 0.0, Vec3::new(0.0, -4.0, 0.0)),
+        Vec3::new(0.0, 0.0, 0.25),
+    );
+    assert_near(
+        world_point(0.0, 0.0, Vec3::new(0.0, 27.0, 0.0)),
+        Vec3::new(0.0, 0.0, -27.0 / 16.0),
+    );
+}
+
+#[test]
+fn a_trident_casts_no_shadow() {
+    // `ThrownTridentRenderer` keeps `EntityRenderer`'s 0.0 radius (the table's 0.5 fallback is
+    // for the living types).
+    assert_eq!(
+        crate::registry::shadow_radius_for_name("minecraft:trident"),
+        0.0
+    );
+}

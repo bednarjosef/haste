@@ -4,7 +4,10 @@
 //!
 //! Haste draws every non-living model through the generic entity path, which also applies the
 //! `scale(-1, -1, 1)` flip vanilla's living-entity renderers use. The trident's vanilla pose has
-//! no such flip, so [`body_transform`] adds a half turn about Z that cancels it.
+//! no such flip, so [`body_transform`] adds a half turn about Z that cancels it. Nor does it have
+//! the living renderers' -1.501 drop, so the model library loads `minecraft:trident#main`
+//! without the ground shift (`model_dump::UNSHIFTED_LAYERS`): the model's origin is the entity's
+//! position, the tines below it and the shaft above, along the shaft's own axis.
 
 use std::f32::consts::PI;
 
