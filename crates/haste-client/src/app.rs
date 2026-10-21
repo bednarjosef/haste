@@ -2721,7 +2721,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     // Log what the frame drew (the check scripts grep this as evidence), like
                     // the in-game branch does.
                     log_script_frame(&gui, &name, &item_names);
-                    save_script_shot(&image, &name)?;
+                    crate::screenshots::save_script_shot(&image, &name)?;
                 }
             }
             if Instant::now() > deadline {
@@ -2938,19 +2938,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     if !finished {
         anyhow::bail!("script did not finish before --seconds elapsed");
     }
-    Ok(())
-}
-
-/// Saves a script `screenshot NAME` action's frame as `target/shots/script-NAME.png`.
-fn save_script_shot(image: &image::RgbaImage, name: &str) -> anyhow::Result<()> {
-    let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    image
-        .save(&path)
-        .with_context(|| format!("saving {}", path.display()))?;
-    println!("script screenshot saved to {}", path.display());
     Ok(())
 }
 
