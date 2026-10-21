@@ -473,7 +473,7 @@ impl Session {
         let (biomes, biome_climates, type_names, sounds, painting_variants, mob_variants) = {
             let regs = driver.connection().registries();
             let sounds = if sound {
-                open_sounds(regs, &data, &options.sound)
+                crate::sound::open_sounds(regs, &data, &options.sound)
             } else {
                 None
             };
@@ -1728,7 +1728,7 @@ impl InputRouter {
     }
 }
 
-fn open_assets() -> anyhow::Result<haste_assets::Assets> {
+pub(crate) fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     open_assets_with(&[])
 }
 
@@ -1793,43 +1793,6 @@ pub fn game_dir() -> std::path::PathBuf {
 /// `FolderRepositorySource` looks (Java side) and `apply_packs` reads (Rust).
 fn default_resource_packs_dir() -> std::path::PathBuf {
     game_dir().join("resourcepacks")
-}
-
-/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
-/// sound-event name table (the server's synced registry or the static one), played
-/// through the default device with the saved volumes. Without an audio device it stays
-/// silent; when the assets or `sounds.json` cannot be read the game runs without sound
-/// (logged) rather than not at all.
-fn open_sounds(
-    regs: &haste_protocol::SyncedRegistries,
-    data: &haste_data::GameData,
-    volumes: &haste_setup::options::SoundVolumes,
-) -> Option<crate::sound::Sounds> {
-    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
-        let mut assets = open_assets()?;
-        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
-        let mut events = haste_audio::sounds::SoundEvents::parse(&bytes)?;
-        // Vanilla's load-time check (SoundManager.prepare's validateSoundResource): a
-        // file listed in sounds.json but absent from the assets is dropped from its
-        // event now, so it can never be picked and fail to play later.
-        let dropped = events.retain_files(|path| assets.has_asset(&format!("assets/{path}")));
-        if dropped > 0 {
-            tracing::warn!("{dropped} sound files listed in sounds.json are missing");
-        }
-        Ok(events)
-    })();
-    match events {
-        Ok(events) => Some(crate::sound::Sounds::new(
-            events,
-            open_assets().ok()?,
-            crate::sound::sound_event_names(regs, data),
-            volumes,
-        )),
-        Err(e) => {
-            tracing::warn!("sound stays off: {e:#}");
-            None
-        }
-    }
 }
 
 /// The client without a server: the vanilla title screen (and everything it opens) in the same

@@ -4,7 +4,7 @@ crates/haste-assets/src/font.rs 626
 crates/haste-assets/src/item.rs 650
 crates/haste-assets/src/packstack.rs 722
 crates/haste-client/src/ambient_particles.rs 614
-crates/haste-client/src/app.rs 4163
+crates/haste-client/src/app.rs 4126
 crates/haste-client/src/boat.rs 871
 crates/haste-client/src/net/tests.rs 1785
 crates/haste-client/src/player/interact/tests.rs 2172

@@ -241,6 +241,43 @@ pub struct Sounds {
     unknown_logged: HashSet<String>,
 }
 
+/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
+/// sound-event name table (the server's synced registry or the static one), played
+/// through the default device with the saved volumes. Without an audio device it stays
+/// silent; when the assets or `sounds.json` cannot be read the game runs without sound
+/// (logged) rather than not at all.
+pub(crate) fn open_sounds(
+    regs: &haste_protocol::SyncedRegistries,
+    data: &haste_data::GameData,
+    volumes: &haste_setup::options::SoundVolumes,
+) -> Option<Sounds> {
+    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
+        let mut assets = crate::app::open_assets()?;
+        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
+        let mut events = haste_audio::sounds::SoundEvents::parse(&bytes)?;
+        // Vanilla's load-time check (SoundManager.prepare's validateSoundResource): a
+        // file listed in sounds.json but absent from the assets is dropped from its
+        // event now, so it can never be picked and fail to play later.
+        let dropped = events.retain_files(|path| assets.has_asset(&format!("assets/{path}")));
+        if dropped > 0 {
+            tracing::warn!("{dropped} sound files listed in sounds.json are missing");
+        }
+        Ok(events)
+    })();
+    match events {
+        Ok(events) => Some(Sounds::new(
+            events,
+            crate::app::open_assets().ok()?,
+            sound_event_names(regs, data),
+            volumes,
+        )),
+        Err(e) => {
+            tracing::warn!("sound stays off: {e:#}");
+            None
+        }
+    }
+}
+
 /// The saved per-category volumes onto the system (vanilla's `soundCategory_*` option
 /// keys), each scaled by the master volume.
 fn apply_volumes(system: &mut SoundSystem, volumes: &haste_setup::options::SoundVolumes) {
