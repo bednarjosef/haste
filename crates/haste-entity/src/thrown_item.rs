@@ -90,6 +90,19 @@ pub fn has_smoke_trail(kind: RegistryIndex) -> bool {
     )
 }
 
+impl crate::store::EntityStore {
+    /// The current positions of the entities that trail smoke
+    /// (`AbstractHurtingProjectile.createParticleTrail`), for the client's per-tick particle
+    /// spawn — no allocation, one position per trailing entity.
+    pub fn smoke_trail_positions(&self) -> impl Iterator<Item = haste_core::DVec3> + '_ {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| has_smoke_trail(slot.kind))
+            .map(|slot| slot.pos)
+    }
+}
+
 /// The render state `ThrownItemRenderer.extractRenderState` collects: the item to draw
 /// (`ItemSupplier.getItem`, the synched stack or the type's default), with the renderer's
 /// scale and full-bright. `None` when no item resolves (an unknown default item draws
