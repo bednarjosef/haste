@@ -48,6 +48,7 @@ mod map_tests;
 mod minecart;
 #[cfg(test)]
 mod minecart_tests;
+mod model_equipment;
 mod painting;
 mod pipelines;
 mod piston;

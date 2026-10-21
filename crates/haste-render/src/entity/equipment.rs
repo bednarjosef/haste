@@ -173,6 +173,9 @@ impl EntityRenderer {
             }
             self.vertices = out;
         }
+        // The mobs' own equipment layers (body armour, saddles, llama decor) on their layer
+        // models.
+        self.emit_model_equipment(e, root, light, assets);
         // Custom head (vanilla `CustomHeadLayer`): the head-slot item when it is not armour
         // (pumpkins, heads), through the head part's animated transform.
         if let Some(idx) = e.head_item {
