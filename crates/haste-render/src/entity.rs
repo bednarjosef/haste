@@ -335,9 +335,8 @@ pub struct EntityRenderer {
     map_decoration_rects: HashMap<u32, Option<[u32; 4]>>,
     /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
     map_decoration_names: Vec<Identifier>,
-    /// This frame's stuck-in-body and shoulder state, sorted by id (`set_stuck`).
+    /// This frame's stuck and shoulder state (by id) and the models they draw (`set_stuck`).
     stuck: Vec<StuckInput>,
-    /// The stinger and parrot models the stuck layers draw (`set_stuck`).
     stuck_models: StuckModels,
     pub drawn: u32,
     /// The leash ropes to draw this frame (set by the client through [`Self::set_leash_lines`]).
