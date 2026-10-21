@@ -23,48 +23,8 @@ use crate::model_dump;
 mod shadow;
 pub use shadow::{shadow_radius_for_name, shadow_strength_for_name};
 
-/// One table row: adult and baby layer ids (`minecraft:pig#main`), textures (jar paths under
-/// `assets/minecraft/textures/`, without the prefix), and the layers' root scales.
-struct Entry {
-    layer: &'static str,
-    texture: &'static str,
-    root_scale: f32,
-    /// The baby layer/texture when vanilla renders babies with their own `*_BABY` layer;
-    /// `None` when the adult layer is used for both.
-    baby: Option<(&'static str, &'static str)>,
-}
-
-const fn row(layer: &'static str, texture: &'static str) -> Entry {
-    Entry {
-        layer,
-        texture,
-        root_scale: 1.0,
-        baby: None,
-    }
-}
-
-const fn row_baby(
-    layer: &'static str,
-    texture: &'static str,
-    baby_layer: &'static str,
-    baby_texture: &'static str,
-) -> Entry {
-    Entry {
-        layer,
-        texture,
-        root_scale: 1.0,
-        baby: Some((baby_layer, baby_texture)),
-    }
-}
-
-const fn row_scaled(layer: &'static str, texture: &'static str, root_scale: f32) -> Entry {
-    Entry {
-        layer,
-        texture,
-        root_scale,
-        baby: None,
-    }
-}
+mod row;
+use row::{row, row_baby, row_scaled, Entry};
 
 /// The table. Textures and layers read from each vanilla renderer named in the comments
 /// (`cache/source/26.3/client/net/minecraft/client/renderer/entity/`).
