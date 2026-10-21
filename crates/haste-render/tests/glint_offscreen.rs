@@ -3,7 +3,7 @@
 //! the datagen reports and a Vulkan driver (source scripts/env.sh).
 
 use haste_core::gui::{GuiCommand, GuiFrame};
-use haste_core::model::FoilType;
+use haste_core::model::{EntityInstance, EquipmentPiece, EquipmentSlot, FoilType};
 use haste_core::{Identifier, RegistryIndex};
 use haste_render::{Camera, FrameInput, Renderer, SkyState};
 
@@ -30,10 +30,19 @@ fn camera() -> Camera {
 }
 
 fn render(renderer: &mut Renderer, gui: &GuiFrame) -> image::RgbaImage {
+    render_entities(renderer, gui, camera(), &[])
+}
+
+fn render_entities(
+    renderer: &mut Renderer,
+    gui: &GuiFrame,
+    camera: Camera,
+    entities: &[EntityInstance],
+) -> image::RgbaImage {
     renderer
         .render(&FrameInput {
-            camera: camera(),
-            entities: &[],
+            camera,
+            entities,
             block_entities: &[],
             gui,
             sky: SkyState {
@@ -160,4 +169,98 @@ fn glint_brightens_gui_items_and_the_held_item() {
     let (a, b, darker) = compare(&plain, &glint, all);
     assert!(b > a, "held sword: glint {b} vs plain {a}");
     assert!(!darker, "the held glint only adds");
+}
+
+/// Worn armour: an enchanted diamond chestplate draws the armour glint on its layer
+/// (`EquipmentLayerRenderer.renderLayers`), brightening the armour and nothing else. Saves
+/// `target/render-checks/glint-armour.png` and `glint-armour-plain.png`.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn glint_brightens_worn_armour() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer =
+        Renderer::new_offscreen(W * SCALE, H * SCALE, &mut assets, &data.blocks).unwrap();
+    renderer.set_item_registry(&data.registries);
+    renderer.set_first_person(None);
+    let chestplate = item_index(&data, "diamond_chestplate");
+    let asset = data
+        .item_components
+        .equippable(chestplate)
+        .and_then(|e| e.asset.clone());
+    let wearer = |foil: FoilType| EntityInstance {
+        id: haste_core::EntityId(1),
+        model: haste_entity::models::humanoid(false),
+        pos: glam::DVec3::new(0.0, 99.0, 2.5),
+        yaw: 180.0,
+        pitch: 0.0,
+        head_yaw: 180.0,
+        scale: 1.0,
+        pose: Default::default(),
+        body: Default::default(),
+        body_scale: glam::Vec3::ONE,
+        skin: None,
+        nametag: None,
+        below_name: None,
+        shadow_radius: 0.0,
+        shadow_strength: 0.0,
+        invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
+        is_discrete: false,
+        name_tag_y: 1.8,
+        hurt: 0.0,
+        light: (15, 0),
+        item: None,
+        overlays: Default::default(),
+        decoration: None,
+        hands: [None, None],
+        equipment: vec![EquipmentPiece {
+            slot: EquipmentSlot::Chest,
+            item: Some(chestplate),
+            asset: asset.clone(),
+            dye: None,
+            layer: None,
+            foil,
+        }],
+        head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
+    };
+    let empty = GuiFrame {
+        commands: vec![],
+        scale: 1,
+        width: W,
+        height: H,
+        cursor: None,
+        blur_after: -1,
+    };
+    let plain = render_entities(&mut renderer, &empty, camera(), &[wearer(FoilType::None)]);
+    let glint = render_entities(
+        &mut renderer,
+        &empty,
+        camera(),
+        &[wearer(FoilType::Standard)],
+    );
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    plain.save(out.join("glint-armour-plain.png")).unwrap();
+    glint.save(out.join("glint-armour.png")).unwrap();
+    let all = [0, 0, W * SCALE, H * SCALE];
+    let (a, b, darker) = compare(&plain, &glint, all);
+    let changed = plain
+        .pixels()
+        .zip(glint.pixels())
+        .filter(|(p, q)| p.0 != q.0)
+        .count();
+    eprintln!("armour glint changed {changed} pixels, brightness {a} -> {b}");
+    assert!(
+        changed > 200,
+        "the glint shows on the armour ({changed} pixels)"
+    );
+    assert!(b > a, "armour: glint {b} vs plain {a}");
+    assert!(!darker, "the armour glint only adds");
 }
