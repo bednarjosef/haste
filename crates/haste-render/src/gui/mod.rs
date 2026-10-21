@@ -20,6 +20,8 @@ mod gui_entity_renderer;
 mod gui_renderer;
 mod item;
 mod nametag;
+pub(crate) mod string_decomposer;
+pub(crate) mod string_splitter;
 #[cfg(test)]
 mod tests;
 

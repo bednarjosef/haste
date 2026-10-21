@@ -370,6 +370,12 @@ impl Renderer {
             main_format,
             assets,
         );
+        let world_border = crate::world_border::WorldBorderRenderer::new(
+            &gpu.device,
+            &gpu.queue,
+            main_format,
+            assets,
+        );
         let (rain_rect, snow_rect) = sky.weather_rects();
         let mut weather = crate::weather::WeatherRenderer::new(
             gpu.device.clone(),
@@ -505,6 +511,7 @@ impl Renderer {
             entity,
             sky,
             clouds,
+            world_border,
             weather,
             overlay,
             particles,

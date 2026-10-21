@@ -13,13 +13,15 @@ pub(crate) use render_options::{
 };
 
 /// Applies the config's cloud options to the renderer (vanilla `Options.cloudStatus`
-/// and `Options.cloudRange`).
-pub(super) fn apply_cloud_options(
+/// and `Options.cloudRange`), and the world border the game view carries.
+pub(super) fn apply_view_options(
     renderer: &mut haste_render::Renderer,
     options: &haste_setup::options::Options,
+    world_border: Option<haste_render::world_border::WorldBorderFrame>,
 ) {
     renderer.set_cloud_status(cloud_status(options.clouds));
     renderer.set_cloud_range(options.cloud_range);
+    renderer.set_world_border(world_border);
 }
 
 impl App {
@@ -329,7 +331,11 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
-            camera_entity: (!self.perspective.draws_player()).then_some(session.local.0),
+            camera_entity: game::camera_entity::hidden_entity(
+                &view,
+                !self.perspective.draws_player(),
+                session.local.0,
+            ),
             spin: view.screen.spin_warp(partial),
             weather,
         };
@@ -354,7 +360,7 @@ impl App {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         renderer.set_view_scale(self.options.entity_distance_scaling);
-        apply_cloud_options(renderer, &self.options);
+        apply_view_options(renderer, &self.options, view.world_border);
         renderer.set_premesh(
             self.premesh_forced
                 .unwrap_or_else(|| premesh_mode(self.options.premesh)),

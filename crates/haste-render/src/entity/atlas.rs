@@ -39,11 +39,39 @@ impl EntityRenderer {
         Some(self.resident_texture_rect(&key))
     }
 
+    /// A single white texel in the entity atlas, for the solid quads text draws (its
+    /// background and underline/strikethrough effects, vanilla's white glyph).
+    pub(super) fn white_rect(&mut self) -> [u32; 4] {
+        // Resident already (every frame but the first and those after a repack): no key
+        // built, nothing allocated.
+        let resident = self
+            .textures
+            .get(&self.displays.white_key)
+            .and_then(|t| t.rect);
+        if let Some(rect) = resident {
+            return rect;
+        }
+        let key = self.displays.white_key.clone();
+        if !self.textures.contains_key(&key) {
+            let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255; 4]));
+            self.textures.insert(
+                key.clone(),
+                EntityTexture {
+                    rect: None,
+                    image: Arc::new(image),
+                },
+            );
+        }
+        self.resident_texture_rect(&key)
+    }
+
     pub(super) fn texture_rect(&mut self, id: &Identifier, assets: &mut Assets) -> [u32; 4] {
         if !self.textures.contains_key(id) {
             let image = if id.namespace() == "haste" {
                 if id.path() == "missing" {
                     missing_texture()
+                } else if id.path() == "white" {
+                    white_texture()
                 } else {
                     placeholder_texture()
                 }

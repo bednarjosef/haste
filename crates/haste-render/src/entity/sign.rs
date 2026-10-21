@@ -95,50 +95,10 @@ impl EntityRenderer {
         tint: [f32; 3],
         light: (u8, u8),
     ) {
-        // The drawn size and the source rectangle, normalized within the page image.
-        let (rect, draw, src, top) = match glyph.kind {
-            haste_assets::GlyphKind::Empty => return,
-            // Vanilla's missing-glyph box; drawn only in the GUI pass today.
-            haste_assets::GlyphKind::Missing => return,
-            haste_assets::GlyphKind::Bitmap {
-                x: px,
-                y: py,
-                w,
-                h,
-                scale,
-                top,
-                ..
-            } => {
-                let Some(r) = self.glyph_page_rect(glyph.kind) else {
-                    return;
-                };
-                (
-                    r,
-                    [w as f32 * scale, h as f32 * scale],
-                    [
-                        px as f32 / r[2] as f32,
-                        py as f32 / r[3] as f32,
-                        w as f32 / r[2] as f32,
-                        h as f32 / r[3] as f32,
-                    ],
-                    top,
-                )
-            }
-            haste_assets::GlyphKind::Hex { .. } => {
-                let Some(r) = self.glyph_page_rect(glyph.kind) else {
-                    return;
-                };
-                (
-                    r,
-                    [r[2] as f32 / 2.0, r[3] as f32 / 2.0],
-                    [0.0, 0.0, 1.0, 1.0],
-                    0.0,
-                )
-            }
-        };
-        if draw[0] <= 0.0 || draw[1] <= 0.0 || rect[2] == 0 || rect[3] == 0 {
+        let Some(sprite) = self.glyph_sprite(glyph.kind) else {
             return;
-        }
+        };
+        let (rect, draw, src, top) = (sprite.rect, sprite.size, sprite.src, sprite.top);
         let (x0, y0) = (x, y + top);
         let (x1, y1) = (x0 + draw[0], y0 + draw[1]);
         let corners = [

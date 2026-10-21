@@ -73,6 +73,17 @@ impl LegacyRandom {
     pub fn next_float(&mut self) -> f32 {
         self.next(24) as f32 * 5.960_464_5E-8
     }
+
+    /// `BitRandomSource.nextDouble()`: 26 + 27 bits combined, scaled by the interface's
+    /// `DOUBLE_MULTIPLIER`. That multiplier is a float constant and the combined value is
+    /// a long, so vanilla multiplies in float precision and only widens the product; the
+    /// same is done here, so the values match the client bit for bit.
+    pub fn next_double(&mut self) -> f64 {
+        let upper = i64::from(self.next(26));
+        let lower = i64::from(self.next(27));
+        let combined = (upper << 27) + lower;
+        f64::from(combined as f32 * 1.110_223E-16_f32)
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +109,21 @@ mod tests {
             assert_eq!(r.next_int(100), hundred, "seed {seed} nextInt(100)");
             assert_eq!(r.next_long(), long, "seed {seed} nextLong");
         }
+    }
+
+    // Produced by the JDK in `cache/jdk`: a `java.util.Random` subclass running
+    // `BitRandomSource.nextDouble`'s steps (seed 42) and `nextFloat`'s (seed 7).
+    #[test]
+    fn next_double_and_next_float_match_bit_random_source() {
+        let mut r = LegacyRandom::new(42);
+        let doubles = [r.next_double(), r.next_double(), r.next_double()];
+        assert_eq!(
+            doubles,
+            [0.7275636792182922, 0.6832234859466553, 0.3087194561958313]
+        );
+        let mut f = LegacyRandom::new(7);
+        let floats = [f.next_float(), f.next_float(), f.next_float()];
+        assert_eq!(floats, [0.730699, 0.63853765, 0.7491696]);
     }
 
     #[test]

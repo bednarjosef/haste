@@ -6,6 +6,8 @@
 
 // `biomes.rs` is included through a `#[path]` module, so its submodules resolve next to it
 // in `src/`, not in `src/biomes/` — point them at their files explicitly.
+#[path = "biomes/ambient_sounds.rs"]
+pub mod ambient_sounds;
 #[path = "biomes/audio.rs"]
 pub mod audio;
 #[path = "biomes/zoom.rs"]

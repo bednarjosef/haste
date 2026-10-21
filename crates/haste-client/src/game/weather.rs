@@ -44,7 +44,7 @@ pub(super) fn biome_has_precipitation(
 pub(super) fn tick(driver: &mut NetDriver, world: &World, shared: &Shared) {
     driver.session.weather.tick();
     if crate::net::WeatherState::can_have_weather(&driver.session.dimension) {
-        let camera = driver.session.player.camera(1.0).0;
+        let camera = driver.session.camera_pose(1.0).0;
         driver.session.weather.tick_effects(
             camera,
             haste_render::weather::WEATHER_RADIUS,

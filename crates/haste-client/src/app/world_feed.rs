@@ -2,6 +2,8 @@
 //! which dirty sections are handed to the renderer's mesher, and the per-frame entity and
 //! block-entity instances.
 
+mod frame_maps;
+mod leash_lines;
 mod promotion;
 mod stuck;
 
@@ -125,6 +127,10 @@ pub struct WorldFeed {
     /// Entity instances for this frame (reused).
     pub(crate) instances: Vec<EntityInstance>,
     stuck: stuck::StuckFeed,
+    /// Leash ropes for this frame (reused): the entity store's lines, and those lines with
+    /// the light at each end (`leash_lines::convert`) for the renderer.
+    leash: Vec<haste_entity::leash::LeashLine>,
+    leash_render: Vec<haste_render::entity::LeashLine>,
     /// Block entity instances for this frame (reused): the game thread's last tick frame with
     /// the partial tick folded in (`block_entity_extract::fold_partial`).
     be_instances: Vec<BlockEntityInstance>,
@@ -443,6 +449,8 @@ impl WorldFeed {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
             self.stuck.fill(&store, partial);
+            let model = shared.local_model.lock();
+            store.leash_lines(partial, Some(&model), &mut self.leash);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
         self.stuck.set_stuck(renderer);
@@ -481,51 +489,12 @@ impl WorldFeed {
             // The minecarts' rail snapping reads the level (`OldMinecartBehavior.getPos`),
             // so it happens here too, per frame.
             haste_entity::minecart::snap_rails(&mut self.instances, &*world, &shared.data.blocks);
+            // The rope ends' light, sampled at the blocks the ends hang in.
+            leash_lines::convert(&*world, &self.leash, &mut self.leash_render);
         }
+        renderer.set_leash_lines(&self.leash_render);
+        haste_entity::display::fill_light_emission(&mut self.instances, &*shared.data);
         (&self.instances, &self.be_instances)
-    }
-
-    /// Each framed item stack's map id (`ItemFrame.getFramedMapId` reads the stack's
-    /// `minecraft:map_id` component): filled onto the item frame instances so the renderer
-    /// can draw the map instead of the item. The stack's bytes are compared per frame and
-    /// the component patch decoded only when they changed (the entity store keeps no
-    /// component tables, so the decode lives here on the render thread).
-    fn patch_frame_maps(&mut self, shared: &Shared) {
-        let tables = &shared.component_tables;
-        let store = shared.entities.read();
-        for inst in self.instances.iter_mut() {
-            let Some(haste_core::model::Decoration::ItemFrame(f)) = inst.decoration.as_mut() else {
-                continue;
-            };
-            if f.item.is_none() {
-                f.map_id = None;
-                continue;
-            }
-            let Some(entity) = store.get(inst.id) else {
-                f.map_id = None;
-                continue;
-            };
-            let stack = entity
-                .metadata
-                .get(haste_entity::decoration::ITEM_FRAME_ITEM)
-                .and_then(|e| match &e.value {
-                    haste_core::entity::MetadataValue::ItemStack(s) if !s.is_empty() => Some(s),
-                    _ => None,
-                });
-            let Some(stack) = stack else {
-                f.map_id = None;
-                continue;
-            };
-            if self
-                .frame_map_ids
-                .get(&inst.id)
-                .is_none_or(|(s, _)| *s != *stack)
-            {
-                let map_id = crate::net::map_id_of(stack, tables);
-                self.frame_map_ids.insert(inst.id, (stack.clone(), map_id));
-            }
-            f.map_id = self.frame_map_ids.get(&inst.id).unwrap().1;
-        }
     }
 
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's

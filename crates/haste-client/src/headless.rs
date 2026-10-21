@@ -121,6 +121,8 @@ async fn run_async(
             }
         }
         let ticked = driver.tick(&input, &mut world, &mut entities);
+        // The camera entity for the next tick (the windowed game refreshes it around the tick).
+        driver.session.camera.refresh(&entities);
         if walk
             .as_mut()
             .is_some_and(|w| w.after_tick(tick, &driver.session.player))
