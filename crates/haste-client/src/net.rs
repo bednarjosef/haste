@@ -172,6 +172,9 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Firework bursts queued by entity status 17 since the last tick (drained by the game
+    /// thread into the particle pool).
+    pub firework_bursts: Vec<fireworks::FireworkBurst>,
     /// The totem pops in progress (vanilla `TrackingEmitter`s the status 35 adds), ticked by
     /// the game thread into the particle pool, and their random (vanilla's level random).
     pub totem_emitters: Vec<crate::game::totem_emitter::TotemEmitter>,
@@ -313,6 +316,7 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            firework_bursts: Vec::new(),
             totem_emitters: Vec::new(),
             totem_rng: haste_audio::random::LegacyRandom::new(
                 std::time::SystemTime::now()
@@ -543,6 +547,7 @@ mod effects;
 mod entities;
 mod explosion;
 mod explosion_tracker;
+pub(crate) mod fireworks;
 mod fov;
 mod item_world;
 mod lightmap;

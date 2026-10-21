@@ -143,13 +143,17 @@ impl EntityStore {
             // setupRotations is only the hit wobble (`ArmorStandRenderer.setupRotations` does
             // not call super, so no death tilt or sleeping rotations either); the generic
             // `setupRotations` for everything else.
-            let body = if is_boat {
+            let mut body = if is_boat {
                 crate::boat::body_transform(slot, partial_tick)
             } else if is_armor_stand {
                 crate::armor_stand::body_transform(slot, partial_tick)
             } else {
                 crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"))
             };
+            // `FireworkEntityRenderer.submit`'s turn of a rocket shot at an angle.
+            if let Some(t) = thrown {
+                crate::thrown_item::flight_turn(&t, &slot.metadata, &mut body);
+            }
             // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
             let body_scale = if texture.contains("creeper") {
                 crate::animation::creeper_scale(slot, partial_tick)

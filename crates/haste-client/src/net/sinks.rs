@@ -218,6 +218,12 @@ pub trait EntitySink {
     ) {
         let _ = (id, out);
     }
+    /// `FireworkRocketEntity.handleEntityEvent` 17: a tracked rocket's burst (its position,
+    /// movement and synched stack). Fakes know no rockets.
+    fn firework_burst(&self, id: EntityId) -> Option<super::fireworks::FireworkBurst> {
+        let _ = id;
+        None
+    }
     /// `EntityStore::tick_in_world`: the tick with the world the dropped items and the
     /// arrows move in (`ItemEntity.tick`'s and `AbstractArrow.tick`'s collision, friction
     /// and fluids), collecting the arrows' own particle requests. Fakes ignore the world.
@@ -395,6 +401,20 @@ impl EntitySink for EntityStore {
         if let Some(e) = EntityStore::get(self, id) {
             haste_entity::arrow::potion_puff(e, out);
         }
+    }
+    fn firework_burst(&self, id: EntityId) -> Option<super::fireworks::FireworkBurst> {
+        let e = EntityStore::get(self, id)?;
+        // The synched stack (`DATA_ITEM_STACK`, slot 8); a rocket without one bursts as the
+        // default rocket, which has no explosions.
+        let stack = match e.metadata.get(8).map(|m| &m.value) {
+            Some(MetadataValue::ItemStack(s)) => s.clone(),
+            _ => ItemStackData::default(),
+        };
+        Some(super::fireworks::FireworkBurst {
+            pos: e.pos,
+            velocity: e.velocity,
+            stack,
+        })
     }
     fn tick_in_world(
         &mut self,
