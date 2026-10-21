@@ -164,6 +164,9 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Firework bursts queued by entity status 17 since the last tick (drained by the game
+    /// thread into the particle pool).
+    pub firework_bursts: Vec<fireworks::FireworkBurst>,
     /// Block particles queued since the last tick (our own break and mining start, and the
     /// server's `level_event`s), drained by the game thread into the shared pool.
     pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
@@ -298,6 +301,7 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            firework_bursts: Vec::new(),
             block_particle_requests: Vec::new(),
             item_particle_requests: Vec::new(),
             explosions: explosion_tracker::ExplosionTracker::default(),
@@ -515,6 +519,7 @@ mod effects;
 mod entities;
 mod explosion;
 mod explosion_tracker;
+pub(crate) mod fireworks;
 mod fov;
 mod item_world;
 mod lightmap;

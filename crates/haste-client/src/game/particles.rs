@@ -3,6 +3,10 @@
 //! render snapshot.
 
 use haste_core::view::BlockView;
+use haste_protocol::haste_core::entity::ItemStackData;
+use haste_protocol::packets::ProtocolTables;
+use haste_protocol::wire::components;
+use haste_render::particles::{FireworkExplosion, FireworkShape};
 
 use super::shared::Shared;
 use crate::net::NetDriver;
@@ -13,6 +17,9 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
     let mut particles = shared.particles.lock();
     let camera = driver.session.player.camera(1.0).0;
     let spawns = std::mem::take(&mut driver.session.particle_spawns);
+    // Firework rockets that burst (`ClientLevel.createFireworks`): the explosions are decoded
+    // from each rocket's stack with the component tables.
+    let bursts = std::mem::take(&mut driver.session.firework_bursts);
     // Block particles: our own break/mining/sprint and the server's level events.
     // The world (state, shapes, biomes) is read here, where the game thread holds it.
     let requests = std::mem::take(&mut driver.session.block_particle_requests);
@@ -62,6 +69,10 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
             let mut spawn = haste_render::ParticleSpawn::client(kind, r.pos, speed);
             spawn.color = color;
             particles.spawn(&spawn, camera, None);
+        }
+        for b in &bursts {
+            let explosions = firework_explosions(&b.stack, &shared.component_tables);
+            particles.firework_burst(b.pos, b.velocity, &explosions);
         }
         driver.session.particle_spawned = spawns.len();
         let state_count = data.blocks.len();
@@ -127,4 +138,39 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
     // the render thread only ever takes an `Arc` copy.
     let world = shared.world.read();
     particles.publish_snapshot(&*world, &shared.particle_snapshots);
+}
+
+/// The explosions of a rocket's stack (its `fireworks` component), decoded with the component
+/// tables. A stack without them, or one that does not decode, has none: the burst is POOF.
+fn firework_explosions(stack: &ItemStackData, tables: &ProtocolTables) -> Vec<FireworkExplosion> {
+    if stack.components_raw.is_empty() {
+        return Vec::new();
+    }
+    let patch = match components::read_patch(&stack.components_raw, tables) {
+        Ok(patch) => patch,
+        Err(e) => {
+            tracing::debug!("firework rocket components unreadable: {e:?}");
+            return Vec::new();
+        }
+    };
+    let Some(fireworks) = patch.fireworks() else {
+        return Vec::new();
+    };
+    fireworks
+        .explosions
+        .iter()
+        .map(|e| FireworkExplosion {
+            shape: match e.shape {
+                components::FireworkShape::SmallBall => FireworkShape::SmallBall,
+                components::FireworkShape::LargeBall => FireworkShape::LargeBall,
+                components::FireworkShape::Star => FireworkShape::Star,
+                components::FireworkShape::Creeper => FireworkShape::Creeper,
+                components::FireworkShape::Burst => FireworkShape::Burst,
+            },
+            colors: e.colors.clone(),
+            fade_colors: e.fade_colors.clone(),
+            trail: e.has_trail,
+            twinkle: e.has_twinkle,
+        })
+        .collect()
 }

@@ -195,6 +195,11 @@ impl Session {
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             // Entity status 0 on an arrow is the potion puff of a stuck tipped arrow
             // reverting (`Arrow.handleEntityEvent`); other entities' status 0 is not ours.
+            // Entity status 17: a firework rocket bursts (`FireworkRocketEntity.handleEntityEvent`);
+            // its explosions are read from the rocket's stack by the particle tick.
+            P::EntityEvent(e) if e.status == 17 => {
+                self.firework_status(EntityId(e.entity_id), entities)
+            }
             P::EntityEvent(e) if e.status == 0 => {
                 entities.arrow_potion_puff(EntityId(e.entity_id), &mut self.arrow_particles)
             }
