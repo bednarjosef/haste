@@ -274,6 +274,7 @@ impl Shared {
             view: Mutex::new(ViewState {
                 prev_eye: DVec3::ZERO,
                 eye: DVec3::ZERO,
+                cart_camera: None,
                 look_offset: (0.0, 0.0),
                 tick_at: Instant::now(),
                 animation_tick: 0,
@@ -284,6 +285,7 @@ impl Shared {
                 world_age: 0,
                 has_sky,
                 view_distance,
+                world_border: None,
                 block_target: None,
                 eye_in_water: false,
                 eye_in_lava: false,

@@ -62,6 +62,9 @@ pub struct ViewState {
     pub has_sky: bool,
     /// Server view distance in chunks.
     pub view_distance: i32,
+    /// The world border for the wall pass (`WorldBorderRenderState`); `None` before the first
+    /// tick publishes one.
+    pub world_border: Option<haste_render::world_border::WorldBorderFrame>,
     /// Block under the crosshair and the face hit (`LocalPlayer::target`).
     pub block_target: Option<(BlockPos, Direction)>,
     /// Whether the player's eyes are in water (`PlayerState::eyes_in_water`), for the HUD's
@@ -144,6 +147,9 @@ pub struct ViewState {
     pub sea_level: i32,
     /// `ClientLevelData.getHorizonHeight` (the dark disc's threshold).
     pub horizon_height: f64,
+    /// The new-behaviour minecart we ride, for the camera and our model to follow its track
+    /// walk per frame (`Camera.alignWithEntity`); `None` otherwise.
+    pub cart_camera: Option<super::CartCamera>,
 }
 
 impl ViewState {
@@ -312,6 +318,23 @@ pub(super) fn tick_hand(
 /// everything the render thread needs per frame is copied into [`ViewState`] here, bracketed
 /// around the tick. Returns the player's feet position, for the block entity extraction
 /// that follows.
+/// The world border as the wall pass draws it (vanilla `WorldBorderRenderState`): the
+/// square, the status tint and the render distance, which is the view distance in chunks
+/// times 16 (`renderDistance`).
+fn world_border_frame(
+    border: &crate::world_border::WorldBorder,
+    view_distance_chunks: i32,
+) -> haste_render::world_border::WorldBorderFrame {
+    haste_render::world_border::WorldBorderFrame {
+        min_x: border.min_x(),
+        max_x: border.max_x(),
+        min_z: border.min_z(),
+        max_z: border.max_z(),
+        tint: border.status().color(),
+        render_distance: f64::from(view_distance_chunks) * 16.0,
+    }
+}
+
 pub(super) fn publish(
     driver: &crate::net::NetDriver,
     shared: &super::shared::Shared,
@@ -322,7 +345,10 @@ pub(super) fn publish(
     let (prev_eye, prev_yaw, prev_pitch) = prev;
     let (eye, yaw, pitch) = cur;
     let s = &driver.session;
+    // Read before the view lock is taken (the entity store has its own lock).
+    let cart_camera = super::cart_camera::extract(s, shared);
     let mut view = shared.view.lock();
+    view.cart_camera = cart_camera;
     // The feet bracket the tick like the eye does; the eye height can change within it
     // (sneaking), so the old feet are the last view's, not the eye minus its height.
     let feet = s.player.state.pos;
@@ -377,6 +403,7 @@ pub(super) fn publish(
     view.eye_height = s.player.eye_height();
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.world_age = s.world_age;
+    view.world_border = Some(world_border_frame(&s.world_border, view.view_distance));
     view.has_sky = s.dimension.has_skylight;
     view.block_target = if s.player.game_mode == GameMode::Spectator {
         // Vanilla `GameRenderer.shouldRenderBlockOutline`: a spectator draws no block outline.
@@ -444,6 +471,8 @@ pub(super) fn publish(
         spinning_time: screen.spinning_time(),
         spinning_speed: screen.spinning_speed(),
         spectator: view.spectator,
+        // `Hud.extractVignette` measures from the camera entity, the player's feet in x and z.
+        border_warning: s.world_border.warning_strength(feet.x, feet.z),
     };
     drop(view);
     feet

@@ -1,4 +1,6 @@
 mod explosion_emitter;
+mod firework;
+mod firework_perf;
 mod item_particle;
 mod snapshot;
 mod terrain_particle;

@@ -52,6 +52,7 @@ fn registration_matches_vanilla() {
         ("minecraft:eye_of_ender", 1.0, true),
         ("minecraft:fireball", 3.0, true),
         ("minecraft:small_fireball", 0.75, true),
+        ("minecraft:firework_rocket", 1.0, false),
     ];
     for (name, scale, full_bright) in cases {
         let t = thrown_item::variant_for_name(name).unwrap_or_else(|| panic!("{name}"));
@@ -87,6 +88,22 @@ fn decoration_uses_the_synced_stack() {
     );
 }
 
+/// `FireworkRocketEntity.isShotAtAngle` reads `DATA_SHOT_AT_ANGLE` at index 10 (the attached
+/// target at 9 is a different slot): only a synched true turns the rocket to its flight.
+#[test]
+fn shot_at_angle_reads_the_boolean_at_index_ten() {
+    let flag = |index, value| {
+        metadata(vec![MetadataEntry {
+            index,
+            value: MetadataValue::Boolean(value),
+        }])
+    };
+    assert!(!thrown_item::shot_at_angle(&Metadata::default()));
+    assert!(thrown_item::shot_at_angle(&flag(10, true)));
+    assert!(!thrown_item::shot_at_angle(&flag(10, false)));
+    assert!(!thrown_item::shot_at_angle(&flag(9, true)));
+}
+
 /// Without a stack the type's default item resolves through the item registry: the
 /// snowball's `getDefaultItem` is `minecraft:snowball`, the fireballs' `FIRE_CHARGE`, the
 /// eye of ender's `ENDER_EYE`.
@@ -110,6 +127,38 @@ fn decoration_falls_back_to_the_default_item() {
             .unwrap_or_else(|| panic!("{name} resolves no item"));
         assert_eq!(Some(&d.item), items.get(default), "{name}");
     }
+}
+
+/// `FireworkEntityRenderer.submit`: only a rocket shot at an angle gets the three turn ops, in
+/// vanilla's order (Z 180, Y 180, X 90); other thrown items and an upright rocket keep an empty
+/// body.
+#[test]
+fn flight_turn_only_for_shot_at_angle_rockets() {
+    let flag = metadata(vec![MetadataEntry {
+        index: 10,
+        value: MetadataValue::Boolean(true),
+    }]);
+    let rocket = thrown_item::variant_for_name("minecraft:firework_rocket").unwrap();
+    let mut body = haste_core::model::BodyTransform::default();
+    thrown_item::flight_turn(&rocket, &flag, &mut body);
+    let ops: Vec<_> = body.iter().copied().collect();
+    assert_eq!(
+        ops,
+        [
+            haste_core::model::BodyOp::RotateZ(std::f32::consts::PI),
+            haste_core::model::BodyOp::RotateY(std::f32::consts::PI),
+            haste_core::model::BodyOp::RotateX(std::f32::consts::FRAC_PI_2),
+        ]
+    );
+
+    let mut upright = haste_core::model::BodyTransform::default();
+    thrown_item::flight_turn(&rocket, &Metadata::default(), &mut upright);
+    assert_eq!(upright.len, 0);
+
+    let snowball = thrown_item::variant_for_name("minecraft:snowball").unwrap();
+    let mut other = haste_core::model::BodyTransform::default();
+    thrown_item::flight_turn(&snowball, &flag, &mut other);
+    assert_eq!(other.len, 0);
 }
 
 /// A spawned snowball tracks as a thrown item, not a dropped item: its instance carries the

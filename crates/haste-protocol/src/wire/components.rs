@@ -73,6 +73,7 @@ fn read_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<ItemComponent>
         "minimum_attack_charge" => ItemComponent::MinimumAttackCharge(r.f32()?),
         "piercing_weapon" => ItemComponent::PiercingWeapon(read_piercing_weapon(r)?),
         "consumable" => ItemComponent::Consumable(read_consumable(r)?),
+        "fireworks" => ItemComponent::Fireworks(read_fireworks(r)?),
         // Layout known, value not modelled: keep it as written.
         _ => {
             let start = r.peek_rest();
@@ -102,6 +103,30 @@ fn read_enchantments(r: &mut Reader<'_>) -> DecodeResult<Vec<EnchantmentLevel>> 
             id,
             level: r.var_int()?,
         })
+    })
+}
+
+/// Explosions in one `fireworks` component (vanilla `Fireworks` caps its list at 256).
+const MAX_FIREWORK_EXPLOSIONS: usize = 256;
+
+/// `fireworks` (vanilla `Fireworks.STREAM_CODEC`): the flight duration, then the explosions
+/// the rocket bursts into.
+fn read_fireworks(r: &mut Reader<'_>) -> DecodeResult<Fireworks> {
+    Ok(Fireworks {
+        flight_duration: r.var_int()?,
+        explosions: r.list(MAX_FIREWORK_EXPLOSIONS, read_firework_explosion)?,
+    })
+}
+
+/// `firework_explosion` (vanilla `FireworkExplosion.STREAM_CODEC`): the shape by id, the
+/// colours and fade colours as packed RGB ints, then the trail and twinkle flags.
+fn read_firework_explosion(r: &mut Reader<'_>) -> DecodeResult<FireworkExplosion> {
+    Ok(FireworkExplosion {
+        shape: FireworkShape::from_id(r.var_int()?),
+        colors: r.list(MAX_LIST, |r| r.i32())?,
+        fade_colors: r.list(MAX_LIST, |r| r.i32())?,
+        has_trail: r.bool()?,
+        has_twinkle: r.bool()?,
     })
 }
 
@@ -279,6 +304,14 @@ impl ComponentPatch {
         })
     }
 
+    /// `fireworks` the patch adds, if any: a rocket's flight and its explosions.
+    pub fn fireworks(&self) -> Option<&Fireworks> {
+        self.added.iter().find_map(|c| match c {
+            ItemComponent::Fireworks(v) => Some(v),
+            _ => None,
+        })
+    }
+
     /// Whether the patch removes `minecraft:consumable` (the stack is not
     /// consumable, whatever the item's default).
     pub fn removes_consumable(&self) -> bool {
@@ -317,6 +350,8 @@ pub enum ItemComponent {
     PiercingWeapon(PiercingWeapon),
     /// `consumable`: how the stack is used and what using it emits.
     Consumable(Consumable),
+    /// `fireworks`: a rocket's flight and the explosions it bursts into.
+    Fireworks(Fireworks),
     /// Any other component: its type name as a registry id and its data as
     /// written (skipped by `slot::skip_component`).
     Other {
@@ -325,6 +360,59 @@ pub enum ItemComponent {
         /// The component's encoded data.
         raw: Bytes,
     },
+}
+
+/// `fireworks`: a rocket's flight duration and its explosions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fireworks {
+    /// `flight_duration`: the flight time in ticks (vanilla `Fireworks.flightDuration`).
+    pub flight_duration: i32,
+    /// The explosions the rocket bursts into, in order.
+    pub explosions: Vec<FireworkExplosion>,
+}
+
+/// One explosion of a firework (vanilla `FireworkExplosion`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FireworkExplosion {
+    /// The burst pattern.
+    pub shape: FireworkShape,
+    /// Packed RGB colours of the sparks.
+    pub colors: Vec<i32>,
+    /// Packed RGB colours the sparks fade to.
+    pub fade_colors: Vec<i32>,
+    /// `has_trail`: the sparks leave a trail.
+    pub has_trail: bool,
+    /// `has_twinkle`: the sparks flicker.
+    pub has_twinkle: bool,
+}
+
+/// A firework burst pattern (vanilla `FireworkExplosion.Shape`), by its wire id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FireworkShape {
+    /// `SMALL_BALL` (id 0).
+    SmallBall,
+    /// `LARGE_BALL` (id 1).
+    LargeBall,
+    /// `STAR` (id 2).
+    Star,
+    /// `CREEPER` (id 3).
+    Creeper,
+    /// `BURST` (id 4).
+    Burst,
+}
+
+impl FireworkShape {
+    /// The shape for a wire id. Unknown ids fall back to `SmallBall`, as vanilla's
+    /// `ByIdMap` with `OutOfBoundsStrategy.ZERO` does.
+    pub fn from_id(id: i32) -> Self {
+        match id {
+            1 => Self::LargeBall,
+            2 => Self::Star,
+            3 => Self::Creeper,
+            4 => Self::Burst,
+            _ => Self::SmallBall,
+        }
+    }
 }
 
 /// One enchantment with its level.

@@ -20,6 +20,17 @@ fn frame(partial_tick: f32, effects: &ViewEffects) -> Frame<'_> {
     }
 }
 
+/// The frame's overlay commands without the vignette, which every frame draws: the tests of
+/// the other overlays count their own commands.
+fn without_vignette(f: &Frame) -> Vec<GuiCommand> {
+    let mut out = Vec::new();
+    f.append_to(&mut out);
+    out.retain(|c| {
+        !matches!(c, GuiCommand::Texture { texture, .. } if texture.path() == "textures/misc/vignette.png")
+    });
+    out
+}
+
 /// A nausea instance as the server sends it (`effect give nausea 30`: amplifier 0,
 /// duration 600 ticks, the blend flag clear, which means `skipBlending`).
 fn nausea(blend: bool, duration: i32) -> Effect {
@@ -412,8 +423,7 @@ fn the_water_overlay_is_first_person_only() {
         first_person: false,
         ..frame(0.5, &e)
     };
-    let mut out = Vec::new();
-    f.append_to(&mut out);
+    let out = without_vignette(&f);
     assert!(out.is_empty(), "third person draws no water overlay");
 }
 
@@ -425,8 +435,7 @@ fn the_fire_overlay_is_two_quads_over_the_bottom_of_the_screen() {
         on_fire: true,
         ..Default::default()
     });
-    let mut out = Vec::new();
-    frame(0.5, &e).append_to(&mut out);
+    let out = without_vignette(&frame(0.5, &e));
     assert_eq!(out.len(), 2, "the fire overlay is two quads");
     let scale = (H as f32) / (hud_fov(false).to_radians() * 0.5).tan();
     // The quads sit at the bottom: their top edge is 0.2 view units above the centre and
@@ -536,8 +545,7 @@ fn a_spectator_draws_neither_water_nor_fire_overlay() {
         spectator: true,
         ..Default::default()
     });
-    let mut out = Vec::new();
-    frame(0.5, &e).append_to(&mut out);
+    let out = without_vignette(&frame(0.5, &e));
     assert!(out.is_empty(), "no level-pass overlays for a spectator");
 }
 
@@ -617,8 +625,7 @@ fn the_pumpkin_overlay_covers_the_screen_untinted() {
         camera_overlay: camera_overlay(&Identifier::minecraft("carved_pumpkin")),
         ..Default::default()
     });
-    let mut out = Vec::new();
-    frame(0.5, &e).append_to(&mut out);
+    let out = without_vignette(&frame(0.5, &e));
     let GuiCommand::Texture { texture, tint, .. } = &out[0] else {
         panic!("expected the pumpkin overlay")
     };
@@ -634,8 +641,7 @@ fn the_spyglass_scope_is_a_centred_square_with_black_around_it() {
         scoping: true,
         ..Default::default()
     });
-    let mut out = Vec::new();
-    frame(0.5, &e).append_to(&mut out);
+    let out = without_vignette(&frame(0.5, &e));
     assert_eq!(out.len(), 5, "the scope texture plus four black fills");
     // `min(w, h) * 1.125`, centred.
     let GuiCommand::Texture { x, y, w, h, .. } = &out[0] else {
@@ -678,9 +684,8 @@ fn the_portal_overlay_alpha_is_squared_twice_and_lifted() {
             portal: (0.0, intensity),
             ..Default::default()
         });
-        let mut out = Vec::new();
         // Partial 1.0 reads the pair's second component, the intensity this tick.
-        frame(1.0, &e).append_to(&mut out);
+        let out = without_vignette(&frame(1.0, &e));
         let GuiCommand::Texture { tint, .. } = &out[0] else {
             panic!("expected the portal overlay")
         };
@@ -703,8 +708,7 @@ fn the_confusion_overlay_zooms_and_tints_at_the_default_scale_never() {
         nausea: (1.0, 1.0),
         ..Default::default()
     });
-    let mut out = Vec::new();
-    frame(0.5, &e).append_to(&mut out);
+    let out = without_vignette(&frame(0.5, &e));
     assert!(out.is_empty());
 
     // The overlay itself (below 100%): zoomed about the centre by `lerp(strength, 2, 1)`
@@ -746,8 +750,8 @@ fn every_overlay_draws_under_the_huds_own_commands() {
     let mut out = vec![hud];
     frame(0.5, &e).append_to(&mut out);
     // Vanilla's order, first to last: the level pass's block, water and fire, then the
-    // HUD's camera overlays: the spyglass scope and its black fills, the freeze outline,
-    // then the portal overlay.
+    // HUD's camera overlays: the vignette, the spyglass scope and its black fills, the freeze
+    // outline, then the portal overlay.
     let names: Vec<&str> = out
         .iter()
         .map(|c| match c {
@@ -767,6 +771,7 @@ fn every_overlay_draws_under_the_huds_own_commands() {
     expected.extend([
         "block/fire_1",
         "block/fire_1",
+        "textures/misc/vignette.png",
         "textures/misc/spyglass_scope.png",
         "black fill",
         "black fill",
@@ -811,7 +816,7 @@ fn other_variant(c: &GuiCommand) -> &'static str {
 }
 
 #[test]
-fn a_calm_frame_appends_nothing() {
+fn a_calm_frame_appends_only_the_white_vignette() {
     let e = view(ViewEffects::default());
     let mut out = vec![GuiCommand::Text {
         x: 0,
@@ -821,5 +826,34 @@ fn a_calm_frame_appends_nothing() {
         shadow: false,
     }];
     frame(0.5, &e).append_to(&mut out);
-    assert_eq!(out.len(), 1);
+    assert_eq!(out.len(), 2);
+    assert_eq!(vignette_tint(&out[0]), (0xFF_FF_FF_FF, GuiBlend::Multiply));
+}
+
+/// The tint and blend of a full-screen vignette command.
+fn vignette_tint(c: &GuiCommand) -> (u32, GuiBlend) {
+    match c {
+        GuiCommand::Texture { tint, blend, .. } => (*tint, *blend),
+        other => panic!("expected the vignette texture, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_border_warning_turns_the_vignette_red_toward_the_edge() {
+    // `Hud.extractVignette` at brightness 1: red falls by the strength, green and blue stay lit.
+    let half = view(ViewEffects {
+        border_warning: 0.5,
+        ..ViewEffects::default()
+    });
+    let mut out = Vec::new();
+    frame(0.5, &half).append_to(&mut out);
+    assert_eq!(vignette_tint(&out[0]), (0xFF_7F_FF_FF, GuiBlend::Multiply));
+
+    let edge = view(ViewEffects {
+        border_warning: 1.0,
+        ..ViewEffects::default()
+    });
+    let mut out = Vec::new();
+    frame(0.5, &edge).append_to(&mut out);
+    assert_eq!(vignette_tint(&out[0]), (0xFF_00_FF_FF, GuiBlend::Multiply));
 }

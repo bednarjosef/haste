@@ -446,6 +446,8 @@ pub struct Renderer {
     /// The clouds (`CloudRenderer`): the flat or extruded cell mesh around the camera,
     /// by the `renderClouds` option (`set_cloud_status`).
     clouds: crate::clouds::CloudRenderer,
+    /// The world border's forcefield wall (`WorldBorderRenderer`; `set_world_border`).
+    world_border: crate::world_border::WorldBorderRenderer,
     /// Rain and snow columns (`FrameInput::sky.weather`).
     weather: crate::weather::WeatherRenderer,
     /// Selection outline and break cracks.

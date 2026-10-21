@@ -16,6 +16,7 @@ use haste_protocol::haste_core::entity::{
 };
 use haste_protocol::haste_core::game::DimensionInfo;
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId};
+use haste_protocol::packets::play::clientbound::MinecartStep;
 use haste_world::World;
 
 /// What the driver needs from the world (`haste_world::World`).
@@ -151,6 +152,16 @@ pub trait EntitySink {
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::use_new_minecart_behavior`: a minecart spawned in a level with the
+    /// `minecart_improvements` feature runs `NewMinecartBehavior`. Default no-op.
+    fn use_new_minecart_behavior(&mut self, id: EntityId) {
+        let _ = id;
+    }
+    /// `EntityStore::handle_minecart_along_track`: a new-behaviour cart's track steps
+    /// (`move_minecart_along_track`). Default no-op.
+    fn handle_minecart_along_track(&mut self, id: EntityId, steps: &[MinecartStep]) {
+        let _ = (id, steps);
+    }
     /// `EntityStore::set_metadata`.
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]);
     /// `EntityStore::set_equipment`.
@@ -206,6 +217,12 @@ pub trait EntitySink {
         out: &mut Vec<haste_entity::arrow::ArrowParticle>,
     ) {
         let _ = (id, out);
+    }
+    /// `FireworkRocketEntity.handleEntityEvent` 17: a tracked rocket's burst (its position,
+    /// movement and synched stack). Fakes know no rockets.
+    fn firework_burst(&self, id: EntityId) -> Option<super::fireworks::FireworkBurst> {
+        let _ = id;
+        None
     }
     /// `EntityStore::tick_in_world`: the tick with the world the dropped items and the
     /// arrows move in (`ItemEntity.tick`'s and `AbstractArrow.tick`'s collision, friction
@@ -312,6 +329,23 @@ impl EntitySink for EntityStore {
     fn mark_hit(&mut self, id: EntityId) {
         EntityStore::mark_hit(self, id)
     }
+    fn use_new_minecart_behavior(&mut self, id: EntityId) {
+        EntityStore::use_new_minecart_behavior(self, id)
+    }
+    fn handle_minecart_along_track(&mut self, id: EntityId, steps: &[MinecartStep]) {
+        // The wire's steps as the entity crate's (`NewMinecartBehavior.MinecartStep`), straight
+        // into the cart's waiting list: no allocation beyond the packet once it has grown.
+        let steps = steps
+            .iter()
+            .map(|s| haste_entity::new_minecart_behavior::MinecartStep {
+                position: s.pos,
+                movement: s.velocity,
+                y_rot: s.yaw,
+                x_rot: s.pitch,
+                weight: s.weight,
+            });
+        EntityStore::handle_minecart_along_track(self, id, steps)
+    }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)
     }
@@ -367,6 +401,20 @@ impl EntitySink for EntityStore {
         if let Some(e) = EntityStore::get(self, id) {
             haste_entity::arrow::potion_puff(e, out);
         }
+    }
+    fn firework_burst(&self, id: EntityId) -> Option<super::fireworks::FireworkBurst> {
+        let e = EntityStore::get(self, id)?;
+        // The synched stack (`DATA_ITEM_STACK`, slot 8); a rocket without one bursts as the
+        // default rocket, which has no explosions.
+        let stack = match e.metadata.get(8).map(|m| &m.value) {
+            Some(MetadataValue::ItemStack(s)) => s.clone(),
+            _ => ItemStackData::default(),
+        };
+        Some(super::fireworks::FireworkBurst {
+            pos: e.pos,
+            velocity: e.velocity,
+            stack,
+        })
     }
     fn tick_in_world(
         &mut self,

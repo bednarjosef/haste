@@ -31,7 +31,7 @@ highlight, debug sample) are marked "debug" and are fine to ignore.
 | `handleTickingStep` | missing | none found | low |
 | `handleSetHeldSlot` | done | crates/haste-client/src/player.rs (SetHeldSlot arm); ui/packets.rs:302 | — |
 | `handleMoveEntity` (pos/rot/posrot) | done | crates/haste-client/src/net/entities.rs | — |
-| `handleMinecartAlongTrack` (smooth minecart steps) | missing | none found | medium (minecarts jump between packets) |
+| `handleMinecartAlongTrack` (smooth minecart steps) | done | crates/haste-client/src/net/minecart.rs; the walk in crates/haste-entity/src/new_minecart_behavior.rs | — |
 | `handleRotateMob` | done | crates/haste-client/src/net/entities.rs (RotateHead) | — |
 | `handleRemoveEntities` | done | crates/haste-client/src/net/entities.rs | — |
 | `handleMovePlayer` (PlayerPosition) | done | crates/haste-client/src/player.rs (PlayerPosition arm) | — |
@@ -350,7 +350,8 @@ usual size; otherwise it says how to split.
 14. **Ambient sound loops**: cave/underwater/biome ambience (`AmbientLoopHandler`,
     `BiomeAmbientSoundsHandler`, `UnderwaterAmbientSoundHandler` equivalents). One worker
     (needs a small ambient-sound scheduler in haste-client/src/sound/).
-15. **Minecart movement smoothing**: `handleMinecartAlongTrack`. One worker.
+15. ~~**Minecart movement smoothing**: `handleMinecartAlongTrack`.~~ Done (`NewMinecartBehavior`'s
+    track walk, the riding camera and the passenger offset).
 16. **World border visuals**: `WorldBorderRenderer` (the wall) + warning-distance vignette
     (needs `SetBorderWarningDistance/Delay` stored). One worker.
 17. **End crystal**: `EndCrystalRenderer` (crystal model + beam to the dragon; the beam pairs

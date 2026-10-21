@@ -14,7 +14,7 @@ use crate::sounds::{SoundEvents, SoundVariant};
 /// One sound the `SoundSystem` sent to the output, parallel to the engine's sound list:
 /// the same order, the same length, kept in lockstep by `play`, `stop` and `tick`.
 pub(super) struct Sounded {
-    id: SoundId,
+    pub(super) id: SoundId,
     /// The sound event this was started with, shared with the engine and interned (so
     /// tracking it costs one reference count): what `stop`'s event filter and
     /// [`SoundSystem::is_event_playing`] match on, as vanilla's
@@ -23,7 +23,7 @@ pub(super) struct Sounded {
     source: SoundSource,
     /// The channel pool this sound's channel came from (streamed sounds stream), released
     /// when it finishes or is stopped.
-    pool: Pool,
+    pub(super) pool: Pool,
     /// The output's controls once the worker created the player; `None` until then.
     controls: Option<SoundControls>,
 }
@@ -86,6 +86,16 @@ impl SoundSystem {
         }
     }
 
+    /// The engine's sound list, for the per-instance controls (`instances.rs`).
+    pub(super) fn engine_mut(&mut self) -> &mut SilentEngine {
+        &mut self.engine
+    }
+
+    /// The parsed `sounds.json`, for the per-instance plays (`instances.rs`).
+    pub(super) fn events(&self) -> &SoundEvents {
+        &self.events
+    }
+
     /// The interned name of an event, shared with every sound that plays it.
     fn intern(&mut self, event: &str) -> Arc<str> {
         if let Some(event) = self.interned.get(event) {
@@ -127,6 +137,23 @@ impl SoundSystem {
         pitch: f32,
         event: &str,
     ) {
+        self.start(variant, source, pos, volume, pitch, event, false);
+    }
+
+    /// Start one variant (vanilla's `SoundEngine.play`); the new sound's id, or `None` when
+    /// it was not started (the volume-0 rule, or no free channel). `looping` plays it on
+    /// from the start at its end until it is stopped (a looping sound instance).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start(
+        &mut self,
+        variant: &SoundVariant,
+        source: SoundSource,
+        pos: Option<DVec3>,
+        volume: f32,
+        pitch: f32,
+        event: &str,
+        looping: bool,
+    ) -> Option<SoundId> {
         let event = self.intern(event);
         // Vanilla's `SoundEngine.play` order: the volume-0 rule first (a sound at zero
         // volume is not started; music starts silently), then the channel acquisition
@@ -135,7 +162,7 @@ impl SoundSystem {
             .engine
             .play(variant, source, pos, volume, pitch, Arc::clone(&event))
         {
-            PlayResult::NotStarted => return,
+            PlayResult::NotStarted => return None,
             PlayResult::Started | PlayResult::StartedSilently => {}
         }
         let pool = if variant.stream {
@@ -145,7 +172,7 @@ impl SoundSystem {
         };
         if !self.channels.acquire(pool) {
             self.engine.remove_last();
-            return;
+            return None;
         }
         // The engine's gains for this sound right now, so the player starts at the right
         // volume instead of full until the first tick.
@@ -173,6 +200,7 @@ impl SoundSystem {
             path: variant.path.clone(),
             assets,
             stream: variant.stream,
+            looping,
             gains,
             pitch,
         });
@@ -183,6 +211,7 @@ impl SoundSystem {
             pool,
             controls: None,
         });
+        Some(id)
     }
 
     /// Stop playing sounds. `None` on an axis matches everything; a sound is stopped when
@@ -204,12 +233,10 @@ impl SoundSystem {
                 self.channels.release(sounded.pool);
             }
         }
-        // Drop controls of the stopped sounds; the worker never sends them (or they are
-        // drained and discarded on the next tick by the id check below).
+        // Stopped sounds are no longer tracked; controls the worker still queues for them
+        // are skipped on the next tick's merge (their ids are not tracked any more), so the
+        // controls of sounds that keep playing are never lost.
         self.sounded.retain(|s| !matches(s));
-        self.incoming.clear();
-        self.output.drain_controls(&mut self.incoming);
-        self.incoming.clear();
         self.engine.stop(source, event);
     }
 
@@ -248,6 +275,16 @@ impl SoundSystem {
         for (i, sounded) in self.sounded.iter_mut().enumerate() {
             if sounded.controls.is_some() {
                 continue;
+            }
+            // Controls of sounds stopped before adoption (`stop`, `stop_instance`) are
+            // skipped: ids only grow, so anything below this sound's id is no longer
+            // tracked.
+            while self
+                .incoming
+                .get(next_incoming)
+                .is_some_and(|c| c.id < sounded.id)
+            {
+                next_incoming += 1;
             }
             if self
                 .incoming
