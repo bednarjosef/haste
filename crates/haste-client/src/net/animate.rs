@@ -1,6 +1,6 @@
 // The `animate` packet (vanilla `ClientPacketListener.handleAnimate`): a critical hit or a magic
-// critical hit on an entity starts a tracking emitter on it. The leave-bed action (0) is not
-// ported yet: Haste keeps no sleeping state for players.
+// critical hit on an entity starts a tracking emitter on it. The leave-bed action (0) is handled
+// by the entity store's `wake_up` (`entities.rs`).
 
 use haste_core::{EntityId, Identifier};
 use haste_protocol::packets::play::clientbound as cb;

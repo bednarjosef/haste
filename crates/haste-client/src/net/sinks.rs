@@ -147,6 +147,11 @@ pub trait EntitySink {
     fn mark_hit(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::wake_up`: the leave-bed animation (animate action 0) on a sleeping player.
+    /// Default no-op.
+    fn wake_up(&mut self, id: EntityId) {
+        let _ = id;
+    }
     /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
@@ -315,6 +320,9 @@ impl EntitySink for EntityStore {
     }
     fn mark_hit(&mut self, id: EntityId) {
         EntityStore::mark_hit(self, id)
+    }
+    fn wake_up(&mut self, id: EntityId) {
+        EntityStore::wake_up(self, id)
     }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)

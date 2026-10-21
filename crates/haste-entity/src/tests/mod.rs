@@ -29,6 +29,7 @@ mod models;
 mod registry;
 mod riding;
 mod setup_rotations;
+mod sleeping;
 mod store;
 mod thrown_item;
 mod using_item;
