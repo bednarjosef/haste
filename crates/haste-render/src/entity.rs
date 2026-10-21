@@ -59,25 +59,20 @@ mod thrown_item_tests;
 mod tnt;
 
 mod armor_stand;
-mod hand;
-// Stuck items and shoulder parrots are not drawn yet: `EntityInstance` has no stuck counts,
-// stuck seed or shoulder parrots (haste-core request in the worker report). Remove these
-// allows when `prepare` calls the layers.
-#[allow(dead_code)]
 mod arrow_layer;
-#[allow(dead_code)]
 mod bee_stinger_layer;
+mod hand;
 mod humanoid;
 mod item_display;
 mod model_parts;
-#[allow(dead_code)]
 mod parrot_on_shoulder;
 #[cfg(test)]
 mod parrot_on_shoulder_tests;
-#[allow(dead_code)]
 mod stuck_in_body;
 #[cfg(test)]
 mod stuck_in_body_tests;
+mod stuck_layers;
+pub use stuck_layers::{StuckInput, StuckModels};
 mod vertex;
 
 pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matrix};
@@ -334,6 +329,10 @@ pub struct EntityRenderer {
     map_decoration_rects: HashMap<u32, Option<[u32; 4]>>,
     /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
     map_decoration_names: Vec<Identifier>,
+    /// This frame's stuck-in-body and shoulder state, sorted by id (`set_stuck`).
+    stuck: Vec<StuckInput>,
+    /// The stinger and parrot models the stuck layers draw (`set_stuck`).
+    stuck_models: StuckModels,
     pub drawn: u32,
 }
 
@@ -536,6 +535,7 @@ impl EntityRenderer {
                 }
             }
             self.emit_equipment(e, root, light, assets);
+            self.emit_stuck(e, root, light, assets);
             // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
             if e.display_fire {
                 self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);

@@ -454,6 +454,8 @@ impl EntityRenderer {
             portal_capacity: 256,
             beam_radius_scale: 1.0,
             view_scale: 1.0,
+            stuck: Vec::new(),
+            stuck_models: Default::default(),
             mask_vertices: Vec::new(),
             mask_buffer,
             mask_capacity,
