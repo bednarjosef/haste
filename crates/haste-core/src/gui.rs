@@ -86,6 +86,8 @@ pub enum GuiCommand {
         x: i32,
         y: i32,
         count: i32,
+        /// The stack's glint (`ItemStack.hasFoil` and the foil type its model picks).
+        foil: crate::model::FoilType,
     },
     /// A live entity drawn into a GUI box (inventory player model). The renderer renders the
     /// entity's model looking at the mouse position, clipped to the box.

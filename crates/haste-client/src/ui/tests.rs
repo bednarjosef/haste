@@ -351,7 +351,7 @@ fn joins_and_renders_the_hud() {
         .iter()
         .any(|c| matches!(c, GuiCommand::Sprite { sprite, .. } if sprite.path() == "hud/hotbar")));
     assert!(f.commands.iter().any(|c| matches!(c,
-        GuiCommand::Item { item, count: 64, x: 72, y: 221 } if Some(*item) == stone.item)));
+        GuiCommand::Item { item, count: 64, x: 72, y: 221, .. } if Some(*item) == stone.item)));
     let text = texts(&f);
     assert!(
         text.iter().any(|t| t.contains("hello from haste")),

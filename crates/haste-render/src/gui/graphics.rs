@@ -192,9 +192,9 @@ impl GuiRenderer {
                         rgba(tint_or_white(*tint)),
                     );
                 }
-                GuiCommand::Item { item, x, y, .. } => {
-                    self.item(offset, item.0, *x as f32, *y as f32, assets)
-                }
+                GuiCommand::Item {
+                    item, x, y, foil, ..
+                } => self.item(offset, item.0, *x as f32, *y as f32, *foil, assets),
                 GuiCommand::Entity {
                     entity,
                     x1,
@@ -328,6 +328,18 @@ impl GuiRenderer {
         color: [[u8; 4]; 4],
         rect: [u32; 4],
     ) {
+        self.quad_glint(pos, uv, color, rect, 0);
+    }
+
+    /// [`Self::quad`] drawing the enchantment glint `glint` (a `GlintMode`) on top.
+    pub(super) fn quad_glint(
+        &mut self,
+        pos: [[f32; 2]; 4],
+        uv: [[f32; 2]; 4],
+        color: [[u8; 4]; 4],
+        rect: [u32; 4],
+        glint: u32,
+    ) {
         let rect = rect.map(|v| v as u16);
         for i in [0usize, 1, 2, 0, 2, 3] {
             self.vertices.push(GuiVertex {
@@ -335,6 +347,7 @@ impl GuiRenderer {
                 uv: uv[i],
                 color: color[i],
                 rect,
+                glint,
             });
         }
     }

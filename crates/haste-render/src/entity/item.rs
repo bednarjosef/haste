@@ -3,6 +3,8 @@
 //! through (`ItemDisplayContext`).
 
 use super::*;
+use crate::glint::{self, GlintMode};
+use haste_core::model::FoilType;
 
 impl EntityRenderer {
     pub(super) fn item_model_for(
@@ -77,6 +79,7 @@ impl EntityRenderer {
             light,
             ItemDisplay::Ground,
             (bbox_min, bbox_max),
+            dropped.foil,
             assets,
         );
         self.vertices = out;
@@ -98,6 +101,7 @@ impl EntityRenderer {
         light: (u8, u8),
         display: ItemDisplay,
         bbox: (Vec3, Vec3),
+        foil: FoilType,
         assets: &mut Assets,
     ) {
         let (bbox_min, bbox_max) = bbox;
@@ -122,13 +126,16 @@ impl EntityRenderer {
                 }
             }
             let m = base * Mat4::from_translation(off);
-            self.emit_item(out, model, m, light, display, assets);
+            self.emit_item(out, model, m, light, display, foil, assets);
         }
     }
     /// Emits an item model's geometry through `root` (model space, 0..1 blocks, through the
     /// part's display transform) into `out`. `display` picks which of vanilla's
     /// `ItemDisplayContext`s the model is drawn through (`firstperson_righthand` for the hand,
-    /// `fixed` for item frames, `ground` for dropped items).
+    /// `fixed` for item frames, `ground` for dropped items). `foil` is the stack's glint: each
+    /// quad's vertices carry the glint mode of its sprite's sheet (`ItemFeatureRenderer`
+    /// picks the material's glint render type per quad).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_item(
         &mut self,
         out: &mut Vec<EntityVertex>,
@@ -136,6 +143,7 @@ impl EntityRenderer {
         root: Mat4,
         light: (u8, u8),
         display: ItemDisplay,
+        foil: FoilType,
         assets: &mut Assets,
     ) {
         for part in &model.parts {
@@ -174,6 +182,8 @@ impl EntityRenderer {
                     for (i, layer) in layers.iter().enumerate() {
                         let rect = self.texture_rect(&parse_tex(&layer.texture), assets);
                         let t = tint(Some(i as u32));
+                        let glint = glint::item_glint_mode(foil, &layer.texture);
+                        let start = out.len();
                         for q in &layer.quads {
                             let o = q.direction.offset();
                             push_world_quad(
@@ -188,12 +198,16 @@ impl EntityRenderer {
                                 rect,
                             );
                         }
+                        if glint != GlintMode::None {
+                            glint::mark(&mut out[start..], glint);
+                        }
                     }
                 }
                 haste_assets::ItemGeometry::Elements(quads) => {
                     for q in quads {
                         let rect = self.texture_rect(&parse_tex(&q.texture), assets);
                         let o = q.direction.offset();
+                        let start = out.len();
                         push_world_quad(
                             out,
                             m,
@@ -205,6 +219,10 @@ impl EntityRenderer {
                             light,
                             rect,
                         );
+                        let glint = glint::item_glint_mode(foil, &q.texture);
+                        if glint != GlintMode::None {
+                            glint::mark(&mut out[start..], glint);
+                        }
                     }
                 }
             }

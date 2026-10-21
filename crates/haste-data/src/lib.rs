@@ -16,7 +16,9 @@ mod tests;
 
 pub use block_entity_types::BlockEntityTypes;
 pub use blocks::BlockStates;
-pub use components::{AttributeModifier, Consumable, ItemComponents, ItemEquippable, UseEffects};
+pub use components::{
+    AttributeModifier, Consumable, FoilPatch, ItemComponents, ItemEquippable, Patched, UseEffects,
+};
 pub use loader::{missing_reports, GameData, RUNTIME_REPORTS};
 pub use physics::{BlockProperties, BlockProps};
 pub use registries::Registries;

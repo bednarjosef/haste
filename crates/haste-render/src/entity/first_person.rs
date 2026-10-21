@@ -17,6 +17,8 @@ pub struct FirstPerson {
     /// `AvatarRenderState.showRightSleeve`: the arm draws its sleeve layer.
     pub sleeve: bool,
     pub item: Option<haste_core::RegistryIndex>,
+    /// The held stack's glint (`ItemStack.hasFoil`).
+    pub foil: haste_core::model::FoilType,
     /// The held stack's `minecraft:map_id` (`ItemStack.has(DataComponents.MAP_ID)`): the
     /// hand draws the map renderer's view instead of the item model, with vanilla's
     /// one-handed pose (off-hand occupied) or the two-handed one.
@@ -54,6 +56,7 @@ impl Default for FirstPerson {
             slim: false,
             sleeve: true,
             item: None,
+            foil: haste_core::model::FoilType::None,
             map: None,
             offhand_empty: true,
             light: (15, 0),

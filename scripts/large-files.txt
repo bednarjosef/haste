@@ -18,7 +18,7 @@ crates/haste-entity/src/registry.rs 923
 crates/haste-entity/src/riding.rs 640
 crates/haste-jvm/src/host.rs 622
 crates/haste-jvm/src/proxies.rs 630
-crates/haste-jvm/tests/jvm.rs 2750
+crates/haste-jvm/tests/jvm.rs 2742
 crates/haste-physics/src/block_effects.rs 831
 crates/haste-physics/src/fluids.rs 664
 crates/haste-physics/src/mining.rs 614
@@ -34,7 +34,7 @@ crates/haste-render/src/lightmap.rs 789
 crates/haste-render/src/sky.rs 963
 crates/haste-render/src/tint.rs 995
 crates/haste-render/src/weather.rs 834
-crates/haste-render/tests/entity_offscreen.rs 1241
+crates/haste-render/tests/entity_offscreen.rs 1149
 crates/haste-setup/src/install.rs 919
 crates/haste-setup/src/servers.rs 664
 crates/haste-world/src/palette.rs 1033

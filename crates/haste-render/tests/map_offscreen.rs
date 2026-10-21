@@ -126,10 +126,13 @@ fn frame_instance(
             glow: false,
             item: map.is_some().then_some(item),
             map_id: map,
+            item_foil: Default::default(),
         })),
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }
 }
 
@@ -279,6 +282,7 @@ fn held_map_draws_the_two_handed_view() {
         slim: false,
         sleeve: true,
         item: None,
+        foil: Default::default(),
         map: Some(7),
         offhand_empty: true,
         light: (15, 0),
@@ -349,6 +353,7 @@ fn framed_and_held_map_share_the_one_texture() {
         slim: false,
         sleeve: true,
         item: None,
+        foil: Default::default(),
         map: Some(7),
         offhand_empty: true,
         light: (15, 0),

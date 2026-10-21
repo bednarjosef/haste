@@ -487,4 +487,8 @@ pub struct Renderer {
     last_fog: Option<([f32; 3], crate::fog::FogData)>,
     /// The frame's lightning bolts, collected from the entities (reused).
     lightning_bolts: Vec<crate::weather::LightningBolt>,
+    /// The enchantment glint's textures and per-frame uniform (shared with the entity and
+    /// GUI bind groups), and the `glintSpeed` / `glintStrength` options it is written with.
+    glint: Arc<crate::glint::Glint>,
+    glint_options: (f64, f64),
 }

@@ -42,7 +42,15 @@ impl EntityRenderer {
         let root = thrown_item_root((e.pos - camera).as_vec3(), t.scale, orientation)
             * body_matrix(&e.body);
         let mut out = std::mem::take(&mut self.vertices);
-        self.emit_item(&mut out, &model, root, light, ItemDisplay::Ground, assets);
+        self.emit_item(
+            &mut out,
+            &model,
+            root,
+            light,
+            ItemDisplay::Ground,
+            haste_core::model::FoilType::None,
+            assets,
+        );
         self.vertices = out;
     }
 }

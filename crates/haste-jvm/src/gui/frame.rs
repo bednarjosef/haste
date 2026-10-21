@@ -1,6 +1,7 @@
 //! Decoding of one GUI frame from the bridge: `GuiBatch.frame`'s arrays (layout in
 //! `java/haste/rt/GuiBatch.java`) into [`GuiCommand`]s.
 use haste_core::gui::{CursorShape, GuiBlend, GuiCommand, TextStyle};
+use haste_core::model::FoilType;
 use haste_core::{EntityId, Identifier, RegistryIndex};
 use jni::objects::{JIntArray, JObject, JObjectArray, JString};
 use jni::Env;
@@ -21,6 +22,16 @@ const TRANSLATE_POP: i32 = 10;
 const SPRITE_REGION: i32 = 11;
 const STYLED_TEXT: i32 = 12;
 const ENTITY: i32 = 13;
+
+/// The glint of an item record (`GfxImpl.foil` in Java: 0 none, 1 standard, 2 special;
+/// vanilla `ItemStackRenderState.FoilType`'s order).
+fn foil_of(code: i32) -> FoilType {
+    match code {
+        1 => FoilType::Standard,
+        2 => FoilType::Special,
+        _ => FoilType::None,
+    }
+}
 
 /// The cursor shape for a code from `GuiBatch.frame` (`None` = the default arrow).
 fn cursor_shape(code: i32) -> Option<CursorShape> {
@@ -196,14 +207,15 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
                 i += 8;
             }
             ITEM => {
-                need(5)?;
+                need(6)?;
                 out.push(GuiCommand::Item {
                     item: RegistryIndex(b[i + 1] as u32),
                     x: b[i + 2],
                     y: b[i + 3],
                     count: b[i + 4],
+                    foil: foil_of(b[i + 5]),
                 });
-                i += 5;
+                i += 6;
             }
             SCISSOR_PUSH => {
                 need(5)?;

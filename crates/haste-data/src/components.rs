@@ -31,21 +31,26 @@ use crate::registries::Registries;
 mod attributes;
 mod consumable;
 mod equippable;
+mod foil;
 mod patch;
 mod tool;
 mod use_effects;
 
+#[cfg(test)]
+mod foil_tests;
 #[cfg(test)]
 mod tests;
 
 pub use attributes::AttributeModifier;
 pub use consumable::Consumable;
 pub use equippable::{parse_equippable, ItemEquippable};
+pub use foil::{FoilPatch, Patched};
 pub use tool::ToolComponent;
 pub use use_effects::UseEffects;
 
 use attributes::parse_modifiers;
 use consumable::parse_consumable;
+use foil::FoilDefaults;
 use patch::PatchTypes;
 use use_effects::parse_use_effects;
 
@@ -79,6 +84,11 @@ pub struct ItemComponents {
     /// `minecraft:use_cooldown` that names one (`ItemCooldowns.getCooldownGroup`); an item
     /// without an entry groups under its own registry id.
     use_cooldowns: HashMap<Identifier, Identifier>,
+    /// The defaults of the components `ItemStack.hasFoil` reads, per `minecraft:item` index.
+    foil_defaults: Vec<FoilDefaults>,
+    /// `minecraft:compass`, the one `CompassItem` (whose `isFoil` also reads the
+    /// `lodestone_tracker`).
+    compass: Option<RegistryIndex>,
 }
 
 impl ItemComponents {
@@ -292,6 +302,7 @@ impl ItemComponents {
             };
         };
         let mut max_damages: HashMap<Identifier, u32> = HashMap::new();
+        let mut foils: HashMap<Identifier, FoilDefaults> = HashMap::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -313,6 +324,10 @@ impl ItemComponents {
             let Some(components) = json.get("components") else {
                 continue;
             };
+            let foil = FoilDefaults::parse(components);
+            if foil != FoilDefaults::default() {
+                foils.insert(item.clone(), foil);
+            }
             if let Some(m) = components
                 .get("minecraft:max_damage")
                 .and_then(|m| m.as_u64())
@@ -386,9 +401,17 @@ impl ItemComponents {
                 max_damage[i.0 as usize] = Some(m);
             }
         }
+        let mut foil_defaults = vec![FoilDefaults::default(); len];
+        for (item, f) in foils {
+            if let Some(i) = registries.index("minecraft:item", &item) {
+                foil_defaults[i.0 as usize] = f;
+            }
+        }
         ItemComponents {
             equippable,
             max_damage,
+            foil_defaults,
+            compass: registries.index("minecraft:item", &Identifier::minecraft("compass")),
             patch_types: PatchTypes::load(registries),
             attributes,
             consumables,

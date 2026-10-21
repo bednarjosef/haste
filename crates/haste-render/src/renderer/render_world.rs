@@ -18,6 +18,10 @@ impl Renderer {
             d
         };
         let aspect = self.size.0 as f32 / self.size.1 as f32;
+        // The glint clock for this frame (vanilla sets the texture matrix per draw from
+        // `Util.getMillis`; one value per frame is indistinguishable).
+        self.glint
+            .update(&self.gpu.queue, self.glint_options.0, self.glint_options.1);
         let view_proj = Self::view_projection(&frame.camera, aspect, frame.spin);
         // Entity culling needs the frustum before posing (vanilla's
         // `EntityRenderer.shouldRender`): the camera-relative view-projection's planes.

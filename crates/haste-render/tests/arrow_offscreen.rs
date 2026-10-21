@@ -76,6 +76,8 @@ fn arrow(id: i32, x: f64, y: f64, a: ArrowDecoration) -> EntityInstance {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }
 }
 

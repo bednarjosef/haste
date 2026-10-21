@@ -25,6 +25,7 @@ pub(super) fn apply_view_options(
     renderer.set_cloud_status(cloud_status(options.clouds));
     renderer.set_cloud_range(options.cloud_range);
     renderer.set_world_border(world_border);
+    renderer.set_glint_options(options.glint_speed as f64, options.glint_strength as f64);
 }
 
 impl App {

@@ -26,11 +26,14 @@ impl EntityRenderer {
             };
             let model = &layer.model;
             let mut out = std::mem::take(&mut self.vertices);
+            // The glint rides on the first layer drawn (`renderLayers`' `renderShaderGlint`).
+            let mut glint = piece.foil.has_foil();
             for l in info.layers_of(layer.layer_type) {
                 let Some(tint) = equipment::layer_tint(l, piece.dye) else {
                     continue;
                 };
                 let rect = self.texture_rect(&l.texture, assets);
+                let start = out.len();
                 emit_part_tinted(
                     &mut out,
                     model,
@@ -42,6 +45,7 @@ impl EntityRenderer {
                     0.0,
                     tint,
                 );
+                equipment::mark_armor_glint(&mut out[start..], &mut glint);
             }
             // `WolfArmorLayer.maybeRenderCracks`: the crack texture on the same model, after
             // the armour (`RenderTypes.wolfArmorCracks` blends translucently, as this pass does).

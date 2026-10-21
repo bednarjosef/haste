@@ -246,6 +246,7 @@ fn a_count_or_component_change_dips_too() {
         item: stone(),
         swap_key: 7,
         map: None,
+        foil: Default::default(),
     };
     h.tick(0.0, (0.0, 0.0), true, false, more, 4.0, false);
     assert_eq!(h.equip().1, 0.6, "the hand dips 0.4 on the count change");

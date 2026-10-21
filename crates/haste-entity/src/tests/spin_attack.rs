@@ -50,6 +50,8 @@ fn player_instance() -> EntityInstance {
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }
 }
 

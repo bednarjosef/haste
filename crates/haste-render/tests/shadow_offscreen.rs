@@ -81,6 +81,8 @@ fn shadow_quads_over_floor(
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }];
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 3.2, -4.0),

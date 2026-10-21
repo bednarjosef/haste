@@ -1208,6 +1208,17 @@ fn chat_screen() {
     gui.with_state(|s| s.in_world = false);
 }
 
+/// A GUI item command's (item, x, y, count).
+fn item_record(c: &haste_core::gui::GuiCommand) -> Option<(u32, i32, i32, i32)> {
+    let haste_core::gui::GuiCommand::Item {
+        item, x, y, count, ..
+    } = c
+    else {
+        return None;
+    };
+    Some((item.0, *x, *y, *count))
+}
+
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn inventory_screen() {
@@ -1251,14 +1262,7 @@ fn inventory_screen() {
             _ => None,
         })
         .expect("the container is centred at x=72");
-    let items: Vec<_> = f
-        .commands
-        .iter()
-        .filter_map(|c| match c {
-            GuiCommand::Item { item, x, y, count } => Some((item.0, *x, *y, *count)),
-            _ => None,
-        })
-        .collect();
+    let items: Vec<_> = f.commands.iter().filter_map(item_record).collect();
     let (stone, planks) = (item_id("minecraft:stone"), item_id("minecraft:oak_planks"));
     // the HUD is drawn too (a world is joined): the hotbar's slot 0 holds the stone
     assert_eq!(
@@ -1357,7 +1361,6 @@ fn inventory_screen() {
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
 fn creative_inventory_and_search() {
-    use haste_core::gui::GuiCommand;
     use haste_jvm::keys;
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
@@ -1386,10 +1389,7 @@ fn creative_inventory_and_search() {
     let items = |f: &haste_core::gui::GuiFrame| {
         f.commands
             .iter()
-            .filter_map(|c| match c {
-                GuiCommand::Item { item, .. } => Some(item.0),
-                _ => None,
-            })
+            .filter_map(|c| item_record(c).map(|r| r.0))
             .collect::<Vec<_>>()
     };
     let tab_items = items(&f);
@@ -1634,7 +1634,6 @@ fn sprite_and_region_at(f: &haste_core::gui::GuiFrame, name: &str) -> Vec<(i32, 
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
 fn hud_frame() {
-    use haste_core::gui::GuiCommand;
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
@@ -1671,14 +1670,7 @@ fn hud_frame() {
     let sel = sprite_at(&f, "minecraft:hud/hotbar_selection");
     assert_eq!(sel.len(), 1, "{sel:?}");
     assert_eq!(sel[0].0, 160 - 91 - 1 + 2 * 20);
-    let items: Vec<_> = f
-        .commands
-        .iter()
-        .filter_map(|c| match c {
-            GuiCommand::Item { item, x, y, count } => Some((item.0, *x, *y, *count)),
-            _ => None,
-        })
-        .collect();
+    let items: Vec<_> = f.commands.iter().filter_map(item_record).collect();
     assert!(
         items.contains(&(item_id("minecraft:stone"), 160 - 90 + 2, 240 - 16 - 3, 64)),
         "{items:?}"

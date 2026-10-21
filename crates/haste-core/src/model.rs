@@ -272,6 +272,11 @@ pub struct EntityInstance {
     /// The head-slot item when it is not armour (vanilla `CustomHeadLayer`: pumpkins, mob and
     /// player heads). `None` when the head is bare or wears a helmet (drawn by `equipment`).
     pub head_item: Option<RegistryIndex>,
+    /// The glint of each held item, `[right (main), left (off)]` like [`Self::hands`]
+    /// (`ItemStack.hasFoil` of the stack in that hand).
+    pub hand_foils: [FoilType; 2],
+    /// The glint of [`Self::head_item`].
+    pub head_item_foil: FoilType,
 }
 
 impl EntityInstance {
@@ -345,6 +350,8 @@ pub struct EquipmentPiece {
     /// a mount's body armour, saddle or carpet). `None` for humanoid armour, which the
     /// renderer draws on its humanoid armour models (`HumanoidArmorLayer`).
     pub layer: Option<EquipmentModelLayer>,
+    /// The stack's glint (`EquipmentLayerRenderer.renderLayers` reads `ItemStack.hasFoil`).
+    pub foil: FoilType,
 }
 
 /// The arguments a mob's equipment layer hands `EquipmentLayerRenderer.renderLayers` besides
@@ -370,6 +377,28 @@ pub struct DroppedItem {
     pub item: RegistryIndex,
     pub count: i32,
     pub age: f32,
+    /// The stack's glint (`ItemStack.hasFoil`).
+    pub foil: FoilType,
+}
+
+/// Whether and how an item stack draws the enchantment glint (vanilla
+/// `ItemStackRenderState.FoilType`): `NONE` when `ItemStack.hasFoil` is false, `SPECIAL` for
+/// the compasses and the clock (`CuboidItemModelWrapper.hasSpecialAnimatedTexture`: their
+/// glint is projected from the model's position instead of following the texture), and
+/// `STANDARD` for everything else.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FoilType {
+    #[default]
+    None,
+    Standard,
+    Special,
+}
+
+impl FoilType {
+    /// Whether the stack draws any glint.
+    pub fn has_foil(self) -> bool {
+        self != FoilType::None
+    }
 }
 
 /// One overlay layer: the model (usually a copy of the base shape with its own texture,
@@ -470,6 +499,8 @@ mod tests {
             hands: [None, None],
             equipment: Vec::new(),
             head_item: None,
+            hand_foils: Default::default(),
+            head_item_foil: FoilType::None,
         }
     }
 

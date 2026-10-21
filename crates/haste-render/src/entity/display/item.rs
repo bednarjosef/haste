@@ -53,6 +53,7 @@ impl EntityRenderer {
             root,
             light,
             item_display_for(context),
+            haste_core::model::FoilType::None,
             assets,
         );
         self.vertices = out;

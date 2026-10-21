@@ -171,6 +171,8 @@ impl ViewState {
 pub struct FirstPersonView {
     /// The main-hand stack's item (`None` draws the bare arm).
     pub item: Option<RegistryIndex>,
+    /// The shown stack's glint (`ItemStack.hasFoil`).
+    pub foil: haste_core::model::FoilType,
     /// The shown stack's `minecraft:map_id`: the hand draws the map renderer's view
     /// instead of the item model.
     pub map: Option<i32>,
@@ -214,6 +216,7 @@ impl FirstPersonView {
         let block_light = if on_fire { 15 } else { world.block_light(p) };
         FirstPersonView {
             item,
+            foil: haste_core::model::FoilType::None,
             map: None,
             offhand_empty: true,
             light: (world.sky_light(p), block_light),
@@ -230,6 +233,7 @@ impl FirstPersonView {
     /// This tick's hand animation from the player's [`crate::hand::Hand`].
     pub fn with_hand(&mut self, hand: &crate::hand::Hand) {
         self.item = hand.shown_item();
+        self.foil = hand.shown_foil();
         self.map = hand.shown_map();
         self.attack = hand.attack();
         self.equip = hand.equip();
@@ -250,6 +254,7 @@ impl FirstPersonView {
             slim: skin.model.is_slim(),
             sleeve,
             item: self.item,
+            foil: self.foil,
             map: self.map,
             offhand_empty: self.offhand_empty,
             light: self.light,

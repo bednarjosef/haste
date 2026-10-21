@@ -250,6 +250,7 @@ fn item_entity_stack_from_metadata() {
             item: RegistryIndex(5),
             count: 10,
             age: 0.5,
+            foil: Default::default(),
         })
     );
     // Age advances with the ticks (plus the partial).

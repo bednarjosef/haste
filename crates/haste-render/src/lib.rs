@@ -15,6 +15,7 @@ pub mod experiment;
 pub mod fluid;
 pub mod fluid_occlusion;
 pub mod fog;
+pub mod glint;
 pub mod gui;
 pub(crate) mod java_random;
 pub mod lightmap;

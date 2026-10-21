@@ -341,11 +341,13 @@ impl Renderer {
         // GUI: the font (with unifont when the assets index has it) and a renderer drawing into
         // a non-sRGB view of the target so blending happens on sRGB values like vanilla.
         let font = Arc::new(assets.font_default().context("loading the default font")?);
+        let glint = crate::glint::Glint::new(&gpu.device, &gpu.queue, assets);
         let mut gui = crate::gui::GuiRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
             Self::gui_format_for(&gpu, surface_format),
             font.clone(),
+            glint.clone(),
         );
         let entity = crate::entity::EntityRenderer::new(
             gpu.device.clone(),
@@ -357,6 +359,7 @@ impl Renderer {
             assets,
             baked.clone(),
             atlas.clone(),
+            &glint,
         );
         let sky = crate::sky::SkyRenderer::new(
             gpu.device.clone(),
@@ -530,6 +533,11 @@ impl Renderer {
             frame_game_time: 0,
             last_fog: None,
             lightning_bolts: Vec::new(),
+            glint,
+            glint_options: (
+                crate::glint::DEFAULT_GLINT_SPEED,
+                crate::glint::DEFAULT_GLINT_STRENGTH,
+            ),
         })
     }
 }

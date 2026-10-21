@@ -3,6 +3,9 @@
 //! beacon/gateway beam and end-portal passes with their own pipelines.
 
 use super::*;
+// The block entities' items come from their block entity data, whose components are not
+// decoded: they draw without glint.
+use haste_core::model::FoilType;
 
 impl EntityRenderer {
     /// Poses the frame's block entities (chests, shulker boxes) into the same vertex stream as
@@ -135,7 +138,15 @@ impl EntityRenderer {
                                 slot,
                                 camera,
                             );
-                            self.emit_item(&mut out, &model, m, light, ItemDisplay::Fixed, assets);
+                            self.emit_item(
+                                &mut out,
+                                &model,
+                                m,
+                                light,
+                                ItemDisplay::Fixed,
+                                FoilType::None,
+                                assets,
+                            );
                         }
                     }
                     crate::blockentity::ItemBlockEntity::Shelf(shelf) => {
@@ -164,6 +175,7 @@ impl EntityRenderer {
                                 m,
                                 light,
                                 ItemDisplay::OnShelf,
+                                FoilType::None,
                                 assets,
                             );
                         }
@@ -188,6 +200,7 @@ impl EntityRenderer {
                                     light,
                                     ItemDisplay::Ground,
                                     bbox,
+                                    FoilType::None,
                                     assets,
                                 );
                             }
@@ -203,7 +216,15 @@ impl EntityRenderer {
                         let m = crate::blockentity::brushable_item_matrix(
                             inst.pos, dir, b.dusted, camera,
                         );
-                        self.emit_item(&mut out, &model, m, light, ItemDisplay::Fixed, assets);
+                        self.emit_item(
+                            &mut out,
+                            &model,
+                            m,
+                            light,
+                            ItemDisplay::Fixed,
+                            FoilType::None,
+                            assets,
+                        );
                     }
                 }
                 self.vertices = out;

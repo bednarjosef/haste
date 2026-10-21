@@ -16,6 +16,7 @@ fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedIt
         item,
         count: stack.count,
         age: e.age as f32 + partial_tick,
+        foil: Default::default(),
     })
 }
 
@@ -315,6 +316,8 @@ impl EntityStore {
                 hands,
                 equipment,
                 head_item,
+                hand_foils: Default::default(),
+                head_item_foil: Default::default(),
             };
             if minecart_variant.is_some() {
                 minecart_render_pose(&mut inst, slot, partial_tick);

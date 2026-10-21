@@ -52,7 +52,7 @@ impl ParticleRenderer {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("particle"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../entity.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(crate::glint::ENTITY_SHADER.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particle-pipeline-layout"),

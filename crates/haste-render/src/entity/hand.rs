@@ -260,7 +260,15 @@ impl EntityRenderer {
             match item {
                 Some(model) => {
                     let root = root * item_arm_matrix(fp, partial);
-                    self.emit_item(out, &model, root, light, ItemDisplay::FirstPerson, assets);
+                    self.emit_item(
+                        out,
+                        &model,
+                        root,
+                        light,
+                        ItemDisplay::FirstPerson,
+                        fp.foil,
+                        assets,
+                    );
                 }
                 None => {
                     let steve = Identifier::minecraft("entity/player/wide/steve");
