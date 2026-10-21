@@ -13,6 +13,9 @@ use std::f32::consts::PI;
 
 use haste_core::model::{BodyOp, BodyTransform};
 
+/// `ThrownTrident.WATER_INERTIA`: a trident keeps its speed in water (an arrow keeps 0.6).
+pub const WATER_INERTIA: f64 = 0.99;
+
 /// Whether `kind` is a trident we render (`minecraft:trident`). The kind id resolves from the
 /// registry once (this runs per entity per frame, so it must not look the name up every time).
 pub fn is_trident(kind: haste_core::RegistryIndex) -> bool {
