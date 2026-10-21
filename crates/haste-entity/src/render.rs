@@ -62,6 +62,10 @@ impl EntityStore {
                 .map(|v| crate::minecart::decoration(&slot.metadata, v, partial_tick));
             let thrown = crate::thrown_item::variant_for_kind(slot.kind);
             let dragon_fireball = crate::dragon_fireball::is_dragon_fireball(slot.kind);
+            // Bobbers draw through `FishingHookRenderer` with their own list (`fishing_bobber`).
+            if crate::fishing_bobber::is_fishing_bobber(slot.kind) {
+                continue;
+            }
             let non_hanging = minecart_variant.is_some()
                 || thrown.is_some()
                 || dragon_fireball

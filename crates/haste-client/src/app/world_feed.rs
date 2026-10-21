@@ -2,11 +2,14 @@
 //! which dirty sections are handed to the renderer's mesher, and the per-frame entity and
 //! block-entity instances.
 
+mod fishing;
 mod frame_maps;
 mod item_foils;
 mod leash_lines;
 mod promotion;
 mod stuck;
+
+use promotion::has_all_neighbours;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,8 +23,10 @@ use haste_render::{
 };
 use haste_world::World;
 
-use super::biomes;
-use super::block_entity_extract::{self, BlockEntityTickFrame};
+use super::{
+    biomes,
+    block_entity_extract::{self, BlockEntityTickFrame},
+};
 use crate::game::{self, Shared};
 
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
@@ -53,34 +58,6 @@ fn section_state(world: &World, pos: SectionPos) -> SectionLoadState {
 pub(crate) fn camera_section(c: &haste_render::Camera) -> SectionPos {
     let p = c.pos.floor().as_ivec3();
     SectionPos::new(p.x >> 4, p.y >> 4, p.z >> 4)
-}
-
-/// Vanilla `SectionUpdateTracker.hasAllNeighbors`: the eight horizontal neighbour
-/// chunks of the section are loaded (vanilla also requires their light, which Haste
-/// applies with the chunk). A chunk outside the server's reach around the camera never
-/// loads, so it does not count as missing — otherwise the outermost ring of the view
-/// would never have its first build and settle would never finish.
-fn has_all_neighbours(
-    world: &World,
-    pos: SectionPos,
-    camera: SectionPos,
-    server_reach: i32,
-) -> bool {
-    (-1..=1).all(|dx| {
-        (-1..=1).all(|dz| {
-            let (nx, nz) = (pos.x + dx, pos.z + dz);
-            (dx == 0 && dz == 0)
-                || world.chunk(ChunkPos::new(nx, nz)).is_some()
-                // Vanilla's chunk-send shape (ChunkTrackingView.isWithinDistance without
-                // neighbours): a chunk outside the rounded square never loads, so it does
-                // not count as missing.
-                || {
-                    let ex = ((nx - camera.x).abs() - 1).max(0) as i64;
-                    let ez = ((nz - camera.z).abs() - 1).max(0) as i64;
-                    ex * ex + ez * ez >= server_reach as i64 * server_reach as i64
-                }
-        })
-    })
 }
 
 /// Feeds dirty sections to the renderer within a per-frame time budget, nearest first,
@@ -137,6 +114,7 @@ pub struct WorldFeed {
     be_instances: Vec<BlockEntityInstance>,
     /// The game thread's last extracted block entity tick frame (cloned per frame, an `Arc`).
     be_frame: Arc<BlockEntityTickFrame>,
+    fishing: fishing::FishingFeed,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -437,6 +415,7 @@ impl WorldFeed {
         local: (EntityId, u128),
         partial: f32,
         view: &game::ViewState,
+        first_person: Option<haste_render::Camera>,
     ) -> (&[EntityInstance], &[BlockEntityInstance]) {
         // The maps' snapshot for this frame: one `Arc` clone (the renderer re-uploads only
         // the maps whose data changed). Every path that draws goes through here, so the
@@ -458,6 +437,14 @@ impl WorldFeed {
         let own_skin = {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
+            self.fishing.collect(
+                &store,
+                shared,
+                local.0,
+                partial,
+                first_person.map(|camera| (camera, view)),
+                renderer,
+            );
             self.stuck.fill(&store, partial);
             let model = shared.local_model.lock();
             store.leash_lines(partial, Some(&model), &mut self.leash);
@@ -501,6 +488,7 @@ impl WorldFeed {
             // The minecarts' rail snapping reads the level (`OldMinecartBehavior.getPos`),
             // so it happens here too, per frame.
             haste_entity::minecart::snap_rails(&mut self.instances, &*world, &shared.data.blocks);
+            self.fishing.light_and_set(&world, renderer);
             // The rope ends' light, sampled at the blocks the ends hang in.
             leash_lines::convert(&*world, &self.leash, &mut self.leash_render);
         }

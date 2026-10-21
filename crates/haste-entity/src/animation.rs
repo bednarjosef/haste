@@ -16,7 +16,7 @@ use haste_core::entity::Pose;
 use haste_core::math::Vec3;
 use haste_core::model::{BodyOp, BodyTransform, CubeModel, ModelPart, PoseOverrides};
 
-mod arm_pose;
+pub(crate) mod arm_pose;
 mod crouch;
 mod swim;
 
