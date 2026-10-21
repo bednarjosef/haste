@@ -74,6 +74,23 @@ fn lightmap_options_import_from_vanilla_options_txt() {
 }
 
 #[test]
+fn glint_options_import_from_vanilla_options_txt() {
+    // Vanilla's defaults (`Options.glintSpeed` 0.5, `glintStrength` 0.75).
+    let d = Options::default();
+    assert_eq!((d.glint_speed, d.glint_strength), (0.5, 0.75));
+    // `UnitDouble` options are stored as the value itself.
+    let opts = Options::import_vanilla("glintSpeed:0.25\nglintStrength:1.0\n");
+    assert_eq!((opts.glint_speed, opts.glint_strength), (0.25, 1.0));
+    let opts = Options {
+        glint_speed: 3.0,
+        glint_strength: -1.0,
+        ..Options::default()
+    }
+    .sanitized();
+    assert_eq!((opts.glint_speed, opts.glint_strength), (1.0, 0.0));
+}
+
+#[test]
 fn menu_blurriness_option_maps_vanilla_radius() {
     // The blur's radius is the option as-is (default 5, IntRange 0..=10); the blur chain
     // only runs from 1 up (Screen.extractBlurredBackground).
@@ -124,6 +141,8 @@ fn roundtrips_through_toml() {
         darkness_effect_scale: 0.5,
         entity_distance_scaling: 1.25,
         menu_background_blurriness: 7,
+        glint_speed: 0.25,
+        glint_strength: 1.0,
         max_fps: 60,
         clouds: CloudStatus::Fast,
         premesh: PremeshMode::Predict,

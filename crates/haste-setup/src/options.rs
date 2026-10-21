@@ -187,6 +187,10 @@ pub struct Options {
     /// Vanilla's "Menu Background Blurriness" accessibility option, 0..=10 (default 5). The
     /// box-blur radius the open screen's blurred background uses (`Options.menuBackgroundBlurriness`).
     pub menu_background_blurriness: u8,
+    /// Vanilla's "Glint Speed" and "Glint Strength" accessibility options, 0.0..=1.0 (defaults
+    /// 0.5 and 0.75): how fast the enchantment glint scrolls and how bright it shows.
+    pub glint_speed: f32,
+    pub glint_strength: f32,
     /// 260 means "unlimited", as in vanilla's framerate limit.
     pub max_fps: u32,
     /// Vanilla's "Clouds" video setting (`Options.cloudStatus`, options.txt
@@ -220,6 +224,8 @@ impl Default for Options {
             darkness_effect_scale: 1.0,
             entity_distance_scaling: 1.0,
             menu_background_blurriness: 5,
+            glint_speed: 0.5,
+            glint_strength: 0.75,
             max_fps: 120,
             clouds: CloudStatus::default(),
             premesh: PremeshMode::default(),
@@ -245,6 +251,8 @@ impl Options {
         self.darkness_effect_scale = self.darkness_effect_scale.clamp(0.0, 1.0);
         self.entity_distance_scaling = self.entity_distance_scaling.clamp(0.5, 5.0);
         self.menu_background_blurriness = self.menu_background_blurriness.min(10);
+        self.glint_speed = self.glint_speed.clamp(0.0, 1.0);
+        self.glint_strength = self.glint_strength.clamp(0.0, 1.0);
         self.max_fps = self.max_fps.clamp(10, 260);
         self.cloud_range = self.cloud_range.clamp(2, 128);
         self.sound.clamped();
@@ -345,6 +353,19 @@ impl Options {
             "darknessEffectScale" => {
                 if let Ok(v) = value.parse::<f32>() {
                     self.darkness_effect_scale = v * v;
+                }
+                true
+            }
+            // `OptionInstance.UnitDouble`: stored as the value itself.
+            "glintSpeed" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.glint_speed = v;
+                }
+                true
+            }
+            "glintStrength" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.glint_strength = v;
                 }
                 true
             }
