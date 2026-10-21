@@ -30,6 +30,7 @@ pub mod mount_equipment;
 pub mod new_minecart_behavior;
 pub mod registry;
 pub mod render;
+mod ride_tick;
 pub mod riding;
 pub mod skin;
 pub mod sleeping;
