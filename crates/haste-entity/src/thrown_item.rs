@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use haste_core::entity::MetadataValue;
-use haste_core::model::ThrownItemDecoration;
+use haste_core::model::{BodyOp, BodyTransform, ThrownItemDecoration};
 use haste_core::RegistryIndex;
 
 use crate::metadata::Metadata;
@@ -62,7 +62,7 @@ pub fn variant_for_name(name: &str) -> Option<ThrownItem> {
         "minecraft:eye_of_ender" => scaled("minecraft:ender_eye", 1.0),
         // FireworkEntityRenderer: the camera-facing item at scale 1, not full-bright, the
         // same transform as ThrownItemRenderer. Its rocket item is synched (slot 8) and
-        // always sent; the shot-at-angle turn is not modelled (see the report).
+        // always sent; a shot-at-angle rocket is turned by `flight_turn`.
         "minecraft:firework_rocket" => plain("minecraft:firework_rocket"),
         // FIREBALL: (context, 3.0F, true), Fireball.getDefaultItem = FIRE_CHARGE.
         "minecraft:fireball" => scaled("minecraft:fire_charge", 3.0),
@@ -115,12 +115,24 @@ fn item_of(metadata: &Metadata) -> Option<RegistryIndex> {
 
 /// `FireworkRocketEntity.isShotAtAngle` (`DATA_SHOT_AT_ANGLE`, the boolean at index 10, after
 /// the item at 8 and the attached target at 9): a rocket shot from a crossbow or at an angle
-/// is drawn turned to its flight. The renderer applies the turn; this only reads the flag.
+/// is drawn turned to its flight.
 pub fn shot_at_angle(metadata: &Metadata) -> bool {
     matches!(
         metadata.get(SHOT_AT_ANGLE_INDEX).map(|e| &e.value),
         Some(MetadataValue::Boolean(true))
     )
+}
+
+/// `FireworkEntityRenderer.submit`: a rocket shot at an angle turns about Z 180, Y 180, X 90
+/// after the camera orientation. The turn goes on the instance's whole-model body transform
+/// (`EntityInstance.body`, applied before the camera orientation by the thrown-item renderer),
+/// so the ops are pushed in vanilla's order. Every other thrown item keeps its empty body.
+pub fn flight_turn(t: &ThrownItem, metadata: &Metadata, body: &mut BodyTransform) {
+    if t.default_item == "minecraft:firework_rocket" && shot_at_angle(metadata) {
+        body.push(BodyOp::RotateZ(std::f32::consts::PI));
+        body.push(BodyOp::RotateY(std::f32::consts::PI));
+        body.push(BodyOp::RotateX(std::f32::consts::FRAC_PI_2));
+    }
 }
 
 /// A default item's registry index, from the data-generator report's `minecraft:item`

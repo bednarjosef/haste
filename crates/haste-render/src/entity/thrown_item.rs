@@ -34,7 +34,10 @@ impl EntityRenderer {
             .unwrap_or_else(missing_item_model);
         // `ThrownItemRenderer.getBlockLightLevel` returns 15 for full-bright types.
         let light = if t.full_bright { (15, light.1) } else { light };
-        let root = thrown_item_root((e.pos - camera).as_vec3(), t.scale, orientation);
+        // The body transform (a shot-at-angle rocket's flight turn, `FireworkEntityRenderer.submit`)
+        // sits under the camera orientation, as vanilla's pose stack has it; empty for the rest.
+        let root = thrown_item_root((e.pos - camera).as_vec3(), t.scale, orientation)
+            * body_matrix(&e.body);
         let mut out = std::mem::take(&mut self.vertices);
         self.emit_item(&mut out, &model, root, light, ItemDisplay::Ground, assets);
         self.vertices = out;

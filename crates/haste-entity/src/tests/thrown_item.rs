@@ -129,6 +129,38 @@ fn decoration_falls_back_to_the_default_item() {
     }
 }
 
+/// `FireworkEntityRenderer.submit`: only a rocket shot at an angle gets the three turn ops, in
+/// vanilla's order (Z 180, Y 180, X 90); other thrown items and an upright rocket keep an empty
+/// body.
+#[test]
+fn flight_turn_only_for_shot_at_angle_rockets() {
+    let flag = metadata(vec![MetadataEntry {
+        index: 10,
+        value: MetadataValue::Boolean(true),
+    }]);
+    let rocket = thrown_item::variant_for_name("minecraft:firework_rocket").unwrap();
+    let mut body = haste_core::model::BodyTransform::default();
+    thrown_item::flight_turn(&rocket, &flag, &mut body);
+    let ops: Vec<_> = body.iter().copied().collect();
+    assert_eq!(
+        ops,
+        [
+            haste_core::model::BodyOp::RotateZ(std::f32::consts::PI),
+            haste_core::model::BodyOp::RotateY(std::f32::consts::PI),
+            haste_core::model::BodyOp::RotateX(std::f32::consts::FRAC_PI_2),
+        ]
+    );
+
+    let mut upright = haste_core::model::BodyTransform::default();
+    thrown_item::flight_turn(&rocket, &Metadata::default(), &mut upright);
+    assert_eq!(upright.len, 0);
+
+    let snowball = thrown_item::variant_for_name("minecraft:snowball").unwrap();
+    let mut other = haste_core::model::BodyTransform::default();
+    thrown_item::flight_turn(&snowball, &flag, &mut other);
+    assert_eq!(other.len, 0);
+}
+
 /// A spawned snowball tracks as a thrown item, not a dropped item: its instance carries the
 /// sprite decoration at its own interpolated position (thrown projectiles are not hanging
 /// and not client-simulated like `minecraft:item`), and a synched stack at slot 8 feeds the
