@@ -5,7 +5,7 @@ use glam::DVec3;
 use haste_entity::riding::SeatPoint;
 use haste_protocol::haste_core::entity::MetadataEntry;
 use haste_protocol::haste_core::EntityId;
-use haste_protocol::packets::play::clientbound::teleport_flags;
+use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::{ClientboundPlay, ServerboundPlay, SyncedRegistries};
 
 use super::{EntitySink, Session, WorldSink, HEAD_SLOT, VEHICLE_CORRECTION_EPSILON};
@@ -285,9 +285,22 @@ impl Session {
                 entities.player_info(&u.infos());
                 crate::game::skins::added_profiles(&u, &mut self.profiles);
             }
+            P::SetCamera(c) => self.handle_set_camera(&c, own),
             _ => return Some(p),
         }
         None
+    }
+
+    /// `ClientPacketListener.handleSetCamera`: the camera views the world from the packet's
+    /// entity when this level knows it (`packet.getEntity(level)`; our own id is known, and
+    /// gives the camera back to the player), else nothing changes (`Minecraft
+    /// .setCameraEntity` only runs for a resolved entity). The post effect vanilla's
+    /// `GameRenderer.checkEntityPostEffect` picks for a creeper, spider or enderman is not
+    /// drawn: Haste has no post chains besides the menu blur.
+    fn handle_set_camera(&mut self, c: &cb::SetCamera, own: EntityId) {
+        let id = EntityId(c.camera_id);
+        let known = id == own || self.entity_ids.contains(&id);
+        self.camera.set_camera(id, own, known);
     }
 }
 

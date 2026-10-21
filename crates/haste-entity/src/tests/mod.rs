@@ -18,6 +18,7 @@ mod arm_pose;
 mod armor_stand;
 mod arrow;
 mod boat;
+mod camera_view;
 mod connectivity;
 mod hurt;
 mod item_entity;
