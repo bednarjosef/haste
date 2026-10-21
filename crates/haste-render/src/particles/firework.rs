@@ -12,9 +12,12 @@
 
 use glam::{DVec3, Vec3};
 
-use super::engine::ParticleState;
+use haste_core::Identifier;
+
+use super::engine::{ParticleState, Particles};
 use super::providers::ParticleBehaviour;
 use super::rng::Rng;
+use super::ParticleSpawn;
 
 const PI_F32: f32 = std::f32::consts::PI;
 
@@ -413,4 +416,49 @@ fn pick(list: &[i32], rng: &mut Rng) -> i32 {
 /// `Mth.lerp`.
 fn lerp(t: f64, start: f64, end: f64) -> f64 {
     start + t * (end - start)
+}
+
+impl Particles {
+    /// A rocket's burst (`ClientLevel.createFireworks`, from `FireworkRocketEntity`'s status
+    /// 17): the explosions' starter, ticking from the next tick like vanilla's queued add. An
+    /// empty firework (no explosions) is a POOF cloud of 2 + `nextInt(3)` puffs instead.
+    /// `vel` is the rocket's velocity (the burst's drift).
+    pub fn firework_burst(&mut self, pos: DVec3, vel: DVec3, explosions: &[FireworkExplosion]) {
+        if explosions.is_empty() {
+            let count = 2 + (self.rng.next_f32() * 3.0) as i32;
+            for _ in 0..count {
+                let offset = [
+                    self.rng.gaussian() * 0.05,
+                    0.005,
+                    self.rng.gaussian() * 0.05,
+                ];
+                let poof = ParticleSpawn::client(Identifier::minecraft("poof"), pos, offset);
+                self.spawn(&poof, self.camera, None);
+            }
+            return;
+        }
+        let Some(spark) = self.firework_kind(&Identifier::minecraft("firework")) else {
+            return;
+        };
+        let flash = self.firework_kind(&Identifier::minecraft("flash"));
+        self.starters
+            .push(Starter::new(pos, vel, explosions, spark, flash));
+    }
+
+    /// A firework type's pool index and behaviour; an unknown type logs once and is `None`.
+    fn firework_kind(&mut self, id: &Identifier) -> Option<Kind> {
+        match self.types.as_deref()?.index(id) {
+            Some(index) => Some(Kind {
+                index,
+                behaviour: ParticleBehaviour::of(id),
+            }),
+            None => {
+                if !self.unknown.contains(id) {
+                    self.unknown.push(id.clone());
+                    tracing::warn!("particle type {} has no atlas sprites; skipped", id);
+                }
+                None
+            }
+        }
+    }
 }
