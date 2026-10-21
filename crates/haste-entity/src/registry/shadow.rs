@@ -106,6 +106,8 @@ pub fn shadow_radius_for_name(name: &str) -> f32 {
         // ArmorStandRenderer / ShulkerRenderer pass 0.0; the rest of the table (living types
         // not named above) use the usual 0.5.
         "minecraft:armor_stand" => 0.0,
+        // ThrownTridentRenderer never sets the radius (the base 0.0): a table row, no shadow.
+        "minecraft:trident" => 0.0,
         // Non-living renderers that set the base radius directly: ItemEntityRenderer 0.15,
         // ExperienceOrbRenderer 0.15, AbstractBoatRenderer 0.8, AbstractMinecartRenderer 0.7,
         // TntRenderer 0.5, FallingBlockRenderer 0.5, EndCrystalRenderer 0.5.
