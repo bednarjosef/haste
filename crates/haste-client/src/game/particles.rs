@@ -126,6 +126,11 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
                 [0.0; 3],
             ));
         }
+        // `FireworkRocketEntity.tick`'s client trail: each rocket in flight leaves a FIREWORK
+        // particle at its position, every tick, with its velocity's fall.
+        for (pos, velocity) in shared.entities.read().firework_rockets() {
+            particles.firework_rocket_trail(pos, velocity);
+        }
         // The totem pops (`TrackingEmitter.tick`): each emitter follows its entity's box and
         // is dropped once it has lived its 30 ticks, or its entity is gone.
         let entities = shared.entities.read();

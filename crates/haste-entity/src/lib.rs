@@ -11,6 +11,7 @@ pub mod decoration;
 pub mod dims;
 pub mod display;
 pub mod dragon_fireball;
+mod firework_rocket;
 pub mod item_entity;
 pub mod lerp;
 pub mod local_player;

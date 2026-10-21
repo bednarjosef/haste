@@ -445,6 +445,20 @@ impl Particles {
             .push(Starter::new(pos, vel, explosions, spark, flash));
     }
 
+    /// `FireworkRocketEntity.tick`'s client trail: one `FIREWORK` particle at the rocket every
+    /// tick (`life % 2 < 2` holds for every life). Its speed is a gaussian drift of 0.05 on X
+    /// and Z and `-velocity.y * 0.5` up the Y axis, the rocket's current velocity. `pos` and
+    /// `velocity` are the rocket's position and movement this tick.
+    pub fn firework_rocket_trail(&mut self, pos: DVec3, velocity: DVec3) {
+        let speed = [
+            self.rng.gaussian() * 0.05,
+            -velocity.y as f32 * 0.5,
+            self.rng.gaussian() * 0.05,
+        ];
+        let spawn = ParticleSpawn::client(Identifier::minecraft("firework"), pos, speed);
+        self.spawn(&spawn, self.camera, None);
+    }
+
     /// A firework type's pool index and behaviour; an unknown type logs once and is `None`.
     fn firework_kind(&mut self, id: &Identifier) -> Option<Kind> {
         match self.types.as_deref()?.index(id) {
