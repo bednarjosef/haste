@@ -45,7 +45,7 @@ pub use use_effects::UseEffects;
 
 use attributes::parse_modifiers;
 use consumable::parse_consumable;
-use patch::{dyed_color_type, PatchReader};
+use patch::{damage_type, dyed_color_type, PatchReader};
 use use_effects::parse_use_effects;
 
 /// Item default components: the `equippable` per `minecraft:item` registry index, and the
@@ -54,9 +54,14 @@ use use_effects::parse_use_effects;
 #[derive(Clone, Debug, Default)]
 pub struct ItemComponents {
     equippable: Vec<Option<ItemEquippable>>,
+    /// `minecraft:max_damage` per `minecraft:item` registry index (`None` for items that do not
+    /// take damage).
+    max_damage: Vec<Option<u32>>,
     /// The `minecraft:dyed_color` data-component-type id, from the registry report. `None` when
     /// the report is absent.
     dyed_color_type: Option<i32>,
+    /// The `minecraft:damage` data-component-type id, from the registry report.
+    damage_type: Option<i32>,
     attributes: HashMap<Identifier, Vec<AttributeModifier>>,
     consumables: HashMap<Identifier, Consumable>,
     /// `minecraft:food` by item: its `can_always_eat` flag (`FoodProperties.canAlwaysEat`).
@@ -79,6 +84,11 @@ impl ItemComponents {
     /// The `equippable` of item `i`, if the report named one.
     pub fn equippable(&self, i: RegistryIndex) -> Option<&ItemEquippable> {
         self.equippable.get(i.0 as usize)?.as_ref()
+    }
+
+    /// The default `minecraft:max_damage` of item `i` (`None` when the item takes no damage).
+    pub fn max_damage(&self, i: RegistryIndex) -> Option<u32> {
+        self.max_damage.get(i.0 as usize).copied().flatten()
     }
 
     /// The item's default `minecraft:attribute_modifiers`.
@@ -199,6 +209,24 @@ impl ItemComponents {
         r.i32().map(|c| c as u32)
     }
 
+    /// The `damage` a stack's component patch sets, if it is the patch's first added component
+    /// (the same first-add rule as [`dyed_color`](Self::dyed_color); `minecraft:damage` is a
+    /// plain varint). `None` means the stack carries no damage, so it is undamaged.
+    pub fn damage(&self, components_raw: &[u8]) -> Option<u32> {
+        let damage = self.damage_type?;
+        let mut r = PatchReader::new(components_raw);
+        let adds = r.var_int()?;
+        let _removes = r.var_int()?;
+        if adds <= 0 {
+            return None;
+        }
+        let ty = r.var_int()?;
+        if ty != damage {
+            return None;
+        }
+        r.var_int().map(|d| d.max(0) as u32)
+    }
+
     /// Sets an item's default `minecraft:attribute_modifiers` (tests and tools).
     pub fn insert(&mut self, item: Identifier, modifiers: Vec<AttributeModifier>) {
         self.attributes.insert(item, modifiers);
@@ -257,9 +285,11 @@ impl ItemComponents {
         let Ok(entries) = std::fs::read_dir(components_dir) else {
             return ItemComponents {
                 dyed_color_type: dyed_color_type(registries),
+                damage_type: damage_type(registries),
                 ..ItemComponents::default()
             };
         };
+        let mut max_damages: HashMap<Identifier, u32> = HashMap::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -281,6 +311,12 @@ impl ItemComponents {
             let Some(components) = json.get("components") else {
                 continue;
             };
+            if let Some(m) = components
+                .get("minecraft:max_damage")
+                .and_then(|m| m.as_u64())
+            {
+                max_damages.insert(item.clone(), m as u32);
+            }
             if let Some(a) = components.get("minecraft:attribute_modifiers") {
                 attributes.insert(item.clone(), parse_modifiers(a));
             }
@@ -339,9 +375,17 @@ impl ItemComponents {
                 equippable[i.0 as usize] = Some(eq);
             }
         }
+        let mut max_damage = vec![None; len];
+        for (item, m) in max_damages {
+            if let Some(i) = registries.index("minecraft:item", &item) {
+                max_damage[i.0 as usize] = Some(m);
+            }
+        }
         ItemComponents {
             equippable,
+            max_damage,
             dyed_color_type: dyed_color_type(registries),
+            damage_type: damage_type(registries),
             attributes,
             consumables,
             foods,

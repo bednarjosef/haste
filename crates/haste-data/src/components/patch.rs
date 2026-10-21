@@ -14,8 +14,20 @@ pub(crate) fn dyed_color_type(registries: &Registries) -> Option<i32> {
         .map(|i| i.0 as i32)
 }
 
+/// The `minecraft:damage` data-component-type id, from the registry report. `None` when the
+/// report is absent.
+pub(crate) fn damage_type(registries: &Registries) -> Option<i32> {
+    registries
+        .index(
+            "minecraft:data_component_type",
+            &haste_core::Identifier::minecraft("damage"),
+        )
+        .map(|i| i.0 as i32)
+}
+
 /// A minimal varint/int reader over a component patch's raw bytes (only what
-/// [`ItemComponents::dyed_color`](super::ItemComponents::dyed_color) needs).
+/// [`ItemComponents::dyed_color`](super::ItemComponents::dyed_color) and
+/// [`ItemComponents::damage`](super::ItemComponents::damage) need).
 pub(crate) struct PatchReader<'a> {
     bytes: &'a [u8],
     at: usize,

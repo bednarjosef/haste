@@ -219,6 +219,52 @@ fn loads_by_registry_name_and_ignores_unknown_items() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `minecraft:max_damage` loads per item index, and a stack's `minecraft:damage` is read from
+/// its patch's first add (a plain varint), the way vanilla's `Crackiness.byDamage` takes it.
+#[test]
+fn loads_max_damage_and_reads_the_damage_patch() {
+    let dir = std::env::temp_dir().join(format!("haste-max-damage-{}", std::process::id()));
+    let item_dir = dir.join("item");
+    std::fs::create_dir_all(&item_dir).unwrap();
+    std::fs::write(
+        item_dir.join("wolf_armor.json"),
+        br#"{"components":{"minecraft:max_damage":64,"minecraft:equippable":{"slot":"body","asset_id":"minecraft:wolf"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(item_dir.join("stone.json"), br#"{"components":{}}"#).unwrap();
+    let registries_json = r#"{
+  "minecraft:item": {
+    "entries": {
+      "minecraft:air": { "protocol_id": 0 },
+      "minecraft:stone": { "protocol_id": 1 },
+      "minecraft:wolf_armor": { "protocol_id": 2 }
+    }
+  },
+  "minecraft:data_component_type": {
+    "entries": {
+      "minecraft:damage": { "protocol_id": 0 },
+      "minecraft:dyed_color": { "protocol_id": 1 }
+    }
+  }
+}"#;
+    let regs = Registries::parse(registries_json).unwrap();
+    let components = ItemComponents::load(&item_dir, &regs);
+    assert_eq!(components.max_damage(RegistryIndex(2)), Some(64));
+    assert_eq!(components.max_damage(RegistryIndex(1)), None);
+    // A damage of 40 as the first add (type id 0, varint 40), then no removes.
+    assert_eq!(components.damage(&[1, 0, 0, 40]), Some(40));
+    // A two-byte varint: 200 is 0xC8 0x01.
+    assert_eq!(components.damage(&[1, 0, 0, 0xC8, 0x01]), Some(200));
+    // Another component first, or an empty patch, carries no damage.
+    assert_eq!(components.damage(&[1, 0, 1, 0x00, 0x11, 0x22, 0x33]), None);
+    assert_eq!(components.damage(&[0, 0]), None);
+    // A missing directory loads as an empty table, damage still reads from the report.
+    let empty = ItemComponents::load(&dir.join("nope"), &regs);
+    assert_eq!(empty.max_damage(RegistryIndex(2)), None);
+    assert_eq!(empty.damage(&[1, 0, 0, 7]), Some(7));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One report file per component: the load reads them all in one pass.
 #[test]
 fn loads_equippable_attributes_consumables_tools_and_gliders() {
