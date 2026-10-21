@@ -101,7 +101,9 @@ fn seat_offset(
 
 /// A registry id's path (`minecraft:oak_boat` -> `oak_boat`); empty for an unknown id.
 fn type_path(kind: RegistryIndex) -> &'static str {
-    entity_type_name(kind).map_or("", |name| name.split_once(':').map_or(name, |(_, path)| path))
+    entity_type_name(kind).map_or("", |name| {
+        name.split_once(':').map_or(name, |(_, path)| path)
+    })
 }
 
 /// What a passenger is, for the seat rules: a player, an `Animal`, or a villager or wandering
