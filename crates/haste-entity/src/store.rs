@@ -67,7 +67,10 @@ pub struct Entity {
     pub dimensions: (f32, f32),
     pub metadata: Metadata,
     pub equipment: Vec<(u8, ItemStackData)>,
-    lerp: LerpState,
+    pub(crate) lerp: LerpState,
+    /// A minecart's `NewMinecartBehavior` (the `minecart_improvements` experiment); `None`
+    /// for every other entity and for carts on the old behaviour.
+    pub new_minecart: Option<Box<crate::new_minecart_behavior::NewMinecartBehavior>>,
     /// Cached nametag from `player_info`.
     pub nametag: Option<String>,
     /// True when the entity type is player-like (humanoid model). Until world-and-data's registry lands we
@@ -193,6 +196,7 @@ impl Entity {
             metadata: Metadata::default(),
             equipment: Vec::new(),
             lerp: LerpState::new(s.pos, s.yaw, s.pitch),
+            new_minecart: None,
             nametag: None,
             is_player_type: false,
             walk: WalkAnimationState::default(),
@@ -261,11 +265,6 @@ impl Entity {
         } else {
             lerp(partial, self.prev_pitch, self.pitch)
         }
-    }
-
-    /// The present (pos, yaw, pitch): what `LerpState` keeps for the part a packet lacks.
-    fn current(&self) -> (DVec3, f32, f32) {
-        (self.pos, self.yaw, self.pitch)
     }
 
     /// Body yaw between the last two ticks (`Mth.rotLerp(partial, yBodyRotO, yBodyRot)`).
@@ -451,7 +450,7 @@ impl EntityStore {
     /// Short delta move (`delta` already converted from 1/4096-block units by the caller).
     pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool) {
         if let Some(e) = self.get_mut(id) {
-            e.lerp.on_delta(delta, e.current());
+            e.move_by_delta(delta);
             e.on_ground = on_ground;
         }
     }
@@ -460,7 +459,7 @@ impl EntityStore {
     /// `Entity.moveOrInterpolateTo(yRot, xRot)`): eased over 3 ticks with the position.
     pub fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, on_ground: bool) {
         if let Some(e) = self.get_mut(id) {
-            e.lerp.interpolate_to(None, Some((yaw, pitch)), e.current());
+            e.move_or_interpolate_to(None, Some((yaw, pitch)));
             e.on_ground = on_ground;
         }
     }
@@ -482,8 +481,7 @@ impl EntityStore {
                 e.prev_pitch = pitch;
                 e.lerp.snap(pos, yaw, pitch);
             } else {
-                e.lerp
-                    .interpolate_to(Some(pos), Some((yaw, pitch)), e.current());
+                e.move_or_interpolate_to(Some(pos), Some((yaw, pitch)));
             }
         }
     }
@@ -690,6 +688,8 @@ impl EntityStore {
                 pitch: &mut slot.pitch,
                 prev_pitch: &mut slot.prev_pitch,
             });
+            // `AbstractMinecart.tick` -> `NewMinecartBehavior.tick`: the track walk.
+            crate::new_minecart_behavior::tick(slot);
             // `ItemEntity.tick`: gravity, move, drag, between position packets.
             if slot.is_item {
                 crate::item_entity::tick(slot, world);

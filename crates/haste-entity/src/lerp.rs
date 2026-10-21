@@ -8,9 +8,14 @@
 //! flight; a packet without position or without rotation keeps the in-flight value for the part
 //! it lacks. `prev_*`/current pairs bracket each tick's step so the renderer can interpolate with
 //! the partial tick (`Entity.getYRot(partialTicks)` / `getXRot(partialTicks)`).
+//!
+//! A minecart on the new behaviour has no interpolation (`AbstractMinecart
+//! .createInterpolationHandler` returns `InterpolationHandler.NO_OP`): its packets set the
+//! position and rotation at once (`Entity.moveOrInterpolateTo`), and its smooth movement comes
+//! from the track steps instead ([`crate::new_minecart_behavior`]).
 use haste_core::DVec3;
 
-use crate::store::rot_lerp;
+use crate::store::{rot_lerp, Entity};
 
 /// `LinearInterpolationHandler.DEFAULT_INTERPOLATION_STEPS`.
 pub const INTERPOLATION_STEPS: u8 = 3;
@@ -23,6 +28,8 @@ pub(crate) struct LerpState {
     target_pitch: f32,
     /// Ticks left in the current window; 0 = resting on the targets.
     remaining: u8,
+    /// `InterpolationHandler.NO_OP`: targets are never eased toward.
+    no_op: bool,
 }
 
 impl LerpState {
@@ -32,26 +39,33 @@ impl LerpState {
             target_yaw: yaw,
             target_pitch: pitch,
             remaining: 0,
+            no_op: false,
         }
     }
 
-    /// A short-delta move arrived (`delta` in blocks): the delta codec's base is the last
-    /// target, so the new target is the old one plus the delta. `current` is the entity's
-    /// present (pos, yaw, pitch), the rotation to keep when no interpolation is in flight.
-    pub fn on_delta(&mut self, delta: DVec3, current: (DVec3, f32, f32)) {
-        self.interpolate_to(Some(self.target + delta), None, current);
+    /// Switches to `InterpolationHandler.NO_OP` (a minecart on the new behaviour): packets
+    /// apply at once from now on.
+    pub fn set_no_op(&mut self) {
+        self.no_op = true;
+        self.remaining = 0;
     }
 
     /// `AbstractInterpolationHandler.interpolateTo`: head for `pos` and/or `rot` over 3 steps.
     /// A part the packet lacks keeps the in-flight target, or the entity's `current` value when
     /// nothing is in flight. A target identical to the one already in flight does not restart
-    /// the window (the `is` check before `startInterpolating`).
+    /// the window (the `is` check before `startInterpolating`). Returns false for the no-op
+    /// handler, whose caller applies the values itself; the target is still kept as the base
+    /// later short-delta moves add to.
     pub fn interpolate_to(
         &mut self,
         pos: Option<DVec3>,
         rot: Option<(f32, f32)>,
         current: (DVec3, f32, f32),
-    ) {
+    ) -> bool {
+        if self.no_op {
+            self.target = pos.unwrap_or(self.target);
+            return false;
+        }
         let active = self.remaining > 0;
         let (cur_pos, cur_yaw, cur_pitch) = if active {
             (self.target, self.target_yaw, self.target_pitch)
@@ -61,12 +75,13 @@ impl LerpState {
         let pos = pos.unwrap_or(cur_pos);
         let (yaw, pitch) = rot.unwrap_or((cur_yaw, cur_pitch));
         if active && self.target == pos && self.target_yaw == yaw && self.target_pitch == pitch {
-            return;
+            return true;
         }
         self.target = pos;
         self.target_yaw = yaw;
         self.target_pitch = pitch;
         self.remaining = INTERPOLATION_STEPS;
+        true
     }
 
     /// `Entity.snapTo`: abandon any in-flight smoothing and rest on the new values.
@@ -105,4 +120,27 @@ pub(crate) struct LerpTarget<'a> {
     pub prev_yaw: &'a mut f32,
     pub pitch: &'a mut f32,
     pub prev_pitch: &'a mut f32,
+}
+
+impl Entity {
+    /// `Entity.moveOrInterpolateTo`: hand the packet's position and/or rotation to the
+    /// interpolation, or, when it does not take them (the no-op handler), set them at once.
+    pub(crate) fn move_or_interpolate_to(&mut self, pos: Option<DVec3>, rot: Option<(f32, f32)>) {
+        let current = (self.pos, self.yaw, self.pitch);
+        if !self.lerp.interpolate_to(pos, rot, current) {
+            if let Some(pos) = pos {
+                self.pos = pos;
+            }
+            if let Some((yaw, pitch)) = rot {
+                self.yaw = yaw;
+                self.pitch = pitch;
+            }
+        }
+    }
+
+    /// A short-delta move arrived (`delta` in blocks): the delta codec's base is the last
+    /// target, so the new position is the old target plus the delta.
+    pub(crate) fn move_by_delta(&mut self, delta: DVec3) {
+        self.move_or_interpolate_to(Some(self.lerp.target + delta), None);
+    }
 }

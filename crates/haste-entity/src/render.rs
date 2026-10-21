@@ -237,6 +237,19 @@ impl EntityStore {
                 equipment,
                 head_item,
             };
+            if minecart_variant.is_some() {
+                minecart_render_pose(&mut inst, slot, partial_tick);
+            }
+            // `EntityRenderer.extractRenderState`'s `passengerOffset`: a passenger of a cart
+            // walking its track steps rides along with the walk.
+            if let Some(offset) = self
+                .riding
+                .vehicle_of(slot.id)
+                .and_then(|v| self.get(v))
+                .and_then(|cart| crate::new_minecart_behavior::passenger_offset(cart, partial_tick))
+            {
+                inst.pos += offset;
+            }
             if slot.is_player_type {
                 crate::avatar::dress_tracked(
                     &self.player_skin(slot.uuid),
@@ -247,5 +260,22 @@ impl EntityStore {
             }
             out.push(inst);
         }
+    }
+}
+
+/// `AbstractMinecartRenderer.extractRenderState`'s behaviour split: a cart on the new
+/// behaviour is drawn at its track walk's point and rotation with `newRender`'s pose (carried
+/// as the instance's body ops); one on the old behaviour keeps its interpolated position and
+/// rotation and no body ops, and is posed from the rails the client snaps per frame
+/// (`oldRender`).
+fn minecart_render_pose(inst: &mut EntityInstance, slot: &Entity, partial_tick: f32) {
+    match crate::new_minecart_behavior::render_pose(slot, partial_tick) {
+        Some((pos, y_rot, x_rot)) => {
+            inst.pos = pos;
+            inst.yaw = y_rot;
+            inst.pitch = x_rot;
+            inst.body = crate::new_minecart_behavior::new_render(y_rot, x_rot);
+        }
+        None => inst.body = haste_core::model::BodyTransform::default(),
     }
 }
