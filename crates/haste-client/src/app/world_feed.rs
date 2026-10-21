@@ -3,7 +3,10 @@
 //! block-entity instances.
 
 mod fishing;
+mod frame_maps;
+mod leash_lines;
 mod promotion;
+mod stuck;
 
 use promotion::has_all_neighbours;
 
@@ -100,6 +103,11 @@ pub struct WorldFeed {
     pub(crate) last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
     pub(crate) instances: Vec<EntityInstance>,
+    stuck: stuck::StuckFeed,
+    /// Leash ropes for this frame (reused): the entity store's lines, and those lines with
+    /// the light at each end (`leash_lines::convert`) for the renderer.
+    leash: Vec<haste_entity::leash::LeashLine>,
+    leash_render: Vec<haste_render::entity::LeashLine>,
     /// Block entity instances for this frame (reused): the game thread's last tick frame with
     /// the partial tick folded in (`block_entity_extract::fold_partial`).
     be_instances: Vec<BlockEntityInstance>,
@@ -427,8 +435,12 @@ impl WorldFeed {
                 first_person.map(|camera| (camera, view)),
                 renderer,
             );
+            self.stuck.fill(&store, partial);
+            let model = shared.local_model.lock();
+            store.leash_lines(partial, Some(&model), &mut self.leash);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
+        self.stuck.set_stuck(renderer);
         game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);
         // The pickup particles (`take_item_entity`): one item/orb instance each at the eased
         // position, drawn through the dropped-item renderer (vanilla `ItemPickupParticleGroup`).
@@ -465,68 +477,31 @@ impl WorldFeed {
             // so it happens here too, per frame.
             haste_entity::minecart::snap_rails(&mut self.instances, &*world, &shared.data.blocks);
             self.fishing.light_and_set(&world, renderer);
+            // The rope ends' light, sampled at the blocks the ends hang in.
+            leash_lines::convert(&*world, &self.leash, &mut self.leash_render);
         }
+        renderer.set_leash_lines(&self.leash_render);
+        haste_entity::display::fill_light_emission(&mut self.instances, &*shared.data);
         (&self.instances, &self.be_instances)
-    }
-
-    /// Each framed item stack's map id (`ItemFrame.getFramedMapId` reads the stack's
-    /// `minecraft:map_id` component): filled onto the item frame instances so the renderer
-    /// can draw the map instead of the item. The stack's bytes are compared per frame and
-    /// the component patch decoded only when they changed (the entity store keeps no
-    /// component tables, so the decode lives here on the render thread).
-    fn patch_frame_maps(&mut self, shared: &Shared) {
-        let tables = &shared.component_tables;
-        let store = shared.entities.read();
-        for inst in self.instances.iter_mut() {
-            let Some(haste_core::model::Decoration::ItemFrame(f)) = inst.decoration.as_mut() else {
-                continue;
-            };
-            if f.item.is_none() {
-                f.map_id = None;
-                continue;
-            }
-            let Some(entity) = store.get(inst.id) else {
-                f.map_id = None;
-                continue;
-            };
-            let stack = entity
-                .metadata
-                .get(haste_entity::decoration::ITEM_FRAME_ITEM)
-                .and_then(|e| match &e.value {
-                    haste_core::entity::MetadataValue::ItemStack(s) if !s.is_empty() => Some(s),
-                    _ => None,
-                });
-            let Some(stack) = stack else {
-                f.map_id = None;
-                continue;
-            };
-            if self
-                .frame_map_ids
-                .get(&inst.id)
-                .is_none_or(|(s, _)| *s != *stack)
-            {
-                let map_id = crate::net::map_id_of(stack, tables);
-                self.frame_map_ids.insert(inst.id, (stack.clone(), map_id));
-            }
-            f.map_id = self.frame_map_ids.get(&inst.id).unwrap().1;
-        }
     }
 
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
     /// comparing the per-tick part is enough; the skin is cloned only when one happens.
     /// The hand only exists in first person (F5 hides it) and while the HUD is shown
-    /// (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
+    /// (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD). The totem pop's item
+    /// goes along in every perspective (`ScreenEffectRenderer.submit`: only F1 hides it).
     pub(crate) fn set_first_person(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
         perspective: game::Perspective,
         hud_hidden: bool,
-        first_person: Option<game::FirstPersonView>,
+        state: &game::ViewState,
     ) {
+        renderer.set_item_activation(state.screen.item_activation.filter(|_| !hud_hidden));
         let view = match perspective {
-            game::Perspective::FirstPerson if !hud_hidden => first_person,
+            game::Perspective::FirstPerson if !hud_hidden => state.first_person,
             _ => None,
         };
         // Our skin changes when its download lands: compare it by identity as well.

@@ -53,6 +53,7 @@ mod block_classes;
 mod consumable;
 mod consume_effects;
 pub(crate) mod cooldowns;
+mod crit;
 mod destroy;
 mod drop;
 mod effects;
@@ -63,6 +64,7 @@ mod pick;
 mod place;
 pub(crate) mod prediction;
 mod step;
+mod totem;
 mod use_item;
 pub(crate) use consume_effects::{should_emit, ConsumeEffects};
 pub(crate) use cooldowns::ItemCooldowns;
@@ -157,6 +159,8 @@ pub struct Interaction {
     pub attrs: InteractAttributes,
     /// Block being broken, its face and the held item it started with, progress 0..1.
     pub(crate) destroying: Option<(BlockPos, Direction, ItemStackData)>,
+    /// Entities the local player critically hit this tick, drained by the session.
+    pub(crate) crit_hits: Vec<haste_core::EntityId>,
     progress: f32,
     /// Vanilla `MultiPlayerGameMode.destroyTicks`: how many `continueDestroyBlock` calls have
     /// added progress to the current break (the press tick's `continueAttack` counts, so a
@@ -198,6 +202,11 @@ pub struct Interaction {
     /// Item registry indices whose default components carry `minecraft:glider`
     /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
     pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
+    /// `minecraft:totem_of_undying` in `minecraft:item` (`find_totem`'s fallback).
+    pub(crate) totem_item: Option<RegistryIndex>,
+    /// Item registry indices whose default components carry `minecraft:death_protection`
+    /// (`find_totem`), resolved from the item component reports in `prepare`.
+    pub(crate) death_protection_items: Option<HashSet<RegistryIndex>>,
     /// Item registry indices that steer a ridden animal while held (vanilla
     /// `Pig.getControllingPassenger`'s carrot on a stick, `Strider`'s warped fungus on a
     /// stick), resolved from the item registry in `prepare`.
@@ -352,6 +361,7 @@ impl Interaction {
             });
             self.item_components = Some(Arc::new(c));
         }
+        self.resolve_totem(data);
     }
 
     pub fn has_block_tags(&self) -> bool {
@@ -558,7 +568,7 @@ impl LocalPlayer {
                 .is_some_and(|s| s.contains(&index))
     }
 
-    fn eye(&self) -> DVec3 {
+    pub(super) fn eye(&self) -> DVec3 {
         self.state.pos + DVec3::new(0.0, self.attrs.eye_height_for(self.state.pose), 0.0)
     }
 }
@@ -569,3 +579,5 @@ mod cooldowns_tests;
 mod spectator_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod totem_tests;

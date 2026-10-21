@@ -461,3 +461,72 @@ fn set_health_drop_tilts_and_blinks_like_hurt_to() {
     assert_eq!(r.session.hurt_ticks, 10);
     assert_eq!(r.session.damage_cooldown, 10);
 }
+
+#[test]
+fn totem_pop_starts_an_emitter_and_plays_the_sound() {
+    let mut r = DamageRig::new();
+    r.session.set_entity_type_names(vec![
+        Identifier::minecraft("player"),
+        Identifier::minecraft("zombie"),
+    ]);
+    r.apply(haste_protocol::ClientboundPlay::AddEntity(
+        haste_protocol::packets::play::clientbound::AddEntity {
+            entity_id: 42,
+            uuid: Default::default(),
+            kind: 1,
+            pos: DVec3::new(10.0, 70.0, 10.0),
+            velocity: DVec3::ZERO,
+            pitch: 0.0,
+            yaw: 0.0,
+            head_yaw: 0.0,
+            data: 0,
+        },
+    ));
+    // Status 35 (vanilla `ClientPacketListener.handleEntityEvent`): the totem pops on zombie 42.
+    r.apply(haste_protocol::ClientboundPlay::EntityEvent(
+        haste_protocol::packets::play::clientbound::EntityEvent {
+            entity_id: 42,
+            status: 35,
+        },
+    ));
+    let [emitter] = &r.session.totem_emitters[..] else {
+        panic!("no totem emitter started");
+    };
+    assert_eq!(emitter.entity, EntityId(42));
+    let [SoundRequest::Play(sound)] = &r.session.sound_requests[..] else {
+        panic!("no totem sound recorded");
+    };
+    // `SoundEvents.TOTEM_USE` at volume 1 and pitch 1, from the entity.
+    assert_eq!(
+        sound.sound,
+        SoundRef::Inline("minecraft:item.totem.use".to_owned())
+    );
+    assert_eq!(sound.volume, 1.0);
+    assert_eq!(sound.pitch, 1.0);
+    assert_eq!(sound.pos, SoundPos::Entity(42));
+    assert_eq!(sound.category, 5);
+    // Only our own pop shows the item in front of the camera.
+    assert!(!r.session.player.item_activation.is_active());
+}
+
+#[test]
+fn totem_pop_on_the_local_player_plays_at_our_position() {
+    let mut r = DamageRig::new();
+    r.apply(haste_protocol::ClientboundPlay::EntityEvent(
+        haste_protocol::packets::play::clientbound::EntityEvent {
+            entity_id: 7,
+            status: 35,
+        },
+    ));
+    assert_eq!(r.session.totem_emitters.len(), 1);
+    assert_eq!(r.session.totem_emitters[0].entity, EntityId(7));
+    let [SoundRequest::Play(sound)] = &r.session.sound_requests[..] else {
+        panic!("no totem sound recorded");
+    };
+    assert_eq!(sound.pos, SoundPos::Fixed(r.session.player.state.pos));
+    // Our own entity is a player, so the sound is in the PLAYERS category (vanilla SoundSource 7).
+    assert_eq!(sound.category, 7);
+    // `LocalPlayer.displayItemActivation`: the totem shows in front of the camera for 40 ticks.
+    assert!(r.session.player.item_activation.is_active());
+    assert_eq!(r.session.player.item_activation.ticks(), 40);
+}

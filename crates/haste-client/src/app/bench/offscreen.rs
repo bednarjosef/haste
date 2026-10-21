@@ -10,7 +10,13 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let Some(server) = args.server.as_deref() else {
         anyhow::bail!("--bench needs --server <host[:port]>");
     };
-    let session = Session::join(&args.username, args.render_distance, server, false, None)?;
+    let session = Session::join(
+        &args.username,
+        args.render_distance,
+        server,
+        crate::sound::SoundOutput::Off,
+        None,
+    )?;
     let shared = session.shared.clone();
     // The bench camera is first person: the game thread's camera effects take that perspective.
     shared.input.lock().perspective = game::Perspective::FirstPerson;
@@ -80,7 +86,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             &mut renderer,
             game::Perspective::FirstPerson,
             false,
-            view.first_person,
+            &view,
         );
         let (entities, block_entities) = feed.entities(
             &shared,

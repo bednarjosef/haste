@@ -112,6 +112,10 @@ impl Particles {
                 // entry drives the tick that spawns the visible particles.
                 continue;
             }
+            if super::firework::hidden(p) {
+                // SparkParticle's twinkle: hidden through the odd thirds of its life.
+                continue;
+            }
             let block = BlockPos::new(
                 p.pos.x.floor() as i32,
                 p.pos.y.floor() as i32,

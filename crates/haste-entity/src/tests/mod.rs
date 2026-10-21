@@ -18,6 +18,7 @@ mod arm_pose;
 mod armor_stand;
 mod arrow;
 mod boat;
+mod camera_view;
 mod connectivity;
 mod fishing_hook;
 mod hurt;
@@ -27,11 +28,16 @@ mod minecart;
 mod mob_animation;
 mod model_dump;
 mod models;
+mod mount_equipment;
+mod new_minecart_behavior;
 mod registry;
 mod riding;
 mod setup_rotations;
+mod sleeping;
+mod spin_attack;
 mod store;
 mod thrown_item;
+mod trident;
 mod using_item;
 fn store() -> EntityStore {
     EntityStore::new(EntityDimensions::default())

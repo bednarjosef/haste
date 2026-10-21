@@ -31,7 +31,7 @@ highlight, debug sample) are marked "debug" and are fine to ignore.
 | `handleTickingStep` | missing | none found | low |
 | `handleSetHeldSlot` | done | crates/haste-client/src/player.rs (SetHeldSlot arm); ui/packets.rs:302 | — |
 | `handleMoveEntity` (pos/rot/posrot) | done | crates/haste-client/src/net/entities.rs | — |
-| `handleMinecartAlongTrack` (smooth minecart steps) | missing | none found | medium (minecarts jump between packets) |
+| `handleMinecartAlongTrack` (smooth minecart steps) | done | crates/haste-client/src/net/minecart.rs; the walk in crates/haste-entity/src/new_minecart_behavior.rs | — |
 | `handleRotateMob` | done | crates/haste-client/src/net/entities.rs (RotateHead) | — |
 | `handleRemoveEntities` | done | crates/haste-client/src/net/entities.rs | — |
 | `handleMovePlayer` (PlayerPosition) | done | crates/haste-client/src/player.rs (PlayerPosition arm) | — |
@@ -92,7 +92,7 @@ highlight, debug sample) are marked "debug" and are fine to ignore.
 | `handlePlayerCombatEnd` / `handlePlayerCombatEnter` | missing | none found | none (no-op in vanilla) |
 | `handlePlayerCombatKill` | done | crates/haste-client/src/ui/packets.rs:279; Handlers.java:399 | — |
 | `handleChangeDifficulty` | missing | none found | low (difficulty icon on death screen) |
-| `handleSetCamera` (spectate another entity) | missing | none found | medium (spectator teleport view, death camera) |
+| `handleSetCamera` (spectate another entity) | done (no creeper/spider/enderman post effect) | crates/haste-client/src/net/entities.rs (`handle_set_camera`), crates/haste-client/src/game/camera_entity.rs | low (the spectated mob's post effect is not drawn) |
 | `handleInitializeBorder` / `SetBorderCenter` / `SetBorderSize` / `SetBorderLerpSize` | done (collision only) | crates/haste-client/src/net/effects.rs:45-51 | partial: the wall itself is not drawn (see §9) |
 | `handleSetBorderWarningDistance` / `WarningDelay` | missing | none found; crates/haste-client/src/world_border.rs:7 keeps only centre+diameter | low (no red vignette near the border) |
 | `handleCustomPayload` (play phase) | missing | none found (config-phase payload handled) | low |
@@ -129,7 +129,7 @@ highlight, debug sample) are marked "debug" and are fine to ignore.
 
 Count: about 85 done, 4 partial (border visuals, report details), 16 missing with player impact,
 plus debug-only misses. The misses that matter: `Explode`, `MapItemData`, `Cooldown`,
-`SetCamera`, `SetEntityLink`, `MoveMinecartAlongTrack`, `ShowDialog`, `TickingState`.
+`SetEntityLink`, `MoveMinecartAlongTrack`, `ShowDialog`, `TickingState`.
 
 ## 2. Entity renderers (`EntityRenderers` registrations, 161 types) and layers
 
@@ -239,7 +239,7 @@ Count: ~15 done, 2 missing (spectator menu, dialogs), 1 partial.
 | Mount bar (horse jump), spectator bar | done (mount); spectator menu missing | crates/haste-jvm/proxies/mount_hud.rs; see §5 | — |
 | Toasts (recipes, advancements, system) | done | ClientImpl.java:383 (ToastManager) | — |
 | Vignette/pumpkin/powder snow/portal/fire/in-wall/spyglass/nausea overlays | done | crates/haste-client/src/screen_effects/ (camera_overlay, fire, in_block, portal, powder_snow, spyglass, water, confusion) | — |
-| Subtitles (sound captions) | missing | deliberately noop'd: crates/haste-jvm/proxies.conf:118-120 (sounds live in Rust, the overlay cannot hear them) | low (accessibility) |
+| Subtitles (sound captions) | done | real vanilla `SubtitleOverlay`; Rust's played sounds reach it once per frame: haste-audio/src/sound_event_listener.rs, haste-jvm/src/sound_manager.rs, SoundImpl.java | — |
 | Debug screen (F3) | done | ui/input.rs:113-116; DebugImpl.java | — |
 | World border red vignette + wall | missing | no border draw code in haste-render; world_border.rs:7 keeps collision only | medium |
 | Item cooldown sweep on the hotbar icon | missing | Cooldown packet unhandled (see §1) | medium |
@@ -271,7 +271,7 @@ Count: ~15 done, 2 missing (spectator menu, dialogs), 1 partial.
 | Movement effects: levitation, slow falling, jump boost, speed (via synced attributes) | done | crates/haste-physics/src/movement.rs:576-583, 526; net/player_state.rs attributes | — |
 | Blindness/darkness fog; water/lava/powder snow/nether/end fog | done | crates/haste-render/src/fog/{blindness,water,lava,powder_snow,atmospheric}.rs | — |
 | Dolphin's grace | partial | no explicit code; swim speed modifiers would have to arrive via `UpdateAttributes` — not verified | low |
-| Spectator camera (`SetCamera` spectate) | missing | none found | medium |
+| Spectator camera (`SetCamera` spectate) | done | crates/haste-client/src/game/camera_entity.rs, crates/haste-client/src/player/camera.rs | — |
 | Totem of undying animation (particles, hand flash) | missing | only the particle wire id exists | medium |
 | Trident riptide spin | missing | none found | low |
 
@@ -350,7 +350,8 @@ usual size; otherwise it says how to split.
 14. **Ambient sound loops**: cave/underwater/biome ambience (`AmbientLoopHandler`,
     `BiomeAmbientSoundsHandler`, `UnderwaterAmbientSoundHandler` equivalents). One worker
     (needs a small ambient-sound scheduler in haste-client/src/sound/).
-15. **Minecart movement smoothing**: `handleMinecartAlongTrack`. One worker.
+15. ~~**Minecart movement smoothing**: `handleMinecartAlongTrack`.~~ Done (`NewMinecartBehavior`'s
+    track walk, the riding camera and the passenger offset).
 16. **World border visuals**: `WorldBorderRenderer` (the wall) + warning-distance vignette
     (needs `SetBorderWarningDistance/Delay` stored). One worker.
 17. **End crystal**: `EndCrystalRenderer` (crystal model + beam to the dragon; the beam pairs
@@ -381,9 +382,8 @@ usual size; otherwise it says how to split.
     `handleProjectilePower`, `handleWaypoint`, `handleServerData`, `handleAddTransientBlock`.
     Split: 2 workers (a "small packets" batch each); all are one match arm plus a small effect.
 29. **Animate packet**: crit particles on remote attacks, wake-up animation. One worker, small.
-30. **Subtitles**: feed Rust sound plays to the Java `SubtitleOverlay` (the overlay is real
-    Java, currently noop'd, proxies.conf:118-120). One worker; needs a Rust→Java sound-event
-    bridge call.
+30. ~~**Subtitles**~~: done. Rust's sound plays reach the real Java `SubtitleOverlay`
+    (`SoundEngine.notifyListeners` batched per tick, drained by `haste.gui.SoundImpl` per frame).
 
 Items 1-12 are the ones a player sees in normal survival within minutes. Items 3-11 share a
 root cause (entities whose renderer is not a dumpable mob model), so a shared "special entity

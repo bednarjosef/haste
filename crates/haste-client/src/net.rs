@@ -47,6 +47,14 @@ pub struct Session {
     /// The dimension type's `audio/music_volume` (vanilla's constant dimension layer of
     /// the environment attribute system): the base the camera's biome overrides each tick.
     pub dimension_music_volume: f32,
+    /// The `audio/ambient_sounds` attribute's layers for the current level (the
+    /// dimension type's value, each synced biome's override), read at the player's
+    /// position by the biome ambient sounds handler.
+    pub ambient_sounds_layers: crate::app::biomes::ambient_sounds::AmbientSoundsLayers,
+    /// The local player's ambient sound handlers (vanilla `LocalPlayer.ambientSoundHandlers`).
+    pub ambient_sound_handlers: crate::sound::AmbientSoundHandlers,
+    /// The ticking sound instances they start (vanilla `SoundEngine.tickingSounds`).
+    pub ticking_sounds: crate::sound::TickingSounds,
     /// The camera's `MUSIC_VOLUME` as of the last tick (vanilla
     /// `Minecraft.getMusicVolume`): `dimension_music_volume` overridden by the camera's
     /// biome, clamped to the attribute's unit range (`biomes::audio` resolves it).
@@ -120,6 +128,12 @@ pub struct Session {
     /// The random vanilla's `ClientPacketListener.random` draws the pickup pitch and sound
     /// seed from.
     pickup_rng: haste_audio::random::LegacyRandom,
+    /// The tracking emitters (`ParticleEngine.trackingEmitters`) the `animate` packet's critical
+    /// hit actions start: 16 particles a tick on an entity for three ticks. Ticked in `end_tick`.
+    pub tracking_emitters: Vec<tracking_emitter::TrackingEmitter>,
+    /// The random the emitters' particle offsets are drawn from (vanilla's `Particle.random`,
+    /// an unseeded `RandomSource`).
+    tracking_rng: haste_audio::random::LegacyRandom,
     /// Sound packets recorded this tick ([`crate::sound::record`]), drained by the game
     /// thread's sound output ([`crate::sound::Sounds::apply`]); cleared at `end_tick` when
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
@@ -164,6 +178,13 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Firework bursts queued by entity status 17 since the last tick (drained by the game
+    /// thread into the particle pool).
+    pub firework_bursts: Vec<fireworks::FireworkBurst>,
+    /// The totem pops in progress (vanilla `TrackingEmitter`s the status 35 adds), ticked by
+    /// the game thread into the particle pool, and their random (vanilla's level random).
+    pub totem_emitters: Vec<crate::game::totem_emitter::TotemEmitter>,
+    pub totem_rng: haste_audio::random::LegacyRandom,
     /// Block particles queued since the last tick (our own break and mining start, and the
     /// server's `level_event`s), drained by the game thread into the shared pool.
     pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
@@ -194,7 +215,7 @@ pub struct Session {
     /// The world border (`minecraft:initialize_border` and the `set_border_*` packets): the
     /// interaction step gates its packets on it (`useItemOn` fails without a packet outside
     /// it, `startDestroyBlock` returns false).
-    world_border: crate::world_border::WorldBorder,
+    pub(crate) world_border: crate::world_border::WorldBorder,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
     /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
@@ -230,6 +251,19 @@ pub struct Session {
     /// The remote uses' sound-request scratch (see `net::remote_use`): drawn in vanilla's
     /// order with the particles, then dropped — the server's sound packets carry the sound.
     remote_use_sounds: Vec<crate::sound::SoundRequest>,
+    /// The default spawn point the server sent (`set_default_spawn_position`; vanilla
+    /// `LevelData.RespawnData`, the compass's target). Starts at the overworld's origin, as
+    /// vanilla's `RespawnData.DEFAULT` does.
+    pub respawn: respawn::RespawnData,
+    /// The level's difficulty and its lock (`handleChangeDifficulty`); a login resets them.
+    pub level_difficulty: difficulty::LevelDifficulty,
+    /// The server's MOTD (`handleServerData`); None until the server sends one.
+    pub server_motd: Option<haste_protocol::haste_core::Component>,
+    /// The server's icon, kept only once it passes `ServerData.validateIcon`.
+    pub server_icon: Option<Vec<u8>>,
+    /// The camera entity (vanilla `Camera.entity`): the player, or the entity a spectator
+    /// spectates (`set_camera`, see [`crate::game::camera_entity`]).
+    pub camera: crate::game::camera_entity::CameraEntity,
 }
 
 impl Session {
@@ -255,6 +289,9 @@ impl Session {
             biome_audio: Vec::new(),
             dimension_music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
             music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
+            ambient_sounds_layers: Default::default(),
+            ambient_sound_handlers: Default::default(),
+            ticking_sounds: Default::default(),
             breaking: HashMap::new(),
             lids: HashMap::new(),
             lid_states: None,
@@ -277,6 +314,8 @@ impl Session {
             maps_version: 0,
             pickup_particles: Vec::new(),
             pickup_rng: Session::new_pickup_rng(),
+            tracking_emitters: Vec::new(),
+            tracking_rng: tracking_emitter::new_random(),
             sound_requests: Vec::new(),
             screen: crate::screen_effects::PortalEffects::default(),
             screen_probe: crate::screen_effects::WorldProbe::default(),
@@ -298,6 +337,14 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            firework_bursts: Vec::new(),
+            totem_emitters: Vec::new(),
+            totem_rng: haste_audio::random::LegacyRandom::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0x5eed),
+            ),
             block_particle_requests: Vec::new(),
             item_particle_requests: Vec::new(),
             explosions: explosion_tracker::ExplosionTracker::default(),
@@ -325,6 +372,11 @@ impl Session {
             mounted_message: false,
             remote_use: HashMap::new(),
             remote_use_sounds: Vec::new(),
+            respawn: respawn::RespawnData::default(),
+            level_difficulty: difficulty::LevelDifficulty::default(),
+            server_motd: None,
+            server_icon: None,
+            camera: Default::default(),
         }
     }
 
@@ -335,38 +387,10 @@ impl Session {
         self.hurt_ticks = crate::net::HURT_TILT_TICKS;
     }
 
-    /// Sets the `minecraft:entity_type` registry entries in id order: the synced registry when
-    /// the server sent one, else the static one from the game data (`registries.json`). The
-    /// two agree on vanilla servers (both are the registry's own order); mods that add entity
-    /// types are unknown here and ride on the default seat, never a panic.
-    pub fn set_entity_type_names(&mut self, names: Vec<Identifier>) {
-        self.entity_type_names = names;
-    }
-
-    /// Sets the `minecraft:attribute` registry entries in id order (see [`attribute_names`]).
-    pub fn set_attribute_names(&mut self, names: Vec<Identifier>) {
-        self.attribute_names = Some(names);
-    }
-
     /// Whether the player started riding since the last call (the "mount.onboard" overlay
     /// message, vanilla `ClientPacketListener.handleSetEntityPassengersPacket`).
     pub fn take_mounted_message(&mut self) -> bool {
         std::mem::take(&mut self.mounted_message)
-    }
-
-    /// Whether a spawned entity's registry index names the firework rocket type.
-    fn is_firework_type(&self, kind: RegistryIndex) -> bool {
-        self.entity_type_names
-            .get(kind.0 as usize)
-            .is_some_and(|n| n.path() == "firework_rocket")
-    }
-
-    /// Whether a spawned entity's registry index names the lightning bolt type (its tick sets
-    /// the sky flash).
-    fn is_lightning_type(&self, kind: RegistryIndex) -> bool {
-        self.entity_type_names
-            .get(kind.0 as usize)
-            .is_some_and(|n| n.path() == "lightning_bolt")
     }
 }
 
@@ -397,6 +421,12 @@ impl Session {
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.remote_use.clear();
+                // A new level and player: the ambient handlers start over and every sound
+                // stops (`Minecraft.updateLevelInEngines`); the dimension layer re-resolves.
+                self.ambient_sound_handlers
+                    .respawn(&mut self.ticking_sounds, true);
+                self.ambient_sounds_layers.dimension =
+                    crate::app::biomes::ambient_sounds::dimension_ambient_sounds(regs, &dim);
                 self.dimension = dim;
                 self.world_border = crate::world_border::WorldBorder::default();
                 self.entity_id = EntityId(l.entity_id);
@@ -497,11 +527,18 @@ impl Session {
         let Some(p) = self.apply_chat(p) else {
             return;
         };
+        let Some(p) = self.apply_animate(p, entities) else {
+            return;
+        };
+        let Some(p) = self.apply_look_at(p, entities) else {
+            return;
+        };
         self.apply_misc(p, entities, regs);
     }
 }
 
 pub mod account;
+mod animate;
 mod arrow_world;
 mod block_entity_types;
 mod block_events;
@@ -510,15 +547,19 @@ mod chat;
 pub mod chat_session;
 mod counters;
 pub(crate) mod damage;
+mod difficulty;
 mod driver;
 mod effects;
 mod entities;
 mod explosion;
 mod explosion_tracker;
+pub(crate) mod fireworks;
 mod fov;
 mod item_world;
 mod lightmap;
+mod look_at;
 mod maps;
+mod minecart;
 mod misc;
 pub(crate) mod pack_prompt;
 mod particles;
@@ -526,9 +567,13 @@ pub mod pickup;
 mod player_state;
 mod registries;
 mod remote_use;
+mod respawn;
+mod server_data;
 mod session_tick;
 mod sinks;
 mod sync_block_state;
+mod totem;
+mod tracking_emitter;
 mod vehicle;
 mod weather;
 mod world;

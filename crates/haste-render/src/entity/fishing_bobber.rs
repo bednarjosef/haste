@@ -39,6 +39,12 @@ pub struct BobberOwner {
 }
 
 impl EntityRenderer {
+    /// This frame's fishing bobbers, copied into the renderer's reused list.
+    pub fn set_fishing_bobbers(&mut self, bobbers: &[FishingBobber]) {
+        self.fishing_bobbers.clear();
+        self.fishing_bobbers.extend_from_slice(bobbers);
+    }
+
     /// Whether an entity's hand holds a cast rod: `FishingRodCast.get` for the stack in that
     /// hand, true while the entity's bobber is out and the hand is its holding arm.
     pub(super) fn rod_is_cast(&self, entity: haste_core::EntityId, right: bool) -> bool {

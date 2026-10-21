@@ -32,6 +32,45 @@ pub(super) fn play_own_sounds(driver: &mut NetDriver, shared: &Shared) {
     }
 }
 
+/// The local player's ambient sound handlers (vanilla `LocalPlayer.tick` ends by ticking
+/// them, after `baseTick`'s `updateIsUnderwater`), run once the player's tick ran: only
+/// while the player ticks at all (`hasClientLoaded`). They read the player's position,
+/// eye and water state this tick, the `audio/ambient_sounds` attribute at the feet and
+/// the light around the eye; what they start plays through the output (nothing without
+/// one, the state still advances).
+pub(super) fn tick_ambient_handlers(driver: &mut NetDriver, shared: &Shared) {
+    let s = &mut driver.session;
+    let mut sound = shared.sound.lock();
+    let mut silent = crate::sound::NoSoundManager;
+    let out: &mut dyn crate::sound::SoundManager = match sound.as_mut() {
+        Some(sounds) => sounds,
+        None => &mut silent,
+    };
+    if !(s.player.loaded && s.player.has_position) {
+        // The player does not tick; a pending level-change stop still goes out.
+        s.ticking_sounds.flush_stop_all(out);
+        return;
+    }
+    let p = &s.player;
+    let player = crate::sound::AmbientPlayer {
+        pos: p.state.pos,
+        eye_y: p.state.pos.y + p.eye_height(),
+        under_water: p.state.eyes_in_water,
+        spectator: p.game_mode == haste_core::game::GameMode::Spectator,
+    };
+    let world = shared.world.read();
+    let light = crate::sound::WorldBrightness {
+        world: &*world,
+        has_skylight: world.dimension().has_skylight,
+    };
+    let level = crate::sound::AmbientLevel {
+        sounds: s.ambient_sounds_layers.at(&world, player.pos),
+        light: &light,
+    };
+    s.ambient_sound_handlers
+        .tick(&player, &level, &mut s.ticking_sounds, out);
+}
+
 /// The sound output's tick: listener from the camera (vanilla's
 /// `SoundEngine.updateSource(Camera)` — the third-person perspectives move it off the
 /// eye), the camera's music volume target (vanilla `Minecraft.getMusicVolume`, resolved
@@ -68,11 +107,25 @@ pub(super) fn tick_listener(
         tracing::info!("music volume target {} -> {}", s.music_volume, target);
         s.music_volume = target;
     }
+    // The ticking sound instances (vanilla `SoundEngine.tickInGameSound`): fades,
+    // self-stops and played-through sounds, with the player's water state this tick.
+    let ticking_player = s
+        .ambient_sound_handlers
+        .ticking_player(s.player.state.eyes_in_water);
     let mut sound = shared.sound.lock();
+    match sound.as_mut() {
+        Some(sounds) => s.ticking_sounds.tick(&ticking_player, sounds),
+        None => s
+            .ticking_sounds
+            .tick(&ticking_player, &mut crate::sound::NoSoundManager),
+    }
     if let Some(sounds) = sound.as_mut() {
         sounds.set_music_volume(target);
         let situation =
             crate::sound::music_situation(s.player.game_mode, s.player.state.eyes_in_water);
         sounds.tick(listener.0, listener.1, listener.2, situation);
+        // The subtitled sounds this tick played, to the subtitle overlay (vanilla
+        // `SoundEngine.notifyListeners`, batched per tick).
+        sounds.publish_played_sounds();
     }
 }

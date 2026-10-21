@@ -25,8 +25,11 @@ mod block_entities;
 mod block_model;
 mod boat;
 mod cape;
+mod display;
 mod dragon_fireball;
 mod equipment;
+#[cfg(test)]
+mod equipment_tests;
 mod experience_orb;
 mod falling_block;
 mod first_person;
@@ -35,6 +38,13 @@ mod flame;
 #[cfg(test)]
 mod flame_tests;
 mod item;
+mod item_activation;
+#[cfg(test)]
+mod item_activation_tests;
+mod leash;
+#[cfg(test)]
+mod leash_tests;
+pub use leash::LeashLine;
 mod item_entity;
 mod item_frame;
 pub mod map;
@@ -47,30 +57,48 @@ mod map_tests;
 mod minecart;
 #[cfg(test)]
 mod minecart_tests;
+mod model_equipment;
 mod painting;
 mod pipelines;
 mod piston;
 mod shadow;
+mod should_render;
 mod sign;
+mod spin_attack;
+#[cfg(test)]
+mod spin_attack_tests;
 #[cfg(test)]
 mod tests;
 mod thrown_item;
 #[cfg(test)]
 mod thrown_item_tests;
 mod tnt;
+mod world_glyph;
 
 mod armor_stand;
+mod arrow_layer;
+mod bee_stinger_layer;
 mod hand;
 mod humanoid;
 mod item_display;
 mod model_parts;
+mod parrot_on_shoulder;
+#[cfg(test)]
+mod parrot_on_shoulder_tests;
+mod stuck_in_body;
+#[cfg(test)]
+mod stuck_in_body_tests;
+mod stuck_layers;
+mod tick_pair;
+pub use stuck_layers::{StuckInput, StuckModels};
+pub use tick_pair::TickPair;
 mod vertex;
 
 pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matrix};
 #[cfg(test)]
 use hand::{arm_model, hand_root_matrix, item_arm_matrix};
 pub(crate) use humanoid::{elytra_model, humanoid_armor};
-use humanoid::{missing_item_model, missing_texture, placeholder_texture};
+use humanoid::{missing_item_model, missing_texture, placeholder_texture, white_texture};
 use item_display::item_model_bbox;
 pub(crate) use item_display::{
     argb_linear, item_display_matrix, item_frame_item_transform, item_frame_transform,
@@ -81,6 +109,7 @@ pub(crate) use model_parts::{
     aabb_in_frustum, emit_part, emit_part_tinted, model_extents, model_top, part_matrix,
     pose_without_hidden,
 };
+pub use should_render::should_render_at_sqr_distance;
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
 pub(crate) use vertex::{
@@ -91,20 +120,6 @@ pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha, Enti
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
-/// Vanilla `Entity.shouldRenderAtSqrDistance`: whether an entity whose model is `size`
-/// blocks and has entity `scale` should be drawn at squared distance `dist_sq`, given the
-/// `view_scale` (`Entity.viewScale`, from `options.entityDistanceScaling`).
-pub fn should_render_at_sqr_distance(
-    size: f32,
-    entity_scale: f32,
-    dist_sq: f64,
-    view_scale: f32,
-) -> bool {
-    let size = if size.is_nan() { 1.0 } else { size };
-    let limit = 64.0 * size.max(1.0) * entity_scale * view_scale;
-    dist_sq < f64::from(limit * limit)
-}
-
 pub(crate) use item_entity::{
     item_entity_bob, item_entity_copies, item_entity_lift, item_entity_spin,
 };
@@ -117,7 +132,12 @@ const PLAYER_SCALE: f32 = 0.9375;
 /// item frames, ground for dropped items, thirdperson for held items on mobs and players).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemDisplay {
+    /// `none`: no display transform (item displays default to it).
+    None,
     FirstPerson,
+    /// `firstperson_lefthand`: drawn through the right hand's entry with the left-hand fix
+    /// (the item models' own left entry is not loaded yet).
+    FirstPersonLeft,
     /// `thirdperson_righthand` (`ItemInHandLayer`, the right hand).
     ThirdPersonRight,
     /// `thirdperson_lefthand`: the same transform with vanilla's left-hand fix (translation.x
@@ -125,6 +145,8 @@ pub enum ItemDisplay {
     ThirdPersonLeft,
     /// `head` (`CustomHeadLayer`: heads and hats worn on the head).
     Head,
+    /// `gui` (inventory slots; item displays may name it too).
+    Gui,
     Fixed,
     Ground,
     /// `on_shelf` (`ShelfRenderer`: items on a shelf block, small and sunk into the board).
@@ -198,33 +220,11 @@ fn body_matrix(b: &BodyTransform) -> Mat4 {
     m
 }
 
-/// A per-tick value the renderer lerps by partial tick, the way a vanilla render state
-/// extracts one (`Mth.lerp(partialTicks, xO, x)`): the value at the start and at the end of the
-/// last game tick. The client owns the tick, the renderer only interpolates it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TickPair {
-    /// The value at the end of the previous tick (vanilla's `oX` field).
-    pub start: f32,
-    /// The value at the end of the last tick.
-    pub end: f32,
-}
-
-impl TickPair {
-    /// A value that never changes.
-    pub const fn fixed(v: f32) -> TickPair {
-        TickPair { start: v, end: v }
-    }
-
-    /// `Mth.lerp(partial, start, end)` at `partial` (0..1) through the tick.
-    pub fn at(self, partial: f32) -> f32 {
-        self.start + (self.end - self.start) * partial
-    }
-}
-
 /// What the first-person view holds (vanilla `FirstPersonHandsAndItemsRenderState`): see
 /// [`first_person`](self::first_person).
 pub use first_person::FirstPerson;
 pub use fishing_bobber::{BobberOwner, FishingBobber, LINE_POINTS};
+pub use item_activation::{item_activation_pose, ItemActivation};
 
 /// A name tag to draw: world anchor (above the head) and the text.
 #[derive(Clone, Debug)]
@@ -264,6 +264,9 @@ pub struct EntityRenderer {
     hand_buffer: wgpu::Buffer,
     hand_capacity: usize,
     hand: Vec<EntityVertex>,
+    /// The item a totem pop shows and its countdown (`set_item_activation`), drawn into the
+    /// hand pass by `prepare_hand` in every perspective.
+    item_activation: Option<ItemActivation>,
     item_names: Vec<Identifier>,
     /// Item models by registry index and the `fishing_rod/cast` property they resolve with.
     item_models: HashMap<(u32, bool), Option<Arc<haste_assets::ItemModel>>>,
@@ -308,6 +311,8 @@ pub struct EntityRenderer {
     water_mask_pipeline: wgpu::RenderPipeline,
     /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
     pub beams: crate::blockentity::BeamPipelines,
+    /// The display entities' per-frame state and text passes (`DisplayRenderer`).
+    displays: display::Displays,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
     font: Arc<haste_assets::BitmapFont>,
     /// Equipment asset info (`equipment/<asset>.json`), by asset id, loaded once (`None` for an
@@ -324,7 +329,12 @@ pub struct EntityRenderer {
     map_decoration_names: Vec<Identifier>,
     /// This frame's fishing bobbers (set by the client; the list is reused, not rebuilt).
     fishing_bobbers: Vec<FishingBobber>,
+    /// This frame's stuck and shoulder state (by id) and the models they draw (`set_stuck`).
+    stuck: Vec<StuckInput>,
+    stuck_models: StuckModels,
     pub drawn: u32,
+    /// The leash ropes to draw this frame (set by the client through [`Self::set_leash_lines`]).
+    leash_lines: Vec<leash::LeashLine>,
 }
 
 impl EntityRenderer {
@@ -337,11 +347,6 @@ impl EntityRenderer {
     /// `options.entityDistanceScaling`, 0.5..=5.0, default 1.0).
     pub fn set_view_scale(&mut self, scale: f32) {
         self.view_scale = scale;
-    }
-    /// This frame's fishing bobbers, copied into the renderer's reused list.
-    pub fn set_fishing_bobbers(&mut self, bobbers: &[FishingBobber]) {
-        self.fishing_bobbers.clear();
-        self.fishing_bobbers.extend_from_slice(bobbers);
     }
     /// Poses every entity into the vertex buffer. `skip` is the entity the camera is (not drawn
     /// in first person). Positions are camera-relative (`camera` subtracted in f64) like the
@@ -360,28 +365,11 @@ impl EntityRenderer {
         self.mask_vertices.clear();
         self.nametags.clear();
         self.drawn = 0;
-        for e in entities {
-            if Some(e.id) == skip {
-                continue;
-            }
-            // Vanilla `EntityRenderer.shouldRender`: skip entities beyond
-            // `64 * boundingBox.size` blocks (`Entity.shouldRenderAtSqrDistance`) or
-            // outside the camera frustum (the AABB inflated by 0.5, `Frustum.isVisible`).
-            // Same look: those entities would draw nothing visible anyway.
-            let (size, half) = model_extents(&e.model.root);
-            let rel = e.pos - camera;
-            let dist2 = rel.length_squared();
-            // `AbstractArrow.shouldRenderAtSqrDistance` overrides the generic limit with the
-            // bounding box diagonal times ten, so arrows stay visible much farther out.
-            let visible = if matches!(&e.decoration, Some(Decoration::Arrow(_))) {
-                arrow::arrow_should_render(dist2, e.width, e.height, view_scale)
-            } else {
-                should_render_at_sqr_distance(size, e.scale, dist2, view_scale)
-            };
-            if !visible {
-                continue;
-            }
-            if !aabb_in_frustum(frustum, rel, half + 0.5) {
+        self.displays.begin_frame();
+        for (index, e) in entities.iter().enumerate() {
+            if Some(e.id) == skip
+                || !should_render::should_render(e, e.pos - camera, frustum, view_scale)
+            {
                 continue;
             }
             let (sky, block) = e.light;
@@ -432,6 +420,7 @@ impl EntityRenderer {
                         self.emit_falling_block(e, f, camera, light, assets)
                     }
                     Decoration::PrimedTnt(t) => self.emit_primed_tnt(e, t, camera, light, assets),
+                    Decoration::Display(d) => self.emit_display(index, e, d, camera, light, assets),
                 }
                 // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer —
                 // a burning small fireball carries its `displayFireAnimation` flames on top
@@ -506,6 +495,10 @@ impl EntityRenderer {
                 // Overlay layers: the same transform and pose, each with its own texture and
                 // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
                 for overlay in e.overlays.iter().flatten() {
+                    // The riptide spin is drawn below, invisible or not.
+                    if spin_attack::is_spin_layer(&overlay.model) {
+                        continue;
+                    }
                     // The water patch is not a coloured layer: its triangles go to the
                     // depth-only mask buffer (`BoatRenderer.submitTypeAdditions`).
                     if boat::is_water_patch(&overlay.model) {
@@ -531,6 +524,8 @@ impl EntityRenderer {
                 }
             }
             self.emit_equipment(e, root, light, assets);
+            self.emit_spin_attack(e, root, light, assets);
+            self.emit_stuck(e, root, light, assets);
             // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
             if e.display_fire {
                 self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
@@ -555,6 +550,16 @@ impl EntityRenderer {
             }
         }
         self.emit_fishing_bobbers(camera, orientation, assets);
+        // `LeashFeatureRenderer`: the ropes after the entities, on the white texel so the
+        // colour is the rope's own.
+        if !self.leash_lines.is_empty() {
+            let white = self.texture_rect(&parse_tex("haste:white"), assets);
+            for line in &self.leash_lines {
+                leash::push_leash(&mut self.vertices, line, camera, white);
+            }
+        }
+        // `DisplayRenderer.TextDisplayRenderer`: the text displays, back to front.
+        self.emit_text_displays(entities, camera);
         if self.vertices.len() > self.vertex_capacity {
             self.vertex_capacity = self.vertices.len().next_power_of_two();
             self.vertex_buffer = make_vertex_buffer(&self.device, self.vertex_capacity);
@@ -579,9 +584,6 @@ impl EntityRenderer {
     /// Draws into the main pass (camera bind group at group 0); the boats' water masks ride
     /// along after the models (vanilla submits the patch inside the boat's own submission).
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
-        if self.vertices.is_empty() && self.mask_vertices.is_empty() {
-            return 0;
-        }
         let mut calls = 0;
         if !self.vertices.is_empty() {
             pass.set_pipeline(&self.pipeline);
@@ -590,6 +592,9 @@ impl EntityRenderer {
             pass.draw(0..self.vertices.len() as u32, 0..1);
             calls += 1;
         }
-        calls + boat::draw_masks(self, pass)
+        calls += boat::draw_masks(self, pass);
+        // The text displays' translucent text after every solid entity (vanilla draws the
+        // text features after the solid ones).
+        calls + self.displays.text.draw(pass, &self.bind_group)
     }
 }

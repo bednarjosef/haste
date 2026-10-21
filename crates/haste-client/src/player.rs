@@ -39,6 +39,7 @@ use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::packets::play::serverbound::{self as sb, input_flags, move_flags};
 use haste_protocol::{ClientboundPlay, Login, ServerboundPlay};
 use level_load::LevelLoad;
+use on_pos::supporting_block_state;
 
 /// A position change is sent when its squared length exceeds this (2.0E-4 blocks).
 pub const POSITION_THRESHOLD_SQ: f64 = 2.0e-4 * 2.0e-4;
@@ -265,6 +266,9 @@ pub struct LocalPlayer {
     /// halves the distance to the pose's eye height, and the render lerps the two values.
     camera_eye: f32,
     camera_eye_old: f32,
+    /// The camera entity when it is not us (vanilla `Minecraft.getCameraEntity`), set by the
+    /// session before each tick (see the `camera` module).
+    camera_entity: Option<crate::game::camera_entity::CameraEntitySnapshot>,
     look_offset: (f32, f32),
     last_input_look: (f32, f32),
     /// The previous tick's forward impulse (`forward && !back`), for the sprint double tap's
@@ -314,6 +318,9 @@ pub struct LocalPlayer {
     /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
     /// progress and bob, filled for the render state at the end of each tick.
     pub hand: hand::Hand,
+    /// Vanilla `LocalPlayer.itemActivation()`: the item shown in front of us after a totem
+    /// pops (`displayItemActivation`), ticked by the game tick (`GameRenderer.tick`).
+    pub item_activation: item_activation::ItemActivation,
 }
 
 impl LocalPlayer {
@@ -353,6 +360,7 @@ impl LocalPlayer {
             prev_pos: DVec3::ZERO,
             camera_eye: 0.0,
             camera_eye_old: 0.0,
+            camera_entity: None,
             look_offset: (0.0, 0.0),
             last_input_look: (0.0, 0.0),
             last_input_forward: false,
@@ -374,6 +382,7 @@ impl LocalPlayer {
             int: interact::Interaction::default(),
             hands_busy: false,
             hand: hand::Hand::new(),
+            item_activation: item_activation::ItemActivation::default(),
         };
         p.state.on_ground = true;
         // Vanilla's camera starts its eye height at 0 and rises on the first level tick; here
@@ -454,20 +463,6 @@ impl LocalPlayer {
             ((t - 100.0) / 500.0).clamp(0.0, 1.0)
         };
         a * 0.6 + b * 0.39999998
-    }
-
-    /// Eye position and look angles interpolated by partial tick, for the camera. The eye
-    /// height is the camera's own smoothed pair (vanilla `Camera.setup` lerps
-    /// `eyeHeightOld`/`eyeHeight`, not the entity's eye height).
-    pub fn camera(&self, partial_tick: f32) -> (DVec3, f32, f32) {
-        let t = partial_tick.clamp(0.0, 1.0);
-        let pos = self.prev_pos.lerp(self.state.pos, t as f64);
-        let eye = self.camera_eye_old + (self.camera_eye - self.camera_eye_old) * t;
-        (
-            pos + DVec3::new(0.0, f64::from(eye), 0.0),
-            self.state.yaw,
-            self.state.pitch,
-        )
     }
 
     /// Consumes the packets about the local player. Returns false for packets it does not handle.
@@ -617,7 +612,7 @@ impl LocalPlayer {
         true
     }
 
-    fn set_look(&mut self, yaw: f32, pitch: f32) {
+    pub(crate) fn set_look(&mut self, yaw: f32, pitch: f32) {
         let pitch = pitch.clamp(-90.0, 90.0);
         self.state.yaw = yaw;
         self.state.pitch = pitch;
@@ -868,7 +863,7 @@ impl LocalPlayer {
         // while the player has no position yet: the camera halves its distance to the target
         // each tick (`eyeHeight += (getEyeHeight() - eyeHeight) * 0.5`).
         self.camera_eye_old = self.camera_eye;
-        self.camera_eye += (self.eye_height() as f32 - self.camera_eye) * 0.5;
+        self.camera_eye += (self.camera_eye_target() - self.camera_eye) * 0.5;
         self.flush_pending_accept(out);
         if !self.level_ready_gate(ctx.world, out) {
             // `Minecraft.tick` ends with ClientTickEnd every tick a level exists — before
@@ -975,9 +970,7 @@ impl LocalPlayer {
         if self.sprint_trigger_time > 0 {
             self.sprint_trigger_time -= 1;
         }
-        let mut phys_input = *input;
-        phys_input.yaw = input.yaw + self.look_offset.0;
-        phys_input.pitch = (input.pitch + self.look_offset.1).clamp(-90.0, 90.0);
+        let mut phys_input = self.movement_input(input);
         // What the physics tick's sprint rules cannot see (vanilla `isSprintingPossible`'s
         // blindness and food terms, `isSlowDueToUsingItem`).
         self.state.sprint_blocked =
@@ -1181,8 +1174,10 @@ impl LocalPlayer {
             self.sent.sprinting = self.state.sprinting;
         }
 
-        // 6. Movement.
-        self.send_movement(out);
+        // 6. Movement (`LocalPlayer.sendPosition`: only while we are the camera entity).
+        if self.is_controlled_camera() {
+            self.send_movement(out);
+        }
 
         // 6. End of tick.
         out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
@@ -1292,18 +1287,6 @@ impl LocalPlayer {
     }
 }
 
-/// The block supporting the player at `pos` (vanilla `Entity.getOnPosLegacy`:
-/// the block at feet y minus 0.2), for step and fall sounds.
-fn supporting_block_state(pos: DVec3, world: &dyn BlockView) -> Option<haste_core::BlockStateId> {
-    let p = BlockPos::new(
-        pos.x.floor() as i32,
-        (pos.y - 0.2).floor() as i32,
-        pos.z.floor() as i32,
-    );
-    let state = world.block_state(p);
-    (state != haste_core::BlockStateId::AIR).then_some(state)
-}
-
 /// `player_input` flags for the held keys.
 pub fn input_bits(i: &InputState) -> u8 {
     let mut f = 0;
@@ -1343,10 +1326,13 @@ impl TickCtx<'_> {
     }
 }
 
+mod camera;
 pub mod climbable;
 mod creative_flight;
 pub mod interact;
+pub mod item_activation;
 mod level_load;
+mod on_pos;
 mod riding;
 pub mod script;
 pub mod spectator;

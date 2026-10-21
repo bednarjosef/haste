@@ -140,7 +140,10 @@ impl EntityRenderer {
     ) {
         for part in &model.parts {
             let (display, left) = match display {
+                ItemDisplay::None => (&haste_assets::DisplayTransform::IDENTITY, false),
                 ItemDisplay::FirstPerson => (&part.firstperson, false),
+                ItemDisplay::FirstPersonLeft => (&part.firstperson, true),
+                ItemDisplay::Gui => (&part.gui, false),
                 ItemDisplay::ThirdPersonRight => (&part.thirdperson, false),
                 // `ItemTransforms.getTransform(THIRD_PERSON_LEFT_HAND)` is the model's own
                 // left entry (its right entry when it names no left one), and the left-hand

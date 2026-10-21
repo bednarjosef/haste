@@ -4,7 +4,7 @@ crates/haste-assets/src/font.rs 626
 crates/haste-assets/src/item.rs 650
 crates/haste-assets/src/packstack.rs 722
 crates/haste-client/src/ambient_particles.rs 614
-crates/haste-client/src/app.rs 4163
+crates/haste-client/src/app.rs 4113
 crates/haste-client/src/boat.rs 871
 crates/haste-client/src/net/tests.rs 1785
 crates/haste-client/src/player/interact/tests.rs 2172
@@ -14,9 +14,9 @@ crates/haste-client/src/script.rs 1159
 crates/haste-client/src/sound/tests.rs 1163
 crates/haste-data/src/blocks.rs 635
 crates/haste-entity/src/animation.rs 714
-crates/haste-entity/src/registry.rs 1146
+crates/haste-entity/src/registry.rs 930
 crates/haste-entity/src/riding.rs 640
-crates/haste-entity/src/store.rs 824
+crates/haste-entity/src/store.rs 658
 crates/haste-jvm/src/host.rs 622
 crates/haste-jvm/src/proxies.rs 630
 crates/haste-jvm/tests/jvm.rs 2750

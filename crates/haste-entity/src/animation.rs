@@ -305,7 +305,7 @@ pub fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> BodyTransfo
         let mut fall = (death - 1.0) / 20.0 * 1.6;
         fall = fall.sqrt().min(1.0);
         b.push(BodyOp::RotateZ((fall * 90.0).to_radians()));
-    } else if e.pose == Pose::SpinAttack {
+    } else if e.metadata.living.auto_spin_attack {
         b.push(BodyOp::RotateX((-90.0 - x_rot).to_radians()));
         b.push(BodyOp::RotateY((age * -75.0).to_radians()));
     } else if e.pose == Pose::Sleeping {
@@ -337,7 +337,7 @@ pub fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> BodyTransfo
     if e.is_player_type {
         if e.metadata.shared.elytra_flying {
             let scale = fall_flying_scale(e.fall_flying_ticks);
-            if e.pose != Pose::SpinAttack {
+            if !e.metadata.living.auto_spin_attack {
                 b.push(BodyOp::RotateX((scale * (-90.0 - x_rot)).to_radians()));
             }
         } else {

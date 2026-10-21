@@ -36,8 +36,8 @@ impl Session {
             P::GameEvent(g) if g.event == 7 => self.weather.set_rain_level(g.value),
             P::GameEvent(g) if g.event == 8 => self.weather.set_thunder_level(g.value),
             // The world border (vanilla `ClientPacketListener`'s border handlers): the
-            // interaction step gates its packets on it. The warning distance and time are
-            // not modelled yet.
+            // interaction step gates its packets on it, the renderer draws its wall and the
+            // HUD's vignette warns from it.
             P::InitializeBorder(b) => {
                 self.world_border
                     .initialize(b.x, b.z, b.old_diameter, b.new_diameter, b.speed)
@@ -48,6 +48,10 @@ impl Session {
                     .set_lerp_size(s.old_diameter, s.new_diameter, s.speed)
             }
             P::SetBorderSize(s) => self.world_border.set_size(s.diameter),
+            P::SetBorderWarningDelay(w) => self.world_border.set_warning_time(w.warning_time),
+            P::SetBorderWarningDistance(w) => {
+                self.world_border.set_warning_blocks(w.warning_blocks)
+            }
             _ => return Some(p),
         }
         None

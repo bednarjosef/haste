@@ -15,6 +15,22 @@ pub(crate) fn pixel_units() -> Mat4 {
     Mat4::from_scale(Vec3::splat(16.0))
 }
 
+/// `EquipmentLayerRenderer.getColorForLayer` as a tint: a dyeable layer takes the stack's dye
+/// (made opaque, `DyedItemColor.getOrDefault`), else its undyed colour, and is not drawn at all
+/// (`None`, vanilla's colour 0) when it has neither; any other layer draws untinted.
+pub(crate) fn layer_tint(
+    layer: &haste_assets::EquipmentLayer,
+    dye: Option<u32>,
+) -> Option<[f32; 3]> {
+    match layer.dyeable {
+        Some(d) => dye
+            .map(|c| c | 0xFF00_0000)
+            .or(d.color_when_undyed)
+            .map(argb_linear),
+        None => Some([1.0; 3]),
+    }
+}
+
 impl EntityRenderer {
     /// Draws an entity's equipment on top of its model (already emitted at `root`): the held
     /// items (`ItemInHandLayer`) and armour (`HumanoidArmorLayer`). Unknown items and equipment
@@ -95,13 +111,9 @@ impl EntityRenderer {
             };
             let mut out = std::mem::take(&mut self.vertices);
             for layer in info.layers_of(layer_type) {
-                // `EquipmentLayerRenderer.getColorForLayer`: the stack's dye, else the layer's
-                // undyed colour, else no tint.
-                let tint = piece
-                    .dye
-                    .or(layer.dyeable)
-                    .map(argb_linear)
-                    .unwrap_or([1.0; 3]);
+                let Some(tint) = layer_tint(layer, piece.dye) else {
+                    continue;
+                };
                 let rect = self.texture_rect(&layer.texture, assets);
                 // A small stand's armour goes through the small layer's per-part scale (the
                 // armour model is authored with big cubes and small pivots, like the body).
@@ -140,11 +152,9 @@ impl EntityRenderer {
                 let elytra = elytra_model();
                 let wings_root = root * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.125));
                 for layer in info.layers_of("wings") {
-                    let tint = piece
-                        .dye
-                        .or(layer.dyeable)
-                        .map(argb_linear)
-                        .unwrap_or([1.0; 3]);
+                    let Some(tint) = layer_tint(layer, piece.dye) else {
+                        continue;
+                    };
                     let texture = cape::player_elytra_texture(e)
                         .filter(|_| layer.use_player_texture)
                         .unwrap_or(&layer.texture);
@@ -164,6 +174,9 @@ impl EntityRenderer {
             }
             self.vertices = out;
         }
+        // The mobs' own equipment layers (body armour, saddles, llama decor) on their layer
+        // models.
+        self.emit_model_equipment(e, root, light, assets);
         // Custom head (vanilla `CustomHeadLayer`): the head-slot item when it is not armour
         // (pumpkins, heads), through the head part's animated transform.
         if let Some(idx) = e.head_item {

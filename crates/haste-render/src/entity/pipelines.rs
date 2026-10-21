@@ -416,7 +416,14 @@ impl EntityRenderer {
         });
         let mask_capacity = 256;
         let mask_buffer = crate::entity::boat::make_mask_buffer(&device, mask_capacity);
+        let displays = display::Displays::new(display::TextPass::new(
+            &device,
+            &pipeline_layout,
+            &shader,
+            target_format,
+        ));
         EntityRenderer {
+            displays,
             device,
             queue,
             pipeline,
@@ -435,6 +442,7 @@ impl EntityRenderer {
             hand_buffer,
             hand_capacity: 1024,
             hand: Vec::new(),
+            item_activation: None,
             item_names: Vec::new(),
             item_models: HashMap::new(),
             arm_models: [None, None, None, None, None, None, None, None],
@@ -454,6 +462,8 @@ impl EntityRenderer {
             portal_capacity: 256,
             beam_radius_scale: 1.0,
             view_scale: 1.0,
+            stuck: Vec::new(),
+            stuck_models: Default::default(),
             mask_vertices: Vec::new(),
             mask_buffer,
             mask_capacity,
@@ -472,6 +482,7 @@ impl EntityRenderer {
             map_decoration_names: Vec::new(),
             fishing_bobbers: Vec::new(),
             drawn: 0,
+            leash_lines: Vec::new(),
         }
     }
 }

@@ -57,6 +57,21 @@ fn stereo_samples_pass_through_interleaved_and_untouched() {
 }
 
 #[test]
+fn looping_samples_start_over_at_the_end() {
+    // A looping instance (the ambient loops) plays on from the start, never ending, with
+    // no length to report.
+    let decoded = sound(vec![0.2, 0.6, 0.4, 0.8], 2);
+    let mut mono = CachedSamples::new(&decoded).looping(true);
+    let got: Vec<f32> = (0..5).map(|_| mono.next().unwrap()).collect();
+    assert_eq!(got, [0.4, 0.6, 0.4, 0.6, 0.4]);
+    assert_eq!(mono.total_duration(), None);
+    let mut stereo = StereoSamples::new(&decoded).looping(true);
+    let got: Vec<f32> = (0..6).map(|_| stereo.next().unwrap()).collect();
+    assert_eq!(got, [0.2, 0.6, 0.4, 0.8, 0.2, 0.6]);
+    assert_eq!(stereo.size_hint().1, None);
+}
+
+#[test]
 fn decode_rejects_non_vorbis_bytes() {
     // A tiny valid Ogg Vorbis file cannot be produced without an encoder dependency
     // (rodio only decodes), so the decode-worker test covers the rejection path; the
@@ -74,6 +89,7 @@ fn silent_output_accepts_every_call() {
         path: "minecraft/sounds/dig/stone1.ogg".into(),
         assets: None,
         stream: false,
+        looping: false,
         gains: (1.0, 1.0),
         pitch: 1.0,
     });
@@ -82,6 +98,7 @@ fn silent_output_accepts_every_call() {
         path: "sounds/x.ogg".into(),
         assets: None,
         stream: true,
+        looping: true,
         gains: (0.0, 0.0),
         pitch: 0.5,
     });
@@ -138,6 +155,54 @@ fn silent_system(assets: haste_assets::Assets) -> SoundSystem {
     )
     .unwrap();
     SoundSystem::with_output(events, assets, AudioOutput::silent())
+}
+
+#[test]
+fn instances_change_volume_and_stop_one_by_one() {
+    let Some(assets) = cached_assets() else {
+        return;
+    };
+    let mut system = silent_system(assets);
+    let play = InstancePlay {
+        event: "block.stone.break",
+        source: SoundSource::Ambient,
+        pos: None,
+        volume: 1.0,
+        pitch: 1.0,
+        seed: 1,
+        looping: true,
+    };
+    let first = system.play_instance(&play).unwrap();
+    let second = system.play_instance(&play).unwrap();
+    assert_ne!(first, second);
+    assert!(system.is_instance_active(first));
+    // A ticking instance's new volume reaches its gains on the next tick (unpositioned:
+    // centred, equal on both sides), and only its own.
+    system.set_instance_volume(first, 0.25);
+    system.tick();
+    let gains: Vec<(f32, f32)> = system.engine_gains().collect();
+    assert_eq!(gains[0].0, gains[0].1);
+    assert!((gains[0].0 / gains[1].0 - 0.25).abs() < 1e-6, "{gains:?}");
+    // Stopping one leaves the other playing; a stopped handle answers inactive and
+    // changes nothing any more.
+    system.stop_instance(first);
+    assert!(!system.is_instance_active(first));
+    assert!(system.is_instance_active(second));
+    assert_eq!(system.playing(), 1);
+    system.set_instance_volume(first, 1.0);
+    system.stop_instance(first);
+    assert_eq!(system.playing(), 1);
+    // Not started: an unknown event, or a volume of 0 (vanilla's volume-0 rule).
+    let unknown = InstancePlay {
+        event: "minecraft:not.a.real.event",
+        ..play
+    };
+    assert_eq!(system.play_instance(&unknown), None);
+    let silent = InstancePlay {
+        volume: 0.0,
+        ..play
+    };
+    assert_eq!(system.play_instance(&silent), None);
 }
 
 #[test]

@@ -3,7 +3,7 @@
 //! `store.rs` to keep that file within the size limit; a pure move.
 
 use haste_core::math::Vec3;
-use haste_core::model::EntityInstance;
+use haste_core::model::{BodyTransform, EntityInstance};
 
 use crate::store::{Entity, EntityStore, HURT_TICKS};
 
@@ -47,6 +47,15 @@ impl EntityStore {
             // (`AbstractMinecartRenderer`, `ThrownItemRenderer`, `DragonFireballRenderer`),
             // but keep the entity's own interpolated position. Arrows too (`ArrowRenderer`),
             // keeping the entity's own position.
+            // `DisplayRenderer`: a display draws only once its render state exists, with the
+            // shadow its interpolated state casts.
+            let display = match slot.display {
+                Some(_) => match crate::display::decoration(slot, partial_tick) {
+                    Some(d) => Some(d),
+                    None => continue,
+                },
+                None => None,
+            };
             let minecart_variant = crate::minecart::variant_for_kind(slot.kind);
             let minecart = minecart_variant
                 .map(|v| crate::minecart::decoration(&slot.metadata, v, partial_tick));
@@ -62,6 +71,10 @@ impl EntityStore {
                 || crate::arrow::is_arrow(slot.kind);
             let decoration = minecart
                 .map(haste_core::model::Decoration::Minecart)
+                .or_else(|| {
+                    let d = display.as_ref()?.0.clone();
+                    Some(haste_core::model::Decoration::Display(d))
+                })
                 .or_else(|| {
                     thrown
                         .and_then(|t| crate::thrown_item::decoration(&t, &slot.metadata))
@@ -83,7 +96,11 @@ impl EntityStore {
                         self.default_tnt_state,
                     )
                 });
-            let pos = if non_hanging {
+            // The fence knot sits at the box centre of its block (`crate::leash::knot_center`).
+            let knot = crate::leash::is_knot(slot.kind);
+            let pos = if knot {
+                crate::leash::knot_center(slot.prev_pos.lerp(slot.pos, partial_tick as f64))
+            } else if non_hanging {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             } else {
                 match &decoration {
@@ -122,7 +139,7 @@ impl EntityStore {
             let is_boat = slot.is_boat && !slot.is_player_type;
             let is_armor_stand = !slot.is_player_type
                 && crate::registry::entity_type_name(slot.kind) == Some("minecraft:armor_stand");
-            let pose = if is_boat {
+            let mut pose = if is_boat {
                 crate::boat::setup_anim(slot, &model, partial_tick)
             } else if is_armor_stand {
                 crate::armor_stand::pose(slot, slot.yaw_at(partial_tick))
@@ -134,13 +151,26 @@ impl EntityStore {
             // setupRotations is only the hit wobble (`ArmorStandRenderer.setupRotations` does
             // not call super, so no death tilt or sleeping rotations either); the generic
             // `setupRotations` for everything else.
-            let body = if is_boat {
+            // `ThrownTridentRenderer.submit`'s yaw and pitch turns for tridents.
+            let is_trident = !slot.is_player_type && crate::trident::is_trident(slot.kind);
+            let mut body = if is_boat {
                 crate::boat::body_transform(slot, partial_tick)
+            } else if knot {
+                BodyTransform::default()
             } else if is_armor_stand {
                 crate::armor_stand::body_transform(slot, partial_tick)
+            } else if is_trident {
+                crate::trident::body_transform(
+                    slot.yaw_at(partial_tick),
+                    slot.pitch_at(partial_tick),
+                )
             } else {
                 crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"))
             };
+            // `FireworkEntityRenderer.submit`'s turn of a rocket shot at an angle.
+            if let Some(t) = thrown {
+                crate::thrown_item::flight_turn(&t, &slot.metadata, &mut body);
+            }
             // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
             let body_scale = if texture.contains("creeper") {
                 crate::animation::creeper_scale(slot, partial_tick)
@@ -149,8 +179,11 @@ impl EntityStore {
             };
             // Living models turn with their body yaw; a non-living box follows its yaw
             // (`Entity.getYRot(partialTicks)`).
+            // `LeashKnotRenderer.submit` turns the knot by no yaw at all.
             let yaw = if has_head {
                 slot.body_yaw_at(partial_tick)
+            } else if knot {
+                0.0
             } else {
                 slot.yaw_at(partial_tick)
             };
@@ -171,6 +204,8 @@ impl EntityStore {
             let shadow_strength = type_name
                 .map(crate::registry::shadow_strength_for_name)
                 .unwrap_or(1.0);
+            let (shadow_radius, shadow_strength) =
+                display.map_or((shadow_radius, shadow_strength), |(_, r, s)| (r, s));
             let invisible = slot.metadata.shared.invisible;
             // `EntityRenderer.extractNameTags`/`shouldShowName`: players always show their name
             // (`Player.shouldShowName`), mobs only a visible custom name (`LivingEntity`), both
@@ -200,7 +235,25 @@ impl EntityStore {
             let (hands, equipment, head_item) = if humanoid {
                 crate::local_player::equipment_of(slot, &self.item_components)
             } else {
-                ([None, None], Vec::new(), None)
+                // The mobs' own equipment layers (body armour, saddles, llama decor), each on
+                // its renderer's layer model; the saddles' reins show only while ridden.
+                let pieces = crate::mount_equipment::pieces(
+                    type_name,
+                    is_baby,
+                    &slot.equipment,
+                    &self.item_components,
+                );
+                if pieces
+                    .iter()
+                    .any(|p| p.slot == haste_core::model::EquipmentSlot::Saddle)
+                {
+                    let ridden = self
+                        .riding
+                        .passengers_of(slot.id)
+                        .is_some_and(|p| !p.is_empty());
+                    crate::mount_equipment::saddle_setup_anim(type_name, ridden, &mut pose);
+                }
+                ([None, None], pieces, None)
             };
             let mut inst = EntityInstance {
                 id: slot.id,
@@ -241,6 +294,19 @@ impl EntityStore {
                 equipment,
                 head_item,
             };
+            if minecart_variant.is_some() {
+                minecart_render_pose(&mut inst, slot, partial_tick);
+            }
+            // `EntityRenderer.extractRenderState`'s `passengerOffset`: a passenger of a cart
+            // walking its track steps rides along with the walk.
+            if let Some(offset) = self
+                .riding
+                .vehicle_of(slot.id)
+                .and_then(|v| self.get(v))
+                .and_then(|cart| crate::new_minecart_behavior::passenger_offset(cart, partial_tick))
+            {
+                inst.pos += offset;
+            }
             if slot.is_player_type {
                 crate::avatar::dress_tracked(
                     &self.player_skin(slot.uuid),
@@ -251,5 +317,22 @@ impl EntityStore {
             }
             out.push(inst);
         }
+    }
+}
+
+/// `AbstractMinecartRenderer.extractRenderState`'s behaviour split: a cart on the new
+/// behaviour is drawn at its track walk's point and rotation with `newRender`'s pose (carried
+/// as the instance's body ops); one on the old behaviour keeps its interpolated position and
+/// rotation and no body ops, and is posed from the rails the client snaps per frame
+/// (`oldRender`).
+fn minecart_render_pose(inst: &mut EntityInstance, slot: &Entity, partial_tick: f32) {
+    match crate::new_minecart_behavior::render_pose(slot, partial_tick) {
+        Some((pos, y_rot, x_rot)) => {
+            inst.pos = pos;
+            inst.yaw = y_rot;
+            inst.pitch = x_rot;
+            inst.body = crate::new_minecart_behavior::new_render(y_rot, x_rot);
+        }
+        None => inst.body = haste_core::model::BodyTransform::default(),
     }
 }

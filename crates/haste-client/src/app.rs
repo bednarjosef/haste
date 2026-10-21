@@ -423,8 +423,8 @@ pub fn set_hud_from_args(hud: &str) -> anyhow::Result<()> {
 }
 
 impl Session {
-    /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
-    /// silent so they neither make noise nor measure the audio thread). `address` is the server
+    /// `sound`: the audio output (the device for the window only; screenshots and the benchmark
+    /// have none, scripts a silent one: no noise, no audio thread). `address` is the server
     /// (`--server`, or the address chosen on the multiplayer screen in menu mode).
     /// `existing_ui`: menu mode's UI over its already-started JVM, reused for the HUD so the
     /// screens and chat history survive the transition into the game.
@@ -432,7 +432,7 @@ impl Session {
         username: &str,
         render_distance: Option<u8>,
         address: &str,
-        sound: bool,
+        sound: crate::sound::SoundOutput,
         existing_ui: Option<crate::ui::Ui>,
     ) -> anyhow::Result<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -474,11 +474,7 @@ impl Session {
         driver.session.fov_effect_scale = options.fov_effect_scale;
         let (biomes, biome_climates, type_names, sounds, painting_variants, mob_variants) = {
             let regs = driver.connection().registries();
-            let sounds = if sound {
-                open_sounds(regs, &data, &options.sound)
-            } else {
-                None
-            };
+            let sounds = crate::sound::open_sounds(sound, regs, &data, &options.sound);
             (
                 net::synced_biome_count(regs).unwrap_or(64),
                 biomes::biome_climates(regs),
@@ -813,12 +809,11 @@ pub fn view_bob(
 }
 
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
-/// input layer's look; the player's server rotation offset is added here so mouse look is
-/// smooth at frame rate while the player itself turns once per tick. In the third-person
-/// perspectives the camera is moved off the eye (`game::third_person_camera`). The FOV is the
-/// saved option with vanilla's per-tick FOV modifier interpolated, then the submerged and
-/// death adjustments; the hurt/death tilts and the view bobbing come from the view's per-tick
-/// state (vanilla's `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
+/// input layer's look (plus the server's offset, or the spectated entity's view instead:
+/// `game::camera_entity::frame_eye`), moved off the eye in third person. The FOV is the option
+/// with vanilla's per-tick FOV modifier interpolated, then the submerged and death adjustments;
+/// the hurt/death tilts and the view bobbing come from the view's per-tick state (vanilla's
+/// `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
 #[allow(clippy::too_many_arguments)]
 fn frame_view<'w>(
     shared: &Shared,
@@ -840,11 +835,8 @@ fn frame_view<'w>(
     Option<&'w haste_render::WeatherFrame>,
 ) {
     let partial = game::partial_tick(view.tick_at, now);
-    let eye = game::interpolate(view.prev_eye, view.eye, partial);
-    let look = (
-        yaw + view.look_offset.0,
-        (pitch + view.look_offset.1).clamp(-90.0, 90.0),
-    );
+    // The player's eye and look, or the spectated entity's (`Camera.alignWithEntity`).
+    let (eye, look) = game::camera_entity::frame_eye(view, shared, partial, (yaw, pitch));
     // The world is read for the third-person camera and the fog environment (the fluid and
     // biome at the camera), held for the rest of this function.
     let world = shared.world.read();
@@ -1718,7 +1710,7 @@ impl InputRouter {
     }
 }
 
-fn open_assets() -> anyhow::Result<haste_assets::Assets> {
+pub(crate) fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     open_assets_with(&[])
 }
 
@@ -1783,43 +1775,6 @@ pub fn game_dir() -> std::path::PathBuf {
 /// `FolderRepositorySource` looks (Java side) and `apply_packs` reads (Rust).
 fn default_resource_packs_dir() -> std::path::PathBuf {
     game_dir().join("resourcepacks")
-}
-
-/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
-/// sound-event name table (the server's synced registry or the static one), played
-/// through the default device with the saved volumes. Without an audio device it stays
-/// silent; when the assets or `sounds.json` cannot be read the game runs without sound
-/// (logged) rather than not at all.
-fn open_sounds(
-    regs: &haste_protocol::SyncedRegistries,
-    data: &haste_data::GameData,
-    volumes: &haste_setup::options::SoundVolumes,
-) -> Option<crate::sound::Sounds> {
-    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
-        let mut assets = open_assets()?;
-        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
-        let mut events = haste_audio::sounds::SoundEvents::parse(&bytes)?;
-        // Vanilla's load-time check (SoundManager.prepare's validateSoundResource): a
-        // file listed in sounds.json but absent from the assets is dropped from its
-        // event now, so it can never be picked and fail to play later.
-        let dropped = events.retain_files(|path| assets.has_asset(&format!("assets/{path}")));
-        if dropped > 0 {
-            tracing::warn!("{dropped} sound files listed in sounds.json are missing");
-        }
-        Ok(events)
-    })();
-    match events {
-        Ok(events) => Some(crate::sound::Sounds::new(
-            events,
-            open_assets().ok()?,
-            crate::sound::sound_event_names(regs, data),
-            volumes,
-        )),
-        Err(e) => {
-            tracing::warn!("sound stays off: {e:#}");
-            None
-        }
-    }
 }
 
 /// The client without a server: the vanilla title screen (and everything it opens) in the same
@@ -1973,7 +1928,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         &args.username,
         args.render_distance,
         args.server.as_deref().unwrap(),
-        false,
+        crate::sound::SoundOutput::Off,
         None,
     )?;
     let shared = session.shared.clone();
@@ -2048,13 +2003,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         if hud_on {
-            feed.set_first_person(
-                &shared,
-                &mut renderer,
-                perspective,
-                false,
-                view.first_person,
-            );
+            feed.set_first_person(&shared, &mut renderer, perspective, false, &view);
         }
         let (entities, block_entities) = feed.entities(
             &shared,
@@ -2108,7 +2057,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             // Vanilla's F1 hides the block outline too (`shouldRenderBlockOutline`: hud hidden).
             block_target: hud_on.then_some(block_target).flatten(),
             breaking: &breaking,
-            camera_entity: (!perspective.draws_player()).then_some(session.local.0),
+            camera_entity: game::camera_entity::hidden_entity(
+                &view,
+                !perspective.draws_player(),
+                session.local.0,
+            ),
             spin,
             weather,
         };
@@ -2117,7 +2070,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
-        frame::apply_cloud_options(&mut renderer, &session.options);
+        frame::apply_view_options(&mut renderer, &session.options, view.world_border);
         {
             let snapshot = shared
                 .particle_snapshots
@@ -2253,7 +2206,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &args.username,
             args.render_distance,
             address,
-            false,
+            crate::sound::SoundOutput::Silent,
             None,
         )?),
         None => None,
@@ -2495,7 +2448,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 &args.username,
                                 args.render_distance,
                                 &address,
-                                false,
+                                crate::sound::SoundOutput::Silent,
                                 Some(for_game),
                             ) {
                                 Ok(s) => {
@@ -2538,7 +2491,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                         &args.username,
                                         args.render_distance,
                                         &address,
-                                        false,
+                                        crate::sound::SoundOutput::Silent,
                                         Some(for_game),
                                     ) {
                                         Ok(s) => {
@@ -2745,7 +2698,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     // Log what the frame drew (the check scripts grep this as evidence), like
                     // the in-game branch does.
                     log_script_frame(&gui, &name, &item_names);
-                    save_script_shot(&image, &name)?;
+                    crate::screenshots::save_script_shot(&image, &name)?;
                 }
             }
             if Instant::now() > deadline {
@@ -2789,7 +2742,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &mut renderer,
             game::Perspective::FirstPerson,
             false,
-            view.first_person,
+            view,
         );
         let (entities, block_entities) = feed.entities(
             shared,
@@ -2862,7 +2815,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
-            camera_entity: Some(session_ref.local.0),
+            camera_entity: game::camera_entity::hidden_entity(view, true, session_ref.local.0),
             spin,
             weather,
         };
@@ -2880,7 +2833,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
         renderer.set_view_scale(options.entity_distance_scaling);
-        frame::apply_cloud_options(&mut renderer, &options);
+        frame::apply_view_options(&mut renderer, &options, view.world_border);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);
@@ -2971,19 +2924,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Saves a script `screenshot NAME` action's frame as `target/shots/script-NAME.png`.
-fn save_script_shot(image: &image::RgbaImage, name: &str) -> anyhow::Result<()> {
-    let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    image
-        .save(&path)
-        .with_context(|| format!("saving {}", path.display()))?;
-    println!("script screenshot saved to {}", path.display());
-    Ok(())
-}
-
 /// Windowed mode. With `--server` it joins at once; without it the vanilla title screen opens
 /// (menu mode) and a Join on the multiplayer screen creates the session in the same window.
 /// Leaving the server (pause screen "Disconnect") or being kicked returns to the menus.
@@ -2994,7 +2934,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
             &args.username,
             args.render_distance,
             address,
-            true,
+            crate::sound::SoundOutput::Device,
             None,
         )?),
         None => None,
@@ -3372,8 +3312,9 @@ impl App {
                     .as_ref()
                     .map(|w| w.address())
                     .unwrap_or_else(|| plain_address.clone());
+                let device = crate::sound::SoundOutput::Device;
                 let _ = tx.send(
-                    Session::join(&username, render_distance, &address, true, Some(for_game))
+                    Session::join(&username, render_distance, &address, device, Some(for_game))
                         .map(|s| (s, world)),
                 );
             })

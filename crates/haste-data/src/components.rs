@@ -13,6 +13,7 @@
 //! - `minecraft:consumable`: how long an item is used and the animation played while it is;
 //! - `minecraft:tool`: what an item mines and how fast (physics turns it into its mining `Tool`);
 //! - `minecraft:glider`: the elytra (and any mod item that carries it);
+//! - `minecraft:death_protection`: the totem of undying (and any mod item that carries it);
 //! - `minecraft:use_effects`: what using the item does to the player (sprint, input speed).
 //!
 //! A missing report directory or unreadable file yields an empty table, never an error: the
@@ -45,7 +46,7 @@ pub use use_effects::UseEffects;
 
 use attributes::parse_modifiers;
 use consumable::parse_consumable;
-use patch::{dyed_color_type, PatchReader};
+use patch::PatchTypes;
 use use_effects::parse_use_effects;
 
 /// Item default components: the `equippable` per `minecraft:item` registry index, and the
@@ -54,15 +55,20 @@ use use_effects::parse_use_effects;
 #[derive(Clone, Debug, Default)]
 pub struct ItemComponents {
     equippable: Vec<Option<ItemEquippable>>,
-    /// The `minecraft:dyed_color` data-component-type id, from the registry report. `None` when
-    /// the report is absent.
-    dyed_color_type: Option<i32>,
+    /// `minecraft:max_damage` per `minecraft:item` registry index (`None` for items that do not
+    /// take damage).
+    max_damage: Vec<Option<u32>>,
+    /// The data-component-type ids of the patch components the stack readers decode
+    /// (`dyed_color`, `damage`, ...), from the registry report.
+    patch_types: PatchTypes,
     attributes: HashMap<Identifier, Vec<AttributeModifier>>,
     consumables: HashMap<Identifier, Consumable>,
     /// `minecraft:food` by item: its `can_always_eat` flag (`FoodProperties.canAlwaysEat`).
     foods: HashMap<Identifier, bool>,
     tools: HashMap<Identifier, ToolComponent>,
     gliders: HashSet<Identifier>,
+    /// Items whose default components carry `minecraft:death_protection`.
+    death_protection: HashSet<Identifier>,
     use_effects: HashMap<Identifier, UseEffects>,
     /// Items whose default components carry `minecraft:piercing_weapon` (the spears): the
     /// weapon's optional draw sound, if the report names one.
@@ -79,6 +85,11 @@ impl ItemComponents {
     /// The `equippable` of item `i`, if the report named one.
     pub fn equippable(&self, i: RegistryIndex) -> Option<&ItemEquippable> {
         self.equippable.get(i.0 as usize)?.as_ref()
+    }
+
+    /// The default `minecraft:max_damage` of item `i` (`None` when the item takes no damage).
+    pub fn max_damage(&self, i: RegistryIndex) -> Option<u32> {
+        self.max_damage.get(i.0 as usize).copied().flatten()
     }
 
     /// The item's default `minecraft:attribute_modifiers`.
@@ -149,6 +160,12 @@ impl ItemComponents {
         self.gliders.contains(item)
     }
 
+    /// Whether item's default components carry `minecraft:death_protection` (vanilla
+    /// `ItemStack.has(DataComponents.DEATH_PROTECTION)` for a stack without a patch).
+    pub fn has_death_protection(&self, item: &Identifier) -> bool {
+        self.death_protection.contains(item)
+    }
+
     /// The item's `minecraft:use_effects`, `UseEffects.DEFAULT` when the report named none or
     /// the item is unknown (vanilla's `getOrDefault(USE_EFFECTS, UseEffects.DEFAULT)`: every
     /// item's prototype carries the component).
@@ -180,28 +197,41 @@ impl ItemComponents {
         value
     }
 
-    /// The `dyed_color` (ARGB) a stack's component patch sets, if it is the patch's first added
-    /// component (`DyedItemColor.STREAM_CODEC` is a plain int; vanilla's `getOrDefault` falls
-    /// back to the layer's `color_when_undyed` when absent). A patch whose first add is a
-    /// component Haste cannot skip returns `None` (dye is then simply not applied).
+    /// The `dyed_color` (ARGB) a stack's component patch sets (`DyedItemColor.STREAM_CODEC` is
+    /// a plain int; vanilla's `getOrDefault` falls back to the layer's `color_when_undyed` when
+    /// absent). Read while the patch's adds are components Haste can skip (`damage`,
+    /// `max_damage`, `unbreakable`); behind any other component it returns `None` (dye is then
+    /// simply not applied).
     pub fn dyed_color(&self, components_raw: &[u8]) -> Option<u32> {
-        let dyed = self.dyed_color_type?;
-        let mut r = PatchReader::new(components_raw);
-        let adds = r.var_int()?;
-        let _removes = r.var_int()?;
-        if adds <= 0 {
+        self.patch_types.scan(components_raw).dyed_color
+    }
+
+    /// A stack's wear as `Crackiness.byDamage` takes it: `(damage, max_damage)` when the stack
+    /// is damageable (`ItemStack.isDamageableItem`: it has a max damage and is not
+    /// unbreakable), `None` otherwise. Both values come from the stack's patch when it sets
+    /// them (read like [`dyed_color`](Self::dyed_color)), else from the item's defaults (an
+    /// item with a max damage defaults to 0 damage, `Item.Properties.durability`).
+    pub fn wear(&self, item: RegistryIndex, components_raw: &[u8]) -> Option<(u32, u32)> {
+        let adds = self.patch_types.scan(components_raw);
+        if adds.unbreakable {
             return None;
         }
-        let ty = r.var_int()?;
-        if ty != dyed {
-            return None;
-        }
-        r.i32().map(|c| c as u32)
+        let max = adds.max_damage.or_else(|| self.max_damage(item))?;
+        Some((adds.damage.unwrap_or(0), max))
     }
 
     /// Sets an item's default `minecraft:attribute_modifiers` (tests and tools).
     pub fn insert(&mut self, item: Identifier, modifiers: Vec<AttributeModifier>) {
         self.attributes.insert(item, modifiers);
+    }
+
+    /// Sets item `i`'s default `minecraft:equippable` (tests and tools).
+    pub fn insert_equippable(&mut self, i: RegistryIndex, equippable: ItemEquippable) {
+        let at = i.0 as usize;
+        if self.equippable.len() <= at {
+            self.equippable.resize(at + 1, None);
+        }
+        self.equippable[at] = Some(equippable);
     }
 
     /// Sets an item's default `minecraft:consumable` (tests and tools).
@@ -250,16 +280,18 @@ impl ItemComponents {
         let mut foods: HashMap<Identifier, bool> = HashMap::new();
         let mut tools: HashMap<Identifier, ToolComponent> = HashMap::new();
         let mut gliders: HashSet<Identifier> = HashSet::new();
+        let mut death_protection: HashSet<Identifier> = HashSet::new();
         let mut use_effects: HashMap<Identifier, UseEffects> = HashMap::new();
         let mut piercing_weapons: HashMap<Identifier, Option<String>> = HashMap::new();
         let mut minimum_attack_charges: HashMap<Identifier, f32> = HashMap::new();
         let mut use_cooldowns: HashMap<Identifier, Identifier> = HashMap::new();
         let Ok(entries) = std::fs::read_dir(components_dir) else {
             return ItemComponents {
-                dyed_color_type: dyed_color_type(registries),
+                patch_types: PatchTypes::load(registries),
                 ..ItemComponents::default()
             };
         };
+        let mut max_damages: HashMap<Identifier, u32> = HashMap::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -281,6 +313,12 @@ impl ItemComponents {
             let Some(components) = json.get("components") else {
                 continue;
             };
+            if let Some(m) = components
+                .get("minecraft:max_damage")
+                .and_then(|m| m.as_u64())
+            {
+                max_damages.insert(item.clone(), m as u32);
+            }
             if let Some(a) = components.get("minecraft:attribute_modifiers") {
                 attributes.insert(item.clone(), parse_modifiers(a));
             }
@@ -320,6 +358,9 @@ impl ItemComponents {
             if components.get("minecraft:glider").is_some() {
                 gliders.insert(item.clone());
             }
+            if components.get("minecraft:death_protection").is_some() {
+                death_protection.insert(item.clone());
+            }
             if let Some(e) = components.get("minecraft:use_effects") {
                 use_effects.insert(item.clone(), parse_use_effects(e));
             }
@@ -339,14 +380,22 @@ impl ItemComponents {
                 equippable[i.0 as usize] = Some(eq);
             }
         }
+        let mut max_damage = vec![None; len];
+        for (item, m) in max_damages {
+            if let Some(i) = registries.index("minecraft:item", &item) {
+                max_damage[i.0 as usize] = Some(m);
+            }
+        }
         ItemComponents {
             equippable,
-            dyed_color_type: dyed_color_type(registries),
+            max_damage,
+            patch_types: PatchTypes::load(registries),
             attributes,
             consumables,
             foods,
             tools,
             gliders,
+            death_protection,
             use_effects,
             piercing_weapons,
             minimum_attack_charges,

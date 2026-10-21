@@ -39,6 +39,7 @@ fn tables() -> ProtocolTables {
         (14, "minecraft:minimum_attack_charge"),
         (15, "minecraft:piercing_weapon"),
         (16, "minecraft:consumable"),
+        (17, "minecraft:fireworks"),
     ])
 }
 
@@ -158,6 +159,46 @@ fn spear_components_read_their_values() {
     );
     assert_eq!(weapon.hit_sound, None);
     assert_eq!(parsed.minimum_attack_charge(), Some(0.75));
+}
+
+/// `fireworks` (vanilla `Fireworks` with a star burst and a small ball, the star with
+/// a trail and twinkle): the flight, then each explosion's shape, colours, fade colours
+/// and flags, in order.
+#[test]
+fn fireworks_read_their_explosions() {
+    let tables = tables();
+    let mut fw = Writer::new();
+    fw.var_int(2); // flight_duration
+    fw.len_prefix(2);
+    // STAR (id 2), two colours, one fade colour, trail and twinkle set.
+    fw.var_int(2);
+    fw.len_prefix(2);
+    fw.i32(0xFF0000);
+    fw.i32(0x00FF00);
+    fw.len_prefix(1);
+    fw.i32(0x0000FF);
+    fw.bool(true);
+    fw.bool(true);
+    // An unknown shape id falls back to SMALL_BALL (vanilla ByIdMap ZERO).
+    fw.var_int(9);
+    fw.len_prefix(0);
+    fw.len_prefix(0);
+    fw.bool(false);
+    fw.bool(false);
+    let body = patch(&[(17, &fw.buf)], &[]);
+    let parsed = read_patch(&body, &tables).unwrap();
+    let fireworks = parsed.fireworks().unwrap();
+    assert_eq!(fireworks.flight_duration, 2);
+    assert_eq!(fireworks.explosions.len(), 2);
+    let star = &fireworks.explosions[0];
+    assert_eq!(star.shape, FireworkShape::Star);
+    assert_eq!(star.colors, vec![0xFF0000, 0x00FF00]);
+    assert_eq!(star.fade_colors, vec![0x0000FF]);
+    assert!(star.has_trail && star.has_twinkle);
+    let ball = &fireworks.explosions[1];
+    assert_eq!(ball.shape, FireworkShape::SmallBall);
+    assert!(ball.colors.is_empty() && ball.fade_colors.is_empty());
+    assert!(!ball.has_trail && !ball.has_twinkle);
 }
 
 #[test]

@@ -10,10 +10,13 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use haste_core::entity::MetadataValue;
-use haste_core::model::ThrownItemDecoration;
+use haste_core::model::{BodyOp, BodyTransform, ThrownItemDecoration};
 use haste_core::RegistryIndex;
 
 use crate::metadata::Metadata;
+
+/// `FireworkRocketEntity.DATA_SHOT_AT_ANGLE`'s synched slot.
+const SHOT_AT_ANGLE_INDEX: u8 = 10;
 
 /// One thrown-item entity type: `EntityRenderers`' registration of it — the
 /// `ThrownItemRenderer` constructor's `scale` and `fullBright` — plus the item its class
@@ -57,6 +60,10 @@ pub fn variant_for_name(name: &str) -> Option<ThrownItem> {
         "minecraft:splash_potion" => plain("minecraft:splash_potion"),
         // EYE_OF_ENDER: (context, 1.0F, true), EyeOfEnder.getDefaultItem = ENDER_EYE.
         "minecraft:eye_of_ender" => scaled("minecraft:ender_eye", 1.0),
+        // FireworkEntityRenderer: the camera-facing item at scale 1, not full-bright, the
+        // same transform as ThrownItemRenderer. Its rocket item is synched (slot 8) and
+        // always sent; a shot-at-angle rocket is turned by `flight_turn`.
+        "minecraft:firework_rocket" => plain("minecraft:firework_rocket"),
         // FIREBALL: (context, 3.0F, true), Fireball.getDefaultItem = FIRE_CHARGE.
         "minecraft:fireball" => scaled("minecraft:fire_charge", 3.0),
         // SMALL_FIREBALL: (context, 0.75F, true), SmallFireball inherits FIRE_CHARGE.
@@ -103,6 +110,28 @@ fn item_of(metadata: &Metadata) -> Option<RegistryIndex> {
     match metadata.get(8).map(|e| &e.value) {
         Some(MetadataValue::ItemStack(s)) if !s.is_empty() => s.item,
         _ => None,
+    }
+}
+
+/// `FireworkRocketEntity.isShotAtAngle` (`DATA_SHOT_AT_ANGLE`, the boolean at index 10, after
+/// the item at 8 and the attached target at 9): a rocket shot from a crossbow or at an angle
+/// is drawn turned to its flight.
+pub fn shot_at_angle(metadata: &Metadata) -> bool {
+    matches!(
+        metadata.get(SHOT_AT_ANGLE_INDEX).map(|e| &e.value),
+        Some(MetadataValue::Boolean(true))
+    )
+}
+
+/// `FireworkEntityRenderer.submit`: a rocket shot at an angle turns about Z 180, Y 180, X 90
+/// after the camera orientation. The turn goes on the instance's whole-model body transform
+/// (`EntityInstance.body`, applied before the camera orientation by the thrown-item renderer),
+/// so the ops are pushed in vanilla's order. Every other thrown item keeps its empty body.
+pub fn flight_turn(t: &ThrownItem, metadata: &Metadata, body: &mut BodyTransform) {
+    if t.default_item == "minecraft:firework_rocket" && shot_at_angle(metadata) {
+        body.push(BodyOp::RotateZ(std::f32::consts::PI));
+        body.push(BodyOp::RotateY(std::f32::consts::PI));
+        body.push(BodyOp::RotateX(std::f32::consts::FRAC_PI_2));
     }
 }
 

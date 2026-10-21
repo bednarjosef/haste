@@ -9,12 +9,13 @@ use tracing::{debug, warn};
 use super::{AudioOutput, PlayRequest, SoundControls, SoundId};
 use crate::channels::{ChannelPools, Pool};
 use crate::engine::{event_eq, PlayResult, SilentEngine, SoundSource};
+use crate::sound_event_listener::{PlayedSound, SoundEventListeners};
 use crate::sounds::{SoundEvents, SoundVariant};
 
 /// One sound the `SoundSystem` sent to the output, parallel to the engine's sound list:
 /// the same order, the same length, kept in lockstep by `play`, `stop` and `tick`.
 pub(super) struct Sounded {
-    id: SoundId,
+    pub(super) id: SoundId,
     /// The sound event this was started with, shared with the engine and interned (so
     /// tracking it costs one reference count): what `stop`'s event filter and
     /// [`SoundSystem::is_event_playing`] match on, as vanilla's
@@ -23,7 +24,7 @@ pub(super) struct Sounded {
     source: SoundSource,
     /// The channel pool this sound's channel came from (streamed sounds stream), released
     /// when it finishes or is stopped.
-    pool: Pool,
+    pub(super) pool: Pool,
     /// The output's controls once the worker created the player; `None` until then.
     controls: Option<SoundControls>,
 }
@@ -56,6 +57,8 @@ pub struct SoundSystem {
     pub(super) incoming: Vec<SoundControls>,
     /// Indices of sounds whose player finished this tick, reused across ticks.
     pub(super) finished: Vec<usize>,
+    /// The sound event listeners' record (vanilla `SoundEngine.listeners`, the subtitles).
+    listeners: SoundEventListeners,
 }
 
 impl SoundSystem {
@@ -83,7 +86,18 @@ impl SoundSystem {
             assets_sent: false,
             incoming: Vec::new(),
             finished: Vec::new(),
+            listeners: SoundEventListeners::default(),
         }
+    }
+
+    /// The engine's sound list, for the per-instance controls (`instances.rs`).
+    pub(super) fn engine_mut(&mut self) -> &mut SilentEngine {
+        &mut self.engine
+    }
+
+    /// The parsed `sounds.json`, for the per-instance plays (`instances.rs`).
+    pub(super) fn events(&self) -> &SoundEvents {
+        &self.events
     }
 
     /// The interned name of an event, shared with every sound that plays it.
@@ -127,7 +141,36 @@ impl SoundSystem {
         pitch: f32,
         event: &str,
     ) {
+        self.start(variant, source, pos, volume, pitch, event, false);
+    }
+
+    /// Start one variant (vanilla's `SoundEngine.play`); the new sound's id, or `None` when
+    /// it was not started (the volume-0 rule, or no free channel). `looping` plays it on
+    /// from the start at its end until it is stopped (a looping sound instance).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start(
+        &mut self,
+        variant: &SoundVariant,
+        source: SoundSource,
+        pos: Option<DVec3>,
+        volume: f32,
+        pitch: f32,
+        event: &str,
+        looping: bool,
+    ) -> Option<SoundId> {
         let event = self.intern(event);
+        // Vanilla's `SoundEngine.play` tells its listeners (the subtitles) before anything
+        // can keep the sound from starting.
+        self.listeners.notify(
+            &self.events,
+            &event,
+            variant,
+            source,
+            pos,
+            volume,
+            pitch,
+            looping,
+        );
         // Vanilla's `SoundEngine.play` order: the volume-0 rule first (a sound at zero
         // volume is not started; music starts silently), then the channel acquisition
         // (a full pool drops the sound).
@@ -135,7 +178,7 @@ impl SoundSystem {
             .engine
             .play(variant, source, pos, volume, pitch, Arc::clone(&event))
         {
-            PlayResult::NotStarted => return,
+            PlayResult::NotStarted => return None,
             PlayResult::Started | PlayResult::StartedSilently => {}
         }
         let pool = if variant.stream {
@@ -145,7 +188,7 @@ impl SoundSystem {
         };
         if !self.channels.acquire(pool) {
             self.engine.remove_last();
-            return;
+            return None;
         }
         // The engine's gains for this sound right now, so the player starts at the right
         // volume instead of full until the first tick.
@@ -173,6 +216,7 @@ impl SoundSystem {
             path: variant.path.clone(),
             assets,
             stream: variant.stream,
+            looping,
             gains,
             pitch,
         });
@@ -183,6 +227,7 @@ impl SoundSystem {
             pool,
             controls: None,
         });
+        Some(id)
     }
 
     /// Stop playing sounds. `None` on an axis matches everything; a sound is stopped when
@@ -204,12 +249,10 @@ impl SoundSystem {
                 self.channels.release(sounded.pool);
             }
         }
-        // Drop controls of the stopped sounds; the worker never sends them (or they are
-        // drained and discarded on the next tick by the id check below).
+        // Stopped sounds are no longer tracked; controls the worker still queues for them
+        // are skipped on the next tick's merge (their ids are not tracked any more), so the
+        // controls of sounds that keep playing are never lost.
         self.sounded.retain(|s| !matches(s));
-        self.incoming.clear();
-        self.output.drain_controls(&mut self.incoming);
-        self.incoming.clear();
         self.engine.stop(source, event);
     }
 
@@ -217,6 +260,25 @@ impl SoundSystem {
     /// panning, vanilla's `SoundEngine.updateSource(Camera)`.
     pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32, pitch_deg: f32) {
         self.engine.set_listener(pos, yaw_deg, pitch_deg);
+    }
+
+    /// Whether a sound event listener is registered (vanilla `SoundManager.addListener` /
+    /// `removeListener`: the subtitle overlay while "Show Subtitles" is on). While none
+    /// is, plays record nothing.
+    pub fn set_listening(&mut self, listening: bool) {
+        self.listeners.set_listening(listening);
+    }
+
+    /// The sounds with a subtitle played since the last call, oldest first, for the
+    /// listeners (vanilla `SoundEngine.notifyListeners`, batched per tick).
+    pub fn drain_played(&mut self) -> std::vec::Drain<'_, PlayedSound> {
+        self.listeners.drain()
+    }
+
+    /// The listener's position and orientation (vanilla `SoundEngine.getListenerTransform`),
+    /// as the last [`Self::set_listener`] set it.
+    pub fn listener(&self) -> crate::spatial::ListenerTransform {
+        self.engine.listener()
     }
 
     /// Set the volume of one sound source (or the master volume).
@@ -248,6 +310,16 @@ impl SoundSystem {
         for (i, sounded) in self.sounded.iter_mut().enumerate() {
             if sounded.controls.is_some() {
                 continue;
+            }
+            // Controls of sounds stopped before adoption (`stop`, `stop_instance`) are
+            // skipped: ids only grow, so anything below this sound's id is no longer
+            // tracked.
+            while self
+                .incoming
+                .get(next_incoming)
+                .is_some_and(|c| c.id < sounded.id)
+            {
+                next_incoming += 1;
             }
             if self
                 .incoming
