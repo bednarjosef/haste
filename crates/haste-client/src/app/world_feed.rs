@@ -442,7 +442,7 @@ impl WorldFeed {
         let own_skin = {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
-            self.fishing.collect(&store, partial);
+            self.fishing.collect(&store, shared, local.0, partial);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
         game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);

@@ -2,7 +2,9 @@
 //! store are collected at the partial tick, lit at the block they float in like any entity, and
 //! handed to the renderer with their lines. The lists are reused, so a frame allocates nothing.
 
+use crate::game::Shared;
 use haste_core::view::BlockView as _;
+use haste_core::EntityId;
 use haste_entity::fishing_bobber::{self, FishingBobber};
 use haste_entity::EntityStore;
 use haste_render::entity::{BobberOwner, FishingBobber as Draw};
@@ -17,9 +19,17 @@ pub(super) struct FishingFeed {
 }
 
 impl FishingFeed {
-    /// Collects the store's bobbers at `partial` (`fishing_bobber::bobbers`).
-    pub(super) fn collect(&mut self, store: &EntityStore, partial: f32) {
-        fishing_bobber::bobbers(store, partial, &mut self.bobbers);
+    /// Collects the store's bobbers at `partial` (`fishing_bobber::bobbers`), with the local
+    /// player's model (locked here, under the store's read lock) as the owner of our own bobber.
+    pub(super) fn collect(
+        &mut self,
+        store: &EntityStore,
+        shared: &Shared,
+        local: EntityId,
+        partial: f32,
+    ) {
+        let model = shared.local_model.lock();
+        fishing_bobber::bobbers(store, (local, &model), partial, &mut self.bobbers);
     }
 
     /// Lights each bobber at its block (the sky and block light there, as the entities are

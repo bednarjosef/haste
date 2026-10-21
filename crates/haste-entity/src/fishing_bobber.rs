@@ -71,24 +71,34 @@ fn is_fishing_rod(item: Option<RegistryIndex>) -> bool {
 }
 
 /// The bobbers in the store, each at `partial` with the owner's rod hand (none without a
-/// player owner, which vanilla draws without a line).
-pub fn bobbers(store: &EntityStore, partial: f32, out: &mut Vec<FishingBobber>) {
+/// player owner, which vanilla draws without a line). The local player is not in the store
+/// (the server does not spawn us as an entity), so its model is passed in as `local` and used
+/// as the owner when a bobber's owner id is ours.
+pub fn bobbers(
+    store: &EntityStore,
+    local: (EntityId, &Entity),
+    partial: f32,
+    out: &mut Vec<FishingBobber>,
+) {
     out.clear();
     for slot in store.slots.iter().flatten() {
         if !is_fishing_bobber(slot.kind) {
             continue;
         }
         let pos = slot.prev_pos.lerp(slot.pos, f64::from(partial));
-        let owner = store
-            .get(EntityId(slot.data))
-            .filter(|owner| owner.is_player_type);
+        let owner_id = EntityId(slot.data);
+        let owner = if owner_id == local.0 {
+            Some(local.1)
+        } else {
+            store.get(owner_id).filter(|owner| owner.is_player_type)
+        };
         let (line, owner) = match owner {
             Some(owner) => {
                 let (hand, holding_right) = owner_hand(owner, &store.dims, partial);
                 (
                     Some(line_points(hand, pos)),
                     Some(BobberOwner {
-                        id: owner.id,
+                        id: owner_id,
                         holding_right,
                     }),
                 )
