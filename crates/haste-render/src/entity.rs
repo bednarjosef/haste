@@ -60,9 +60,24 @@ mod tnt;
 
 mod armor_stand;
 mod hand;
+// Stuck items and shoulder parrots are not drawn yet: `EntityInstance` has no stuck counts,
+// stuck seed or shoulder parrots (haste-core request in the worker report). Remove these
+// allows when `prepare` calls the layers.
+#[allow(dead_code)]
+mod arrow_layer;
+#[allow(dead_code)]
+mod bee_stinger_layer;
 mod humanoid;
 mod item_display;
 mod model_parts;
+#[allow(dead_code)]
+mod parrot_on_shoulder;
+#[cfg(test)]
+mod parrot_on_shoulder_tests;
+#[allow(dead_code)]
+mod stuck_in_body;
+#[cfg(test)]
+mod stuck_in_body_tests;
 mod vertex;
 
 pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matrix};
