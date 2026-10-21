@@ -39,6 +39,7 @@ use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::packets::play::serverbound::{self as sb, input_flags, move_flags};
 use haste_protocol::{ClientboundPlay, Login, ServerboundPlay};
 use level_load::LevelLoad;
+use on_pos::supporting_block_state;
 
 /// A position change is sent when its squared length exceeds this (2.0E-4 blocks).
 pub const POSITION_THRESHOLD_SQ: f64 = 2.0e-4 * 2.0e-4;
@@ -317,6 +318,9 @@ pub struct LocalPlayer {
     /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
     /// progress and bob, filled for the render state at the end of each tick.
     pub hand: hand::Hand,
+    /// Vanilla `LocalPlayer.itemActivation()`: the item shown in front of us after a totem
+    /// pops (`displayItemActivation`), ticked by the game tick (`GameRenderer.tick`).
+    pub item_activation: item_activation::ItemActivation,
 }
 
 impl LocalPlayer {
@@ -378,6 +382,7 @@ impl LocalPlayer {
             int: interact::Interaction::default(),
             hands_busy: false,
             hand: hand::Hand::new(),
+            item_activation: item_activation::ItemActivation::default(),
         };
         p.state.on_ground = true;
         // Vanilla's camera starts its eye height at 0 and rises on the first level tick; here
@@ -607,7 +612,7 @@ impl LocalPlayer {
         true
     }
 
-    fn set_look(&mut self, yaw: f32, pitch: f32) {
+    pub(crate) fn set_look(&mut self, yaw: f32, pitch: f32) {
         let pitch = pitch.clamp(-90.0, 90.0);
         self.state.yaw = yaw;
         self.state.pitch = pitch;
@@ -1282,18 +1287,6 @@ impl LocalPlayer {
     }
 }
 
-/// The block supporting the player at `pos` (vanilla `Entity.getOnPosLegacy`:
-/// the block at feet y minus 0.2), for step and fall sounds.
-fn supporting_block_state(pos: DVec3, world: &dyn BlockView) -> Option<haste_core::BlockStateId> {
-    let p = BlockPos::new(
-        pos.x.floor() as i32,
-        (pos.y - 0.2).floor() as i32,
-        pos.z.floor() as i32,
-    );
-    let state = world.block_state(p);
-    (state != haste_core::BlockStateId::AIR).then_some(state)
-}
-
 /// `player_input` flags for the held keys.
 pub fn input_bits(i: &InputState) -> u8 {
     let mut f = 0;
@@ -1337,7 +1330,9 @@ mod camera;
 pub mod climbable;
 mod creative_flight;
 pub mod interact;
+pub mod item_activation;
 mod level_load;
+mod on_pos;
 mod riding;
 pub mod script;
 pub mod spectator;

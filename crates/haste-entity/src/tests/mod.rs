@@ -33,6 +33,7 @@ mod registry;
 mod ride_tick;
 mod riding;
 mod setup_rotations;
+mod sleeping;
 mod store;
 mod thrown_item;
 mod using_item;

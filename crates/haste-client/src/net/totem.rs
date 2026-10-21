@@ -22,6 +22,16 @@ pub(super) fn start_totem<E: EntitySink + ?Sized>(
         .totem_emitters
         .push(crate::game::totem_emitter::TotemEmitter::new(id));
     let own = id == session.entity_id;
+    if own {
+        // Vanilla `ClientPacketListener.handleEntityEvent` (status 35): for the local player the
+        // totem (or the off-hand or main-hand stack with death protection) is shown in front of
+        // the camera (`GameRenderer.displayItemActivation`).
+        let stack = session.player.int.find_totem(session.player.main_hand());
+        session
+            .player
+            .item_activation
+            .activate(&stack, &mut session.totem_rng);
+    }
     // The category follows the entity's type, as the hurt sounds do (our own is a player).
     let name: Option<String> = if own {
         Some("minecraft:player".to_owned())

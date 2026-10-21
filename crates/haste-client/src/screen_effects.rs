@@ -124,6 +124,9 @@ pub struct ViewEffects {
     /// The local player is a spectator: vanilla's `ScreenEffectRenderer.submit` draws
     /// neither the water nor the fire overlay for one (`firstPerson && !isSpectator`).
     pub spectator: bool,
+    /// The totem pop's item while its countdown runs (`LevelExtractor` copies the active
+    /// `ItemActivation`); the renderer poses and draws it each frame. `None` when idle.
+    pub item_activation: Option<haste_render::entity::ItemActivation>,
     /// The world border's warning strength at the camera (`Hud.extractVignette`'s
     /// `borderWarningStrength`): 0 outside the warning distance, 1 at the edge.
     pub border_warning: f32,

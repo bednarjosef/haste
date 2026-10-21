@@ -5,6 +5,7 @@
 mod frame_maps;
 mod leash_lines;
 mod promotion;
+mod stuck;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -125,6 +126,7 @@ pub struct WorldFeed {
     pub(crate) last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
     pub(crate) instances: Vec<EntityInstance>,
+    stuck: stuck::StuckFeed,
     /// Leash ropes for this frame (reused): the entity store's lines, and those lines with
     /// the light at each end (`leash_lines::convert`) for the renderer.
     leash: Vec<haste_entity::leash::LeashLine>,
@@ -446,10 +448,12 @@ impl WorldFeed {
         let own_skin = {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
+            self.stuck.fill(&store, partial);
             let model = shared.local_model.lock();
             store.leash_lines(partial, Some(&model), &mut self.leash);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
+        self.stuck.set_stuck(renderer);
         game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);
         // The pickup particles (`take_item_entity`): one item/orb instance each at the eased
         // position, drawn through the dropped-item renderer (vanilla `ItemPickupParticleGroup`).
@@ -497,17 +501,19 @@ impl WorldFeed {
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
     /// comparing the per-tick part is enough; the skin is cloned only when one happens.
     /// The hand only exists in first person (F5 hides it) and while the HUD is shown
-    /// (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
+    /// (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD). The totem pop's item
+    /// goes along in every perspective (`ScreenEffectRenderer.submit`: only F1 hides it).
     pub(crate) fn set_first_person(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
         perspective: game::Perspective,
         hud_hidden: bool,
-        first_person: Option<game::FirstPersonView>,
+        state: &game::ViewState,
     ) {
+        renderer.set_item_activation(state.screen.item_activation.filter(|_| !hud_hidden));
         let view = match perspective {
-            game::Perspective::FirstPerson if !hud_hidden => first_person,
+            game::Perspective::FirstPerson if !hud_hidden => state.first_person,
             _ => None,
         };
         // Our skin changes when its download lands: compare it by identity as well.

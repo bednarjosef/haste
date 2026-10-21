@@ -484,6 +484,7 @@ pub(super) fn publish(
         spinning_time: screen.spinning_time(),
         spinning_speed: screen.spinning_speed(),
         spectator: view.spectator,
+        item_activation: s.player.item_activation.render_state(),
         // `Hud.extractVignette` measures from the camera entity, the player's feet in x and z.
         border_warning: s.world_border.warning_strength(feet.x, feet.z),
     };
