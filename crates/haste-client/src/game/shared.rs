@@ -274,6 +274,7 @@ impl Shared {
             view: Mutex::new(ViewState {
                 prev_eye: DVec3::ZERO,
                 eye: DVec3::ZERO,
+                cart_camera: None,
                 look_offset: (0.0, 0.0),
                 tick_at: Instant::now(),
                 animation_tick: 0,

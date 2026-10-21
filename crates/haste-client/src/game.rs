@@ -26,6 +26,7 @@ use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos};
 mod block_entities;
 mod block_entity_ticks;
 mod camera;
+mod cart_camera;
 mod hud;
 mod input;
 pub(crate) mod item_uses;
@@ -49,6 +50,7 @@ use crate::net::WorldSink;
 pub mod skins;
 
 pub use camera::{third_person_camera, Perspective};
+pub use cart_camera::{camera_eye, CartCamera};
 pub use player_model::push_local_instance;
 pub use run::run;
 pub use shared::{PackReload, Shared};

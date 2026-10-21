@@ -144,6 +144,9 @@ pub struct ViewState {
     pub sea_level: i32,
     /// `ClientLevelData.getHorizonHeight` (the dark disc's threshold).
     pub horizon_height: f64,
+    /// The new-behaviour minecart we ride, for the camera and our model to follow its track
+    /// walk per frame (`Camera.alignWithEntity`); `None` otherwise.
+    pub cart_camera: Option<super::CartCamera>,
 }
 
 impl ViewState {
@@ -322,7 +325,10 @@ pub(super) fn publish(
     let (prev_eye, prev_yaw, prev_pitch) = prev;
     let (eye, yaw, pitch) = cur;
     let s = &driver.session;
+    // Read before the view lock is taken (the entity store has its own lock).
+    let cart_camera = super::cart_camera::extract(s, shared);
     let mut view = shared.view.lock();
+    view.cart_camera = cart_camera;
     // The feet bracket the tick like the eye does; the eye height can change within it
     // (sneaking), so the old feet are the last view's, not the eye minus its height.
     let feet = s.player.state.pos;
