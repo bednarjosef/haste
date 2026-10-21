@@ -991,6 +991,7 @@ fn equipment_offscreen() {
             item: Some(idx),
             asset: eq.asset.clone(),
             dye: None,
+            layer: None,
         });
     }
     // A leather chestplate with a dye: exercises the `dyed_color` tint path.
@@ -1036,13 +1037,13 @@ fn equipment_offscreen() {
     pumpkin.head_item = Some(pumpkin_item);
     let mut dyed = bare.clone();
     dyed.equipment = vec![EquipmentPiece {
-        slot: EquipmentSlot::Chest,
         item: Some(leather),
         asset: data
             .item_components
             .equippable(leather)
             .and_then(|e| e.asset.clone()),
         dye: Some(0xFF00_FF00),
+        ..armed.equipment[0].clone()
     }];
     // An elytra on the chest: the WINGS layer on the elytra model (no humanoid layer).
     let elytra_item = item("elytra").expect("elytra in the item registry");
@@ -1060,10 +1061,9 @@ fn equipment_offscreen() {
     );
     let mut winged = bare.clone();
     winged.equipment = vec![EquipmentPiece {
-        slot: EquipmentSlot::Chest,
         item: Some(elytra_item),
         asset: elytra_eq.asset.clone(),
-        dye: None,
+        ..armed.equipment[0].clone()
     }];
 
     let camera = Camera {

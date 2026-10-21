@@ -190,13 +190,7 @@ pub fn equipment_by_slot(
         match EquipmentSlot::from_wire(*wire) {
             Some(EquipmentSlot::MainHand) => hands[0] = Some(item),
             Some(EquipmentSlot::OffHand) => hands[1] = Some(item),
-            // Armour (humanoid slots) and the mob slots: a horse's or wolf's body armour and a
-            // saddle come from their item's `equippable` slot the same way (vanilla
-            // `EquipmentSlot.Type.ANIMAL_ARMOR` / `SADDLE`).
-            Some(slot)
-                if slot.is_armor()
-                    || matches!(slot, EquipmentSlot::Body | EquipmentSlot::Saddle) =>
-            {
+            Some(slot) if slot.is_armor() => {
                 let equippable = components.equippable(item);
                 let is_armor = equippable.map(|x| x.slot) == Some(slot);
                 if slot == EquipmentSlot::Head && !is_armor {
@@ -212,6 +206,7 @@ pub fn equipment_by_slot(
                     item: Some(item),
                     asset: equippable.and_then(|x| x.asset.clone()),
                     dye: components.dyed_color(&stack.components_raw),
+                    layer: None,
                 });
             }
             _ => {}
