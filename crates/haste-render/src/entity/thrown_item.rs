@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// The billboard root `ThrownItemRenderer.submit` builds: the entity's position, the
 /// renderer's `scale`, then the camera orientation (the item model's own `ground` display
 /// transform is applied on top of this by [`EntityRenderer::emit_item`]).
