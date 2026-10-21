@@ -33,6 +33,7 @@ mod models;
 mod mount_equipment;
 mod new_minecart_behavior;
 mod registry;
+mod ride_tick;
 mod riding;
 mod setup_rotations;
 mod sleeping;
