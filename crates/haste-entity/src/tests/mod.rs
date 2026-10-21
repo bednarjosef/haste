@@ -30,11 +30,14 @@ mod models;
 mod mount_equipment;
 mod new_minecart_behavior;
 mod registry;
+mod ride_tick;
 mod riding;
 mod setup_rotations;
 mod sleeping;
+mod spin_attack;
 mod store;
 mod thrown_item;
+mod trident;
 mod using_item;
 fn store() -> EntityStore {
     EntityStore::new(EntityDimensions::default())

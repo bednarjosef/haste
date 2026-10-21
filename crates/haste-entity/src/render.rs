@@ -148,12 +148,19 @@ impl EntityStore {
             // setupRotations is only the hit wobble (`ArmorStandRenderer.setupRotations` does
             // not call super, so no death tilt or sleeping rotations either); the generic
             // `setupRotations` for everything else.
+            // `ThrownTridentRenderer.submit`'s yaw and pitch turns for tridents.
+            let is_trident = !slot.is_player_type && crate::trident::is_trident(slot.kind);
             let mut body = if is_boat {
                 crate::boat::body_transform(slot, partial_tick)
             } else if knot {
                 BodyTransform::default()
             } else if is_armor_stand {
                 crate::armor_stand::body_transform(slot, partial_tick)
+            } else if is_trident {
+                crate::trident::body_transform(
+                    slot.yaw_at(partial_tick),
+                    slot.pitch_at(partial_tick),
+                )
             } else {
                 crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"))
             };

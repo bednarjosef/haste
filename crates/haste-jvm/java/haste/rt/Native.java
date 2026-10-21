@@ -100,6 +100,16 @@ public final class Native {
      */
     public static native void resourcePacksChanged(String[] selectedIds);
 
+    // ---- sound event listeners (haste.gui.SoundImpl; the sound is Rust's) ----
+    /** Vanilla code registered its first sound event listener or removed its last one (the subtitle overlay). */
+    public static native void soundListening(boolean listening);
+    /**
+     * Fills {@code listener} with the sound listener transform (position, forward, up) and returns the sounds
+     * with a subtitle Rust played since the last call as {@code {String[] names, double[] values}} (layout:
+     * haste.gui.SoundImpl), or null when there were none.
+     */
+    public static native Object[] takePlayedSounds(double[] listener);
+
     // ---- the server resource pack prompt (vanilla's PackConfirmScreen) ----
     /** The player answered the server resource pack prompt (vanilla's confirm screen callback). */
     public static native void packPromptAnswered(boolean accepted);

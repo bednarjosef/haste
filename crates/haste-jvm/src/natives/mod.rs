@@ -1,4 +1,5 @@
 //! Java -> Rust natives of `haste.rt.Native`, registered once at startup.
+mod sound;
 mod state;
 mod text;
 
@@ -137,6 +138,16 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 jni_str!("resourcePacksChanged"),
                 jni_str!("([Ljava/lang/String;)V"),
                 state::resource_packs_changed as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("soundListening"),
+                jni_str!("(Z)V"),
+                sound::sound_listening as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("takePlayedSounds"),
+                jni_str!("([D)[Ljava/lang/Object;"),
+                sound::take_played_sounds as *mut _,
             ),
             NativeMethod::from_raw_parts(
                 jni_str!("packPromptAnswered"),

@@ -8,15 +8,22 @@ impl EntityRenderer {
     /// use like entity textures). Unihex glyphs are rasterised to white bitmaps and uploaded
     /// the same way, keyed by their index.
     pub(super) fn glyph_page_rect(&mut self, kind: haste_assets::GlyphKind) -> Option<[u32; 4]> {
-        let key = match kind {
+        let page = match kind {
             haste_assets::GlyphKind::Empty | haste_assets::GlyphKind::Missing => return None,
-            haste_assets::GlyphKind::Bitmap { page, .. } => {
-                Identifier::new("haste", &format!("font/{page}"))
-            }
-            haste_assets::GlyphKind::Hex { index } => {
-                Identifier::new("haste", &format!("hex/{index}"))
-            }
+            haste_assets::GlyphKind::Bitmap { page, .. } => glyph_pages::GlyphPage::Bitmap(page),
+            haste_assets::GlyphKind::Hex { index } => glyph_pages::GlyphPage::Hex(index),
         };
+        // Resident already (every frame but the first and those after a repack): the page's key
+        // is a lookup by its `Copy` page and the rectangle is read in place, nothing built.
+        let resident = self
+            .glyph_pages
+            .get(page)
+            .and_then(|id| self.textures.get(id))
+            .and_then(|t| t.rect);
+        if let Some(rect) = resident {
+            return Some(rect);
+        }
+        let key = self.glyph_pages.get_or_insert(page).clone();
         if !self.textures.contains_key(&key) {
             let image = match kind {
                 haste_assets::GlyphKind::Bitmap { page, .. } => {

@@ -177,6 +177,16 @@ impl Renderer {
         self.entity.set_view_scale(scale);
     }
 
+    /// This frame's stuck arrows, stingers and shoulder parrots, sorted by entity id, with the
+    /// stinger and parrot models the layers draw (`haste_entity::stuck_models`).
+    pub fn set_stuck(
+        &mut self,
+        states: &[crate::entity::StuckInput],
+        models: crate::entity::StuckModels,
+    ) {
+        self.entity.set_stuck(states, models);
+    }
+
     /// Vanilla `Options.cloudStatus` (options.txt `renderClouds`): OFF draws no cloud pass,
     /// FAST the flat cells, FANCY the extruded boxes.
     pub fn set_cloud_status(&mut self, status: crate::clouds::CloudStatus) {

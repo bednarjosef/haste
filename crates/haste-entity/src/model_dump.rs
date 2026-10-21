@@ -22,7 +22,7 @@ use haste_core::Identifier;
 use serde::Deserialize;
 
 /// The vanilla ground plane in model units (see the module doc).
-const GROUND_Y: f32 = 24.0;
+pub(crate) const GROUND_Y: f32 = 24.0;
 /// The dump's format version this loader understands.
 const KNOWN_VERSION: u32 = 1;
 
@@ -34,9 +34,13 @@ const KNOWN_VERSION: u32 = 1;
 /// - the boats', whose renderer does not sit them on the ground plane at all
 ///   (`AbstractBoatRenderer.submit` lifts them 0.375 blocks instead of
 ///   `LivingEntityRenderer`'s -1.501, so their `PartPose` values are already relative to that
-///   origin; see `crate::boat`).
+///   origin; see `crate::boat`);
+/// - the trident's, which `ThrownTridentRenderer.submit` draws at the entity's own position
+///   with only its yaw and pitch turns (it is no `LivingEntityRenderer`), so the shift would
+///   slide the whole trident 1.5 blocks along its shaft (see `crate::trident`).
 const UNSHIFTED_LAYERS: &[&str] = &[
     "minecraft:copper_golem#main",
+    "minecraft:trident#main",
     "minecraft:boat/acacia#main",
     "minecraft:chest_boat/acacia#main",
     "minecraft:boat/bamboo#main",
