@@ -12,10 +12,11 @@ use super::shared::Shared;
 use crate::net::NetDriver;
 
 /// Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
-/// for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
+/// for `ClientLevel.doAddParticle`'s 32-block limiter is the camera's eye (the player's, or the
+/// spectated entity's).
 pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
     let mut particles = shared.particles.lock();
-    let camera = driver.session.player.camera(1.0).0;
+    let camera = driver.session.camera_pose(1.0).0;
     let spawns = std::mem::take(&mut driver.session.particle_spawns);
     // Firework rockets that burst (`ClientLevel.createFireworks`): the explosions are decoded
     // from each rocket's stack with the component tables.

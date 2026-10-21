@@ -50,7 +50,12 @@ pub(super) fn tick(
         driver.session.screen_probe = probe;
     }
     let ui = shared.ui.lock().clone();
+    // The camera entity as the tick starts (vanilla `Camera.tick` runs before the level's
+    // entities tick: its eye height target is the one the last tick and this tick's packets
+    // left), then again after the entities ticked, for this tick's view.
+    driver.session.camera.refresh(&entities);
     driver.end_tick(&input.state, &mut *world, &mut *entities, ui.as_ref())?;
+    driver.session.camera.refresh(&entities);
     // The remote entities' use effects (vanilla's entities tick before the level's
     // particles spawn, `ClientLevel.tick`): the use steps the entity tick just recorded,
     // run through the same consume path the local player's own use takes.

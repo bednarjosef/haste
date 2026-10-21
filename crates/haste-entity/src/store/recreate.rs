@@ -53,6 +53,7 @@ impl Entity {
             // `Display.createInterpolationHandler`: a zero-step window until the synched
             // teleport duration sets one.
             lerp: crate::display::lerp_state(s.kind, LerpState::new(s.pos, s.yaw, s.pitch)),
+            new_minecart: None,
             nametag: None,
             is_player_type: false,
             walk: WalkAnimationState::default(),

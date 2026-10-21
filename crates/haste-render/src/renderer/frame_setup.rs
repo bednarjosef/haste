@@ -56,6 +56,13 @@ impl Renderer {
         self.first_person = fp;
     }
 
+    /// The totem pop's item and countdown (the local player's `ItemActivation`), which the
+    /// hand pass poses each frame (`ScreenEffectRenderer.renderItemActivationAnimation`) in
+    /// every perspective; `None` draws nothing. Stays until changed.
+    pub fn set_item_activation(&mut self, activation: Option<crate::entity::ItemActivation>) {
+        self.entity.set_item_activation(activation);
+    }
+
     /// The camera entity is a spectator this frame (`Camera.extractRenderState` reads it off
     /// the player). With the camera inside a solid-render block, [`Self::sample_world`] turns
     /// the section occlusion cull off for the frame.
@@ -162,6 +169,16 @@ impl Renderer {
     /// `options.entityDistanceScaling`, 0.5..=5.0).
     pub fn set_view_scale(&mut self, scale: f32) {
         self.entity.set_view_scale(scale);
+    }
+
+    /// This frame's stuck arrows, stingers and shoulder parrots, sorted by entity id, with the
+    /// stinger and parrot models the layers draw (`haste_entity::stuck_models`).
+    pub fn set_stuck(
+        &mut self,
+        states: &[crate::entity::StuckInput],
+        models: crate::entity::StuckModels,
+    ) {
+        self.entity.set_stuck(states, models);
     }
 
     /// Vanilla `Options.cloudStatus` (options.txt `renderClouds`): OFF draws no cloud pass,

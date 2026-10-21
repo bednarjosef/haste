@@ -16,7 +16,7 @@ crates/haste-data/src/blocks.rs 635
 crates/haste-entity/src/animation.rs 714
 crates/haste-entity/src/registry.rs 1022
 crates/haste-entity/src/riding.rs 640
-crates/haste-entity/src/store.rs 772
+crates/haste-entity/src/store.rs 658
 crates/haste-jvm/src/host.rs 622
 crates/haste-jvm/src/proxies.rs 630
 crates/haste-jvm/tests/jvm.rs 2750

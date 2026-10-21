@@ -16,6 +16,7 @@ use haste_protocol::haste_core::entity::{
 };
 use haste_protocol::haste_core::game::DimensionInfo;
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId};
+use haste_protocol::packets::play::clientbound::MinecartStep;
 use haste_world::World;
 
 /// What the driver needs from the world (`haste_world::World`).
@@ -147,9 +148,29 @@ pub trait EntitySink {
     fn mark_hit(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::wake_up`: the leave-bed animation (animate action 0) on a sleeping player.
+    /// Default no-op.
+    fn wake_up(&mut self, id: EntityId) {
+        let _ = id;
+    }
+    /// `EntityStore::is_living` (`instanceof LivingEntity`). Default: not living.
+    fn is_living(&self, id: EntityId) -> bool {
+        let _ = id;
+        false
+    }
     /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
+    }
+    /// `EntityStore::use_new_minecart_behavior`: a minecart spawned in a level with the
+    /// `minecart_improvements` feature runs `NewMinecartBehavior`. Default no-op.
+    fn use_new_minecart_behavior(&mut self, id: EntityId) {
+        let _ = id;
+    }
+    /// `EntityStore::handle_minecart_along_track`: a new-behaviour cart's track steps
+    /// (`move_minecart_along_track`). Default no-op.
+    fn handle_minecart_along_track(&mut self, id: EntityId, steps: &[MinecartStep]) {
+        let _ = (id, steps);
     }
     /// `EntityStore::set_metadata`.
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]);
@@ -159,6 +180,10 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::set_leash` (`SetEntityLink`): `holder` `None` unties. Default no-op.
+    fn set_leash(&mut self, attached: EntityId, holder: Option<EntityId>) {
+        let _ = (attached, holder);
+    }
     /// `EntityStore::set_world_age` (from `set_time`); the bee's anger end time compares
     /// against it. Default no-op.
     fn set_world_age(&mut self, world_age: i64) {
@@ -166,6 +191,10 @@ pub trait EntitySink {
     }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        None
+    }
+    /// `Entity.getEyeY` of an entity (`EntityStore::eye_y`). None in fakes.
+    fn entity_eye_y(&self, _id: EntityId) -> Option<f64> {
         None
     }
     /// The entity's equipment slots (vanilla `LivingEntity` equipment): (wire slot, stack)
@@ -318,6 +347,29 @@ impl EntitySink for EntityStore {
     fn mark_hit(&mut self, id: EntityId) {
         EntityStore::mark_hit(self, id)
     }
+    fn wake_up(&mut self, id: EntityId) {
+        EntityStore::wake_up(self, id)
+    }
+    fn is_living(&self, id: EntityId) -> bool {
+        EntityStore::is_living(self, id)
+    }
+    fn use_new_minecart_behavior(&mut self, id: EntityId) {
+        EntityStore::use_new_minecart_behavior(self, id)
+    }
+    fn handle_minecart_along_track(&mut self, id: EntityId, steps: &[MinecartStep]) {
+        // The wire's steps as the entity crate's (`NewMinecartBehavior.MinecartStep`), straight
+        // into the cart's waiting list: no allocation beyond the packet once it has grown.
+        let steps = steps
+            .iter()
+            .map(|s| haste_entity::new_minecart_behavior::MinecartStep {
+                position: s.pos,
+                movement: s.velocity,
+                y_rot: s.yaw,
+                x_rot: s.pitch,
+                weight: s.weight,
+            });
+        EntityStore::handle_minecart_along_track(self, id, steps)
+    }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)
     }
@@ -330,11 +382,17 @@ impl EntitySink for EntityStore {
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
         EntityStore::set_passengers(self, vehicle, passengers)
     }
+    fn set_leash(&mut self, attached: EntityId, holder: Option<EntityId>) {
+        EntityStore::set_leash(self, attached, holder)
+    }
     fn set_world_age(&mut self, world_age: i64) {
         EntityStore::set_world_age(self, world_age)
     }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
+    }
+    fn entity_eye_y(&self, id: EntityId) -> Option<f64> {
+        EntityStore::eye_y(self, id)
     }
     fn equipment(&self, id: EntityId) -> Option<&[(u8, ItemStackData)]> {
         self.get(id).map(|e| e.equipment.as_slice())

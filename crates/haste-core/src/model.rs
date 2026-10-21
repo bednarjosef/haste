@@ -340,6 +340,26 @@ pub struct EquipmentPiece {
     pub asset: Option<Identifier>,
     /// The stack's `dyed_color` component (ARGB) when dyed (leather armour); `None` otherwise.
     pub dye: Option<u32>,
+    /// The model this piece's equipment layers draw on when the wearer's renderer adds a layer
+    /// with its own model (vanilla `SimpleEquipmentLayer`, `WolfArmorLayer`, `LlamaDecorLayer`:
+    /// a mount's body armour, saddle or carpet). `None` for humanoid armour, which the
+    /// renderer draws on its humanoid armour models (`HumanoidArmorLayer`).
+    pub layer: Option<EquipmentModelLayer>,
+}
+
+/// The arguments a mob's equipment layer hands `EquipmentLayerRenderer.renderLayers` besides
+/// the asset and the stack: the layer model, already chosen for the wearer's type and age, and
+/// the layer type the asset's textures are keyed by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EquipmentModelLayer {
+    /// The layer's geometry, posed like the wearer's own model (vanilla runs the same
+    /// `setupAnim` on it).
+    pub model: std::sync::Arc<CubeModel>,
+    /// `EquipmentClientInfo.LayerType`'s serialized name (`horse_body`, `pig_saddle`, ...).
+    pub layer_type: &'static str,
+    /// A texture drawn on `model` after the asset's layers (vanilla
+    /// `WolfArmorLayer.maybeRenderCracks`: the wolf armour's crack texture for its damage).
+    pub cracks: Option<Identifier>,
 }
 
 /// What a dropped item entity carries: which item to draw (index into `minecraft:item`,

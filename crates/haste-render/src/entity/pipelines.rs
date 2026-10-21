@@ -442,6 +442,7 @@ impl EntityRenderer {
             hand_buffer,
             hand_capacity: 1024,
             hand: Vec::new(),
+            item_activation: None,
             item_names: Vec::new(),
             item_models: HashMap::new(),
             arm_models: [None, None, None, None, None, None, None, None],
@@ -461,6 +462,8 @@ impl EntityRenderer {
             portal_capacity: 256,
             beam_radius_scale: 1.0,
             view_scale: 1.0,
+            stuck: Vec::new(),
+            stuck_models: Default::default(),
             mask_vertices: Vec::new(),
             mask_buffer,
             mask_capacity,
@@ -478,6 +481,7 @@ impl EntityRenderer {
             map_decoration_rects: HashMap::new(),
             map_decoration_names: Vec::new(),
             drawn: 0,
+            leash_lines: Vec::new(),
         }
     }
 }

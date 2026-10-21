@@ -54,6 +54,12 @@ impl Renderer {
         self.entity.set_maps(maps);
     }
 
+    /// The leash ropes to draw this frame (vanilla `LeashFeatureRenderer`'s endpoints, with
+    /// the light at each end). Copied into the entity renderer's reused buffer.
+    pub fn set_leash_lines(&mut self, lines: &[crate::entity::LeashLine]) {
+        self.entity.set_leash_lines(lines);
+    }
+
     /// Whether GUI blending happens on sRGB values like vanilla (false on backends without
     /// view formats, e.g. GL, where it blends in linear space).
     pub fn gui_blends_in_srgb(&self) -> bool {

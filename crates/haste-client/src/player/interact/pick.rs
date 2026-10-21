@@ -81,7 +81,8 @@ impl LocalPlayer {
         entities: &[(EntityId, Aabb)],
         entity_types: &[RegistryIndex],
     ) -> Option<Target> {
-        let eye = self.eye();
+        // The camera entity's eyes and view (ours unless a spectator spectates another).
+        let (eye, look, camera_entity) = self.pick_view(look);
         let dir = raycast::look_vector(look.0, look.1);
         let a = self.int.attrs;
         let max_dist = a.block_reach.max(a.entity_reach);
@@ -98,7 +99,7 @@ impl LocalPlayer {
         let delta = dir * search_dist;
         let mut best: Option<(usize, f64)> = None;
         for (i, (id, b)) in entities.iter().enumerate() {
-            if *id == self.entity_id {
+            if *id == camera_entity {
                 continue; // getEntities(except = the camera entity)
             }
             let name = self.entity_type_name(data, entity_types, i);

@@ -32,6 +32,10 @@ impl Session {
                 world.set_biome_zoom_seed(l.spawn.hashed_seed);
                 self.is_flat = l.spawn.is_flat;
                 self.view_distance = l.view_distance;
+                // A login makes a new `ClientLevelData` at `Difficulty.NORMAL`, unlocked.
+                self.level_difficulty = Default::default();
+                // `handleLogin`: `setCameraEntity(player)`.
+                self.camera = Default::default();
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
@@ -79,6 +83,8 @@ impl Session {
                 self.health_seen = false;
                 self.player
                     .set_vehicle(None, SeatPoint::ZERO, None, None, None);
+                // `handleRespawn`: the new player becomes the camera entity.
+                self.camera = Default::default();
             }
             P::PlayerPosition(p) => {
                 // The server's position corrections a player feels as rubber-banding;

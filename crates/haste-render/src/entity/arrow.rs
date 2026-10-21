@@ -174,14 +174,23 @@ impl EntityRenderer {
         };
         let rect = self.texture_rect(&texture, assets);
         let m = arrow_matrix((e.pos - camera).as_vec3(), a.y_rot, a.x_rot, a.shake);
-        let nm = Mat3::from_mat4(m).inverse().transpose();
         let mut out = std::mem::take(&mut self.vertices);
-        for q in arrow_quads() {
-            push_world_quad(
-                &mut out, m, nm, q.corners, q.uv, q.normal, [1.0; 3], light, rect,
-            );
-        }
+        push_arrow_model(&mut out, m, light, rect);
         self.vertices = out;
+    }
+}
+
+/// Emits `ArrowModel`'s quads through `m`, whose corners are in blocks (the quads' own
+/// scale): the flight arrow and every stuck arrow (`ArrowLayer`) share this.
+pub(super) fn push_arrow_model(
+    out: &mut Vec<EntityVertex>,
+    m: Mat4,
+    light: (u8, u8),
+    rect: [u32; 4],
+) {
+    let nm = Mat3::from_mat4(m).inverse().transpose();
+    for q in arrow_quads() {
+        push_world_quad(out, m, nm, q.corners, q.uv, q.normal, [1.0; 3], light, rect);
     }
 }
 

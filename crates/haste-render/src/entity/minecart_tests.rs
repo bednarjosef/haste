@@ -1,8 +1,10 @@
 //! The minecart renderer's pure parts: the jitter seed's formula and the TNT cargo's swell,
 //! flash and white-overlay numbers, against vanilla's
 //! (`AbstractMinecartRenderer.submit`, `TntRenderer.getSwellAmount`/`isLit`,
-//! `OverlayTexture`).
-use super::minecart::{offset_seed, tnt_lit, tnt_swell, TNT_WHITE_OVERLAY};
+//! `OverlayTexture`), and the two render paths' poses (`newRender`, `oldRender`).
+use super::minecart::{cart_pose, offset_seed, tnt_lit, tnt_swell, TNT_WHITE_OVERLAY};
+use glam::{DVec3, Mat4, Vec3};
+use haste_core::model::{BodyTransform, EntityInstance, MinecartDecoration, PoseOverrides};
 
 /// Vanilla `entity.getId() * 493286711L` then `seed² * 4392167121L + seed * 98761L`, with
 /// Java's wrapping long arithmetic: id 0 gives 0, and the three jitter bits the renderer
@@ -69,4 +71,87 @@ fn tnt_lit_flashes_in_five_tick_phases() {
 #[test]
 fn tnt_white_overlay_is_the_overlay_textures_alpha() {
     assert!((TNT_WHITE_OVERLAY - 63.0 / 255.0).abs() < 1e-6);
+}
+
+/// A cart instance with the given body ops and yaw, and its decoration with the given rail
+/// positions.
+fn cart(
+    body: BodyTransform,
+    yaw: f32,
+    rail: Option<(DVec3, DVec3, DVec3)>,
+) -> (EntityInstance, MinecartDecoration) {
+    let decoration = MinecartDecoration {
+        display: None,
+        display_offset: 6,
+        hurt_time: 0.0,
+        hurt_dir: 1.0,
+        damage_time: 0.0,
+        fuse: -1.0,
+        rail,
+    };
+    let instance = EntityInstance {
+        id: haste_core::EntityId(1),
+        model: haste_entity::minecart::model(),
+        pos: DVec3::new(0.5, 64.1, 0.5),
+        yaw,
+        pitch: 0.0,
+        head_yaw: 0.0,
+        scale: 1.0,
+        pose: PoseOverrides::default(),
+        body,
+        body_scale: Vec3::ONE,
+        skin: None,
+        nametag: None,
+        below_name: None,
+        shadow_radius: 0.7,
+        shadow_strength: 1.0,
+        invisible: false,
+        display_fire: false,
+        width: 0.98,
+        height: 0.7,
+        is_discrete: false,
+        name_tag_y: 0.7,
+        hurt: 0.0,
+        light: (15, 0),
+        overlays: Default::default(),
+        item: None,
+        decoration: None,
+        hands: [None, None],
+        equipment: Vec::new(),
+        head_item: None,
+    };
+    (instance, decoration)
+}
+
+fn assert_mat_close(got: Mat4, want: Mat4) {
+    assert!(got.abs_diff_eq(want, 1e-5), "{got:?} is not {want:?}");
+}
+
+/// `newRender`: `rotateDegrees(YP, yRot)`, `rotateDegrees(ZP, -xRot)`, then
+/// `translate(0, 0.375, 0)` in that turned frame (so a pitched cart's lift tilts with it).
+#[test]
+fn a_new_behaviour_cart_is_posed_by_new_render() {
+    let (e, c) = cart(
+        haste_entity::new_minecart_behavior::new_render(90.0, 30.0),
+        0.0,
+        None,
+    );
+    let want = Mat4::from_rotation_y(90f32.to_radians())
+        * Mat4::from_rotation_z((-30f32).to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0));
+    assert_mat_close(cart_pose(&e, &c), want);
+    // The lift is tilted by the pitch: not straight up.
+    let lift = cart_pose(&e, &c).transform_point3(Vec3::ZERO);
+    assert!((lift.y - 0.375 * 30f32.to_radians().cos()).abs() < 1e-5);
+}
+
+/// `oldRender` off the rails: `translate(0, 0.375, 0)` first, then `180 - yRot` and the
+/// pitch; a cart without body ops keeps this path.
+#[test]
+fn an_old_behaviour_cart_keeps_old_render() {
+    let (e, c) = cart(BodyTransform::default(), 30.0, None);
+    let want = Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
+        * Mat4::from_rotation_y(150f32.to_radians())
+        * Mat4::from_rotation_z(0.0);
+    assert_mat_close(cart_pose(&e, &c), want);
 }
