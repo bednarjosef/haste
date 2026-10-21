@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 use super::{AudioOutput, PlayRequest, SoundControls, SoundId};
 use crate::channels::{ChannelPools, Pool};
 use crate::engine::{event_eq, PlayResult, SilentEngine, SoundSource};
+use crate::sound_event_listener::{PlayedSound, SoundEventListeners};
 use crate::sounds::{SoundEvents, SoundVariant};
 
 /// One sound the `SoundSystem` sent to the output, parallel to the engine's sound list:
@@ -56,6 +57,8 @@ pub struct SoundSystem {
     pub(super) incoming: Vec<SoundControls>,
     /// Indices of sounds whose player finished this tick, reused across ticks.
     pub(super) finished: Vec<usize>,
+    /// The sound event listeners' record (vanilla `SoundEngine.listeners`, the subtitles).
+    listeners: SoundEventListeners,
 }
 
 impl SoundSystem {
@@ -83,6 +86,7 @@ impl SoundSystem {
             assets_sent: false,
             incoming: Vec::new(),
             finished: Vec::new(),
+            listeners: SoundEventListeners::default(),
         }
     }
 
@@ -155,6 +159,18 @@ impl SoundSystem {
         looping: bool,
     ) -> Option<SoundId> {
         let event = self.intern(event);
+        // Vanilla's `SoundEngine.play` tells its listeners (the subtitles) before anything
+        // can keep the sound from starting.
+        self.listeners.notify(
+            &self.events,
+            &event,
+            variant,
+            source,
+            pos,
+            volume,
+            pitch,
+            looping,
+        );
         // Vanilla's `SoundEngine.play` order: the volume-0 rule first (a sound at zero
         // volume is not started; music starts silently), then the channel acquisition
         // (a full pool drops the sound).
@@ -244,6 +260,25 @@ impl SoundSystem {
     /// panning, vanilla's `SoundEngine.updateSource(Camera)`.
     pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32, pitch_deg: f32) {
         self.engine.set_listener(pos, yaw_deg, pitch_deg);
+    }
+
+    /// Whether a sound event listener is registered (vanilla `SoundManager.addListener` /
+    /// `removeListener`: the subtitle overlay while "Show Subtitles" is on). While none
+    /// is, plays record nothing.
+    pub fn set_listening(&mut self, listening: bool) {
+        self.listeners.set_listening(listening);
+    }
+
+    /// The sounds with a subtitle played since the last call, oldest first, for the
+    /// listeners (vanilla `SoundEngine.notifyListeners`, batched per tick).
+    pub fn drain_played(&mut self) -> std::vec::Drain<'_, PlayedSound> {
+        self.listeners.drain()
+    }
+
+    /// The listener's position and orientation (vanilla `SoundEngine.getListenerTransform`),
+    /// as the last [`Self::set_listener`] set it.
+    pub fn listener(&self) -> crate::spatial::ListenerTransform {
+        self.engine.listener()
     }
 
     /// Set the volume of one sound source (or the master volume).

@@ -6,6 +6,7 @@
 //! namespace may be given as `"foo:bar"`) or an object with `name` and overrides, where
 //! `type: "event"` makes `name` another event to resolve recursively.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::bail;
 use haste_core::Identifier;
@@ -47,7 +48,9 @@ pub enum SoundEntry {
 #[derive(Clone, Debug)]
 pub struct SoundEvent {
     pub sounds: Vec<SoundEntry>,
-    pub subtitle: Option<String>,
+    /// The subtitle's translation key (`subtitles.block.generic.break`), shared so a
+    /// played sound can hand it on without copying the text.
+    pub subtitle: Option<Arc<str>>,
 }
 
 /// All events parsed from `assets/minecraft/sounds.json`.
@@ -176,7 +179,7 @@ impl SoundEvents {
                 namespaced(&name),
                 SoundEvent {
                     sounds,
-                    subtitle: ev.subtitle,
+                    subtitle: ev.subtitle.map(Arc::from),
                 },
             );
         }

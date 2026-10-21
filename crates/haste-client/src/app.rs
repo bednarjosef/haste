@@ -421,8 +421,8 @@ pub fn set_hud_from_args(hud: &str) -> anyhow::Result<()> {
 }
 
 impl Session {
-    /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
-    /// silent so they neither make noise nor measure the audio thread). `address` is the server
+    /// `sound`: the audio output (the device for the window only; screenshots and the benchmark
+    /// have none, scripts a silent one: no noise, no audio thread). `address` is the server
     /// (`--server`, or the address chosen on the multiplayer screen in menu mode).
     /// `existing_ui`: menu mode's UI over its already-started JVM, reused for the HUD so the
     /// screens and chat history survive the transition into the game.
@@ -430,7 +430,7 @@ impl Session {
         username: &str,
         render_distance: Option<u8>,
         address: &str,
-        sound: bool,
+        sound: crate::sound::SoundOutput,
         existing_ui: Option<crate::ui::Ui>,
     ) -> anyhow::Result<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -472,11 +472,7 @@ impl Session {
         driver.session.fov_effect_scale = options.fov_effect_scale;
         let (biomes, biome_climates, type_names, sounds, painting_variants, mob_variants) = {
             let regs = driver.connection().registries();
-            let sounds = if sound {
-                open_sounds(regs, &data, &options.sound)
-            } else {
-                None
-            };
+            let sounds = crate::sound::open_sounds(sound, regs, &data, &options.sound);
             (
                 net::synced_biome_count(regs).unwrap_or(64),
                 biomes::biome_climates(regs),
@@ -1724,7 +1720,7 @@ impl InputRouter {
     }
 }
 
-fn open_assets() -> anyhow::Result<haste_assets::Assets> {
+pub(crate) fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     open_assets_with(&[])
 }
 
@@ -1789,43 +1785,6 @@ pub fn game_dir() -> std::path::PathBuf {
 /// `FolderRepositorySource` looks (Java side) and `apply_packs` reads (Rust).
 fn default_resource_packs_dir() -> std::path::PathBuf {
     game_dir().join("resourcepacks")
-}
-
-/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
-/// sound-event name table (the server's synced registry or the static one), played
-/// through the default device with the saved volumes. Without an audio device it stays
-/// silent; when the assets or `sounds.json` cannot be read the game runs without sound
-/// (logged) rather than not at all.
-fn open_sounds(
-    regs: &haste_protocol::SyncedRegistries,
-    data: &haste_data::GameData,
-    volumes: &haste_setup::options::SoundVolumes,
-) -> Option<crate::sound::Sounds> {
-    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
-        let mut assets = open_assets()?;
-        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
-        let mut events = haste_audio::sounds::SoundEvents::parse(&bytes)?;
-        // Vanilla's load-time check (SoundManager.prepare's validateSoundResource): a
-        // file listed in sounds.json but absent from the assets is dropped from its
-        // event now, so it can never be picked and fail to play later.
-        let dropped = events.retain_files(|path| assets.has_asset(&format!("assets/{path}")));
-        if dropped > 0 {
-            tracing::warn!("{dropped} sound files listed in sounds.json are missing");
-        }
-        Ok(events)
-    })();
-    match events {
-        Ok(events) => Some(crate::sound::Sounds::new(
-            events,
-            open_assets().ok()?,
-            crate::sound::sound_event_names(regs, data),
-            volumes,
-        )),
-        Err(e) => {
-            tracing::warn!("sound stays off: {e:#}");
-            None
-        }
-    }
 }
 
 /// The client without a server: the vanilla title screen (and everything it opens) in the same
@@ -1979,7 +1938,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         &args.username,
         args.render_distance,
         args.server.as_deref().unwrap(),
-        false,
+        crate::sound::SoundOutput::Off,
         None,
     )?;
     let shared = session.shared.clone();
@@ -2260,7 +2219,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &args.username,
             args.render_distance,
             address,
-            false,
+            crate::sound::SoundOutput::Silent,
             None,
         )?),
         None => None,
@@ -2502,7 +2461,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 &args.username,
                                 args.render_distance,
                                 &address,
-                                false,
+                                crate::sound::SoundOutput::Silent,
                                 Some(for_game),
                             ) {
                                 Ok(s) => {
@@ -2545,7 +2504,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                         &args.username,
                                         args.render_distance,
                                         &address,
-                                        false,
+                                        crate::sound::SoundOutput::Silent,
                                         Some(for_game),
                                     ) {
                                         Ok(s) => {
@@ -2752,7 +2711,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     // Log what the frame drew (the check scripts grep this as evidence), like
                     // the in-game branch does.
                     log_script_frame(&gui, &name, &item_names);
-                    save_script_shot(&image, &name)?;
+                    crate::screenshots::save_script_shot(&image, &name)?;
                 }
             }
             if Instant::now() > deadline {
@@ -2972,19 +2931,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Saves a script `screenshot NAME` action's frame as `target/shots/script-NAME.png`.
-fn save_script_shot(image: &image::RgbaImage, name: &str) -> anyhow::Result<()> {
-    let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    image
-        .save(&path)
-        .with_context(|| format!("saving {}", path.display()))?;
-    println!("script screenshot saved to {}", path.display());
-    Ok(())
-}
-
 /// Windowed mode. With `--server` it joins at once; without it the vanilla title screen opens
 /// (menu mode) and a Join on the multiplayer screen creates the session in the same window.
 /// Leaving the server (pause screen "Disconnect") or being kicked returns to the menus.
@@ -2995,7 +2941,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
             &args.username,
             args.render_distance,
             address,
-            true,
+            crate::sound::SoundOutput::Device,
             None,
         )?),
         None => None,
@@ -3373,8 +3319,9 @@ impl App {
                     .as_ref()
                     .map(|w| w.address())
                     .unwrap_or_else(|| plain_address.clone());
+                let device = crate::sound::SoundOutput::Device;
                 let _ = tx.send(
-                    Session::join(&username, render_distance, &address, true, Some(for_game))
+                    Session::join(&username, render_distance, &address, device, Some(for_game))
                         .map(|s| (s, world)),
                 );
             })

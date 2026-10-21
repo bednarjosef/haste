@@ -62,7 +62,7 @@ pub(crate) fn tick_entity(slot: &mut Entity, env: &mut TickEnv<'_>, passenger: b
     }
     // `AbstractArrow.tick`: the client-side flight simulation, between position packets
     // (arrows are `SERVER_AND_CLIENT` simulated like items).
-    if crate::arrow::is_arrow(slot.kind) {
+    if crate::arrow::is_abstract_arrow(slot.kind) {
         crate::arrow::tick(slot, env.arrows, env.arrow_particles);
     }
     // `PrimedTnt.tick` runs on the client too: the fuse counts down locally between the

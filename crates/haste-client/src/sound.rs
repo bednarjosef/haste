@@ -29,6 +29,7 @@ mod ambient_sound_handlers;
 mod biome_ambient_sounds_handler;
 mod falls;
 mod own_block;
+mod sound_event_listeners;
 mod sound_manager;
 mod steps;
 #[cfg(test)]
@@ -212,6 +213,18 @@ pub enum SoundRequest {
     Stop(StopRequest),
 }
 
+/// Where a joined game's sound goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoundOutput {
+    /// No sound system at all (screenshots and benchmarks measure the frame alone).
+    Off,
+    /// The sound system over no device: everything sounds drive (the subtitles) runs and
+    /// nothing is heard (scripted runs).
+    Silent,
+    /// The default audio device (the window).
+    Device,
+}
+
 /// The sound and music output of one client, owned by the game thread (through
 /// `Shared::sound`). Everything here runs at 20 Hz or per packet; a tick with no sound
 /// started allocates nothing (`SoundSystem::tick` reuses its buffers).
@@ -241,6 +254,48 @@ pub struct Sounds {
     unknown_logged: HashSet<String>,
 }
 
+/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
+/// sound-event name table (the server's synced registry or the static one), played
+/// through `output` with the saved volumes (none at all for [`SoundOutput::Off`]). Without
+/// an audio device it stays silent; when the assets or `sounds.json` cannot be read the
+/// game runs without sound (logged) rather than not at all.
+pub(crate) fn open_sounds(
+    output: SoundOutput,
+    regs: &haste_protocol::SyncedRegistries,
+    data: &haste_data::GameData,
+    volumes: &haste_setup::options::SoundVolumes,
+) -> Option<Sounds> {
+    if output == SoundOutput::Off {
+        return None;
+    }
+    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
+        let mut assets = crate::app::open_assets()?;
+        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
+        let mut events = haste_audio::sounds::SoundEvents::parse(&bytes)?;
+        // Vanilla's load-time check (SoundManager.prepare's validateSoundResource): a
+        // file listed in sounds.json but absent from the assets is dropped from its
+        // event now, so it can never be picked and fail to play later.
+        let dropped = events.retain_files(|path| assets.has_asset(&format!("assets/{path}")));
+        if dropped > 0 {
+            tracing::warn!("{dropped} sound files listed in sounds.json are missing");
+        }
+        Ok(events)
+    })();
+    match events {
+        Ok(events) => Some(Sounds::new(
+            output,
+            events,
+            crate::app::open_assets().ok()?,
+            sound_event_names(regs, data),
+            volumes,
+        )),
+        Err(e) => {
+            tracing::warn!("sound stays off: {e:#}");
+            None
+        }
+    }
+}
+
 /// The saved per-category volumes onto the system (vanilla's `soundCategory_*` option
 /// keys), each scaled by the master volume.
 fn apply_volumes(system: &mut SoundSystem, volumes: &haste_setup::options::SoundVolumes) {
@@ -261,14 +316,23 @@ fn apply_volumes(system: &mut SoundSystem, volumes: &haste_setup::options::Sound
 impl Sounds {
     /// Build the output from the parsed `sounds.json`, the open assets, the sound-event
     /// name table and the saved per-category volumes. Without an audio device this stays
-    /// silent (`AudioOutput`'s fallback), so headless and CI could build it too.
+    /// silent (`AudioOutput`'s fallback), so headless and CI could build it too; with
+    /// [`SoundOutput::Silent`] it never opens the device.
     pub fn new(
+        output: SoundOutput,
         events: SoundEvents,
         assets: haste_assets::Assets,
         names: Vec<String>,
         volumes: &haste_setup::options::SoundVolumes,
     ) -> Self {
-        let mut system = SoundSystem::new(events.clone(), assets);
+        let mut system = match output {
+            SoundOutput::Device => SoundSystem::new(events.clone(), assets),
+            SoundOutput::Off | SoundOutput::Silent => SoundSystem::with_output(
+                events.clone(),
+                assets,
+                haste_audio::output::AudioOutput::silent(),
+            ),
+        };
         apply_volumes(&mut system, volumes);
         Self::with_system(system, events, names)
     }

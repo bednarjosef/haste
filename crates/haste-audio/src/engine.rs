@@ -266,6 +266,11 @@ impl SilentEngine {
         self.listener = ListenerTransform::from_look(pos, yaw_deg, pitch_deg);
     }
 
+    /// The listener's transform as the last [`Self::set_listener`] set it.
+    pub fn listener(&self) -> ListenerTransform {
+        self.listener
+    }
+
     /// Set the volume of one sound source (or the master volume).
     pub fn set_volume(&mut self, source: SoundSource, volume: f32) {
         self.volumes.set(source, volume);

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use glam::{DVec3, Vec3};
 use haste_core::{BlockPos, Identifier};
 
-use super::firework::{self, Firework};
+use super::firework::{self, Firework, FireworkSound};
 use super::particle::Motion;
 use super::providers::ParticleBehaviour;
 use super::resources::ParticleTypes;
@@ -78,6 +78,8 @@ pub struct Particles {
     pub(super) pending: Vec<ParticleState>,
     /// The firework bursts in progress (`FireworkParticles.Starter`), ticked before the pool.
     pub(super) starters: Vec<firework::Starter>,
+    /// The firework sounds queued by the bursts this tick, drained by the client after it.
+    pub(super) firework_sounds: Vec<FireworkSound>,
 }
 
 impl Particles {
@@ -93,6 +95,7 @@ impl Particles {
             seed_children: Vec::new(),
             pending: Vec::new(),
             starters: Vec::new(),
+            firework_sounds: Vec::new(),
         }
     }
 
@@ -112,6 +115,7 @@ impl Particles {
         self.pool.clear();
         self.pending.clear();
         self.starters.clear();
+        self.firework_sounds.clear();
     }
 
     /// Spawns per the packet's semantics (see the module docs). Unknown types are skipped,
@@ -395,8 +399,15 @@ impl Particles {
     pub fn tick(&mut self, camera: DVec3) {
         self.camera = camera;
         // The bursts in progress tick first; their sparks queue like every add this tick.
-        self.starters
-            .retain_mut(|s| s.tick(&mut self.pending, &mut self.rng));
+        let camera_now = self.camera;
+        self.starters.retain_mut(|s| {
+            s.tick(
+                &mut self.pending,
+                &mut self.rng,
+                camera_now,
+                &mut self.firework_sounds,
+            )
+        });
         let mut i = 0;
         while i < self.pool.len() {
             if self.tick_one(i) {
