@@ -34,3 +34,26 @@ pub(crate) fn item_entity_copies(count: i32) -> u32 {
         _ => 5,
     }
 }
+
+/// The per-entity phase `ItemEntity.bobOffs` stands in for: vanilla draws it from the
+/// entity's random at spawn, in [0, 2pi); ours hashes the entity id (indistinguishable
+/// to a player).
+pub(crate) fn entity_phase(id: haste_core::EntityId) -> f32 {
+    let mut h = (id.0 as u32).wrapping_mul(0x9E37_79B9);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    (h >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU
+}
+
+/// A deterministic [0,1) stream for the stack-copy offsets (vanilla reseeds Java's
+/// `Random` with `getSeedForItemStack` — the item — each frame, so the offsets are
+/// stable per item type; matching Java's sequence exactly is not required, only the
+/// stability and the range).
+pub(crate) fn seeded_float(seed: u32, i: u32) -> f32 {
+    let mut h = seed
+        .wrapping_mul(0x85EB_CA6B)
+        .wrapping_add(i.wrapping_mul(0xC2B2_AE35));
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x27D4_EB2F);
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}

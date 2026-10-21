@@ -124,7 +124,8 @@ use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
 pub(crate) use item_entity::{
-    item_entity_bob, item_entity_copies, item_entity_lift, item_entity_spin,
+    entity_phase, item_entity_bob, item_entity_copies, item_entity_lift, item_entity_spin,
+    seeded_float,
 };
 
 /// Vanilla renders the player model at 15/16 scale.
@@ -154,29 +155,6 @@ pub enum ItemDisplay {
     Ground,
     /// `on_shelf` (`ShelfRenderer`: items on a shelf block, small and sunk into the board).
     OnShelf,
-}
-
-/// The per-entity phase `ItemEntity.bobOffs` stands in for: vanilla draws it from the
-/// entity's random at spawn, in [0, 2pi); ours hashes the entity id (indistinguishable
-/// to a player).
-pub(crate) fn entity_phase(id: EntityId) -> f32 {
-    let mut h = (id.0 as u32).wrapping_mul(0x9E37_79B9);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xC2B2_AE35);
-    (h >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU
-}
-
-/// A deterministic [0,1) stream for the stack-copy offsets (vanilla reseeds Java's
-/// `Random` with `getSeedForItemStack` — the item — each frame, so the offsets are
-/// stable per item type; matching Java's sequence exactly is not required, only the
-/// stability and the range).
-pub(crate) fn seeded_float(seed: u32, i: u32) -> f32 {
-    let mut h = seed
-        .wrapping_mul(0x85EB_CA6B)
-        .wrapping_add(i.wrapping_mul(0xC2B2_AE35));
-    h ^= h >> 13;
-    h = h.wrapping_mul(0x27D4_EB2F);
-    (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
 /// The vertex range the upload after `append_block_entities` must cover: only the tail
