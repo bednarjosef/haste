@@ -108,6 +108,9 @@ impl Session {
         // `ParticleEngine.tick` runs after `tickEntities`/`level.tick`), so their target is the
         // collector's position at the end of the tick.
         self.tick_pickup_particles(entities);
+        // The tracking emitters' tick (vanilla `ParticleEngine.tick`, the same place): the
+        // critical hit particles follow their entities.
+        self.tick_tracking_emitters(entities);
         // The explosion tracker's tick (vanilla `ClientLevel.tick` ->
         // `ClientExplosionTracker.tick`): the block particles the `explode` packets
         // carried, spawned into air blocks weighted by block count, into this tick's

@@ -120,6 +120,12 @@ pub struct Session {
     /// The random vanilla's `ClientPacketListener.random` draws the pickup pitch and sound
     /// seed from.
     pickup_rng: haste_audio::random::LegacyRandom,
+    /// The tracking emitters (`ParticleEngine.trackingEmitters`) the `animate` packet's critical
+    /// hit actions start: 16 particles a tick on an entity for three ticks. Ticked in `end_tick`.
+    pub tracking_emitters: Vec<tracking_emitter::TrackingEmitter>,
+    /// The random the emitters' particle offsets are drawn from (vanilla's `Particle.random`,
+    /// an unseeded `RandomSource`).
+    tracking_rng: haste_audio::random::LegacyRandom,
     /// Sound packets recorded this tick ([`crate::sound::record`]), drained by the game
     /// thread's sound output ([`crate::sound::Sounds::apply`]); cleared at `end_tick` when
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
@@ -277,6 +283,8 @@ impl Session {
             maps_version: 0,
             pickup_particles: Vec::new(),
             pickup_rng: Session::new_pickup_rng(),
+            tracking_emitters: Vec::new(),
+            tracking_rng: tracking_emitter::new_random(),
             sound_requests: Vec::new(),
             screen: crate::screen_effects::PortalEffects::default(),
             screen_probe: crate::screen_effects::WorldProbe::default(),
@@ -497,11 +505,15 @@ impl Session {
         let Some(p) = self.apply_chat(p) else {
             return;
         };
+        let Some(p) = self.apply_animate(p, entities) else {
+            return;
+        };
         self.apply_misc(p, entities, regs);
     }
 }
 
 pub mod account;
+mod animate;
 mod arrow_world;
 mod block_entity_types;
 mod block_events;
@@ -529,6 +541,7 @@ mod remote_use;
 mod session_tick;
 mod sinks;
 mod sync_block_state;
+mod tracking_emitter;
 mod vehicle;
 mod weather;
 mod world;
