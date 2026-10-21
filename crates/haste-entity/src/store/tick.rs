@@ -120,6 +120,8 @@ pub(crate) fn tick_entity(slot: &mut Entity, env: &mut TickEnv<'_>, passenger: b
     slot.swell = (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
     // `IronGolem.tick`: the attack animation tick counts down.
     slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
+    // `EvokerFangs.tick`: the bite's `lifeTicks` counts down once it has started.
+    slot.fangs.tick();
     // `AbstractMinecart.tick`'s countdowns (hurt time, damage, the TNT cart's fuse); read only
     // by minecarts, harmless elsewhere.
     crate::minecart::tick(&mut slot.metadata);

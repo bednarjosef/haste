@@ -551,6 +551,7 @@ mod difficulty;
 mod driver;
 mod effects;
 mod entities;
+mod evoker_fangs;
 mod explosion;
 mod explosion_tracker;
 pub(crate) mod fireworks;

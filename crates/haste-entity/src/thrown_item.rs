@@ -90,6 +90,19 @@ pub fn has_smoke_trail(kind: RegistryIndex) -> bool {
     )
 }
 
+impl crate::store::EntityStore {
+    /// The current positions of the entities that trail smoke
+    /// (`AbstractHurtingProjectile.createParticleTrail`), for the client's per-tick particle
+    /// spawn — no allocation, one position per trailing entity.
+    pub fn smoke_trail_positions(&self) -> impl Iterator<Item = haste_core::DVec3> + '_ {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| has_smoke_trail(slot.kind))
+            .map(|slot| slot.pos)
+    }
+}
+
 /// Whether an entity type is a firework rocket (`FireworkRocketEntity`), which trails its
 /// `FIREWORK` particles while it flies.
 pub fn is_firework_rocket(kind: RegistryIndex) -> bool {

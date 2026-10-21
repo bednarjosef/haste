@@ -123,6 +123,8 @@ pub struct Entity {
     pub old_swell: i32,
     /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
     pub attack_ticks: i32,
+    /// `EvokerFangs`' client state: the bite started by entity event 4 and its `lifeTicks`.
+    pub fangs: crate::evoker_fangs::FangsState,
     /// The tick count when entity event 32 last arrived (`ArmorStand.handleEntityEvent` sets
     /// `lastHit = gameTime`): the armour stand's hit wobble counts from it. A sentinel far in
     /// the past means "never hit" (vanilla's `lastHit = 0` against a large game time).
@@ -543,17 +545,6 @@ impl EntityStore {
     pub(crate) fn get_mut(&mut self, id: EntityId) -> Option<&mut Entity> {
         let i = self.slot(id)?;
         self.slots[i as usize].as_mut()
-    }
-
-    /// The current positions of the entities that trail smoke
-    /// (`AbstractHurtingProjectile.createParticleTrail`), for the client's per-tick particle
-    /// spawn — no allocation, one position per trailing entity.
-    pub fn smoke_trail_positions(&self) -> impl Iterator<Item = DVec3> + '_ {
-        self.slots
-            .iter()
-            .flatten()
-            .filter(|slot| crate::thrown_item::has_smoke_trail(slot.kind))
-            .map(|slot| slot.pos)
     }
 
     pub fn len(&self) -> usize {

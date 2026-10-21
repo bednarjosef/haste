@@ -35,11 +35,17 @@ const KNOWN_VERSION: u32 = 1;
 ///   (`AbstractBoatRenderer.submit` lifts them 0.375 blocks instead of
 ///   `LivingEntityRenderer`'s -1.501, so their `PartPose` values are already relative to that
 ///   origin; see `crate::boat`);
+/// - the evoker fangs' and the llama spit's, whose renderers do their own placement
+///   (`EvokerFangsRenderer.submit` flips and translates by -1.501 itself, carried whole by
+///   `crate::evoker_fangs_model::body`; `LlamaSpitRenderer.submit` draws the layer unflipped
+///   about the entity's origin), so shifting them too would move them by 1.5 blocks;
 /// - the trident's, which `ThrownTridentRenderer.submit` draws at the entity's own position
 ///   with only its yaw and pitch turns (it is no `LivingEntityRenderer`), so the shift would
 ///   slide the whole trident 1.5 blocks along its shaft (see `crate::trident`).
 const UNSHIFTED_LAYERS: &[&str] = &[
     "minecraft:copper_golem#main",
+    "minecraft:evoker_fangs#main",
+    "minecraft:llama_spit#main",
     "minecraft:trident#main",
     "minecraft:boat/acacia#main",
     "minecraft:chest_boat/acacia#main",

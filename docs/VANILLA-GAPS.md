@@ -164,8 +164,9 @@ Other players' held items, which the lead found missing, are wired on this branc
 | `EndCrystalRenderer` (crystal + beam to the dragon) | missing (generic box) | shadow radius only, registry.rs:1140 | medium (End fight) |
 | `WindChargeRenderer`, `BreezeWindChargeRenderer` | missing (generic box) | none found | medium |
 | `AreaEffectCloudRenderer` | missing (generic box; vanilla is translucent) | none found | low |
-| `EvokerFangsRenderer` | missing (generic box) | none found | low |
-| `LlamaSpitRenderer`, `WitherSkullRenderer`, `DragonFireballRenderer`, `ShulkerBulletRenderer`, `OminousItemSpawnerRenderer`, `EyeOfEnderRenderer`, `ExperienceBottleRenderer` | missing (generic box) | none found | low-medium |
+| `EvokerFangsRenderer` (bite animation, `EvokerFangsModel`, status 4 bite sound) | partial: vanilla model and bite through the generic model path (registry.rs `minecraft:evoker_fangs`, crates/haste-entity/src/evoker_fangs.rs, evoker_fangs_model.rs, render.rs:134-207); invisible before the bite; not batched in a dedicated renderer; bite sound not silent-aware; on-screen check inconclusive (bite seen in the log, fangs not clearly seen in screenshots) | low |
+| `LlamaSpitRenderer` (`llama_spit#main` model, fixed transform, no shadow) | partial: vanilla model and transform through the generic model path (llama_spit_model.rs, render.rs:134-207); on-screen check inconclusive (a small dark shape, not confirmed as the spit) | low-medium |
+| `WitherSkullRenderer`, `DragonFireballRenderer`, `ShulkerBulletRenderer`, `OminousItemSpawnerRenderer`, `EyeOfEnderRenderer`, `ExperienceBottleRenderer` | missing (generic box) | none found | low-medium |
 | Display entities: `DisplayRenderer.Block/Item/Text` | missing (generic box for block/item, nothing for text) | tests say so: crates/haste-entity/src/tests/mod.rs:212 | medium (datapacks, 26.3 features, mods later) |
 | `LeashKnotRenderer` + leash lines between entities | missing | no non-test match for "leash" in haste-render | medium |
 | `GuardianRenderer`/`ElderGuardianRenderer` attack beam | missing | guardian model exists (registry.rs:317), no beam code | medium |

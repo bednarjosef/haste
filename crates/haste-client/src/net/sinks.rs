@@ -143,6 +143,10 @@ pub trait EntitySink {
     fn mark_attack(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EvokerFangs.handleEntityEvent`: entity event 4 starts the fangs' bite.
+    fn mark_fangs_attack(&mut self, id: EntityId) {
+        let _ = id;
+    }
     /// `EntityStore::mark_hit`: entity event 32 (an armour stand was hit, starting its
     /// wobble). Default no-op.
     fn mark_hit(&mut self, id: EntityId) {
@@ -343,6 +347,9 @@ impl EntitySink for EntityStore {
     }
     fn mark_attack(&mut self, id: EntityId) {
         EntityStore::mark_attack(self, id)
+    }
+    fn mark_fangs_attack(&mut self, id: EntityId) {
+        EntityStore::mark_fangs_attack(self, id)
     }
     fn mark_hit(&mut self, id: EntityId) {
         EntityStore::mark_hit(self, id)
