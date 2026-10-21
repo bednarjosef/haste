@@ -499,7 +499,11 @@ fn cloud_drift_uses_game_time_plus_partial() {
 /// `Assets::open` checks, in a fresh temp dir.
 pub(super) fn synthetic_assets() -> haste_assets::Assets {
     use std::io::Write;
-    let dir = std::env::temp_dir().join(format!("haste-render-clouds-{}", std::process::id()));
+    // One directory per call: tests run in parallel threads of one process, and a shared jar
+    // was rewritten by one test while another read it ("failed to fill whole buffer").
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("haste-render-clouds-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let jar = dir.join("client.jar");
     let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());

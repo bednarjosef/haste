@@ -23,6 +23,9 @@ pub(crate) struct LerpState {
     target_pitch: f32,
     /// Ticks left in the current window; 0 = resting on the targets.
     remaining: u8,
+    /// `AbstractInterpolationHandler.interpolationSteps`: the window length, 3 for most
+    /// entities; a display entity's comes from its teleport duration (0 snaps).
+    steps: u8,
 }
 
 impl LerpState {
@@ -32,26 +35,39 @@ impl LerpState {
             target_yaw: yaw,
             target_pitch: pitch,
             remaining: 0,
+            steps: INTERPOLATION_STEPS,
         }
+    }
+
+    /// `LinearInterpolationHandler.setInterpolationLength`: the next window's length (the one
+    /// in flight keeps its remaining steps).
+    pub fn set_steps(&mut self, steps: u8) {
+        self.steps = steps;
     }
 
     /// A short-delta move arrived (`delta` in blocks): the delta codec's base is the last
     /// target, so the new target is the old one plus the delta. `current` is the entity's
     /// present (pos, yaw, pitch), the rotation to keep when no interpolation is in flight.
-    pub fn on_delta(&mut self, delta: DVec3, current: (DVec3, f32, f32)) {
-        self.interpolate_to(Some(self.target + delta), None, current);
+    pub fn on_delta(
+        &mut self,
+        delta: DVec3,
+        current: (DVec3, f32, f32),
+    ) -> Option<(DVec3, f32, f32)> {
+        self.interpolate_to(Some(self.target + delta), None, current)
     }
 
     /// `AbstractInterpolationHandler.interpolateTo`: head for `pos` and/or `rot` over 3 steps.
     /// A part the packet lacks keeps the in-flight target, or the entity's `current` value when
     /// nothing is in flight. A target identical to the one already in flight does not restart
-    /// the window (the `is` check before `startInterpolating`).
+    /// the window (the `is` check before `startInterpolating`). With a zero-step window the
+    /// handler does not ease at all: the target comes back for the caller to `snapTo`
+    /// (position, yaw, pitch), and nothing stays in flight.
     pub fn interpolate_to(
         &mut self,
         pos: Option<DVec3>,
         rot: Option<(f32, f32)>,
         current: (DVec3, f32, f32),
-    ) {
+    ) -> Option<(DVec3, f32, f32)> {
         let active = self.remaining > 0;
         let (cur_pos, cur_yaw, cur_pitch) = if active {
             (self.target, self.target_yaw, self.target_pitch)
@@ -60,13 +76,18 @@ impl LerpState {
         };
         let pos = pos.unwrap_or(cur_pos);
         let (yaw, pitch) = rot.unwrap_or((cur_yaw, cur_pitch));
+        if self.steps == 0 {
+            self.snap(pos, yaw, pitch);
+            return Some((pos, yaw, pitch));
+        }
         if active && self.target == pos && self.target_yaw == yaw && self.target_pitch == pitch {
-            return;
+            return None;
         }
         self.target = pos;
         self.target_yaw = yaw;
         self.target_pitch = pitch;
-        self.remaining = INTERPOLATION_STEPS;
+        self.remaining = self.steps;
+        None
     }
 
     /// `Entity.snapTo`: abandon any in-flight smoothing and rest on the new values.

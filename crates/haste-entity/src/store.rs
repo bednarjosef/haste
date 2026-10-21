@@ -18,6 +18,9 @@ use crate::metadata::Metadata;
 use crate::riding::Riding;
 use crate::walk_swing::{SwingState, WalkAnimationState};
 
+/// `Entity` construction from a spawn packet (`recreateFromPacket`).
+mod recreate;
+
 /// Hurt flash duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TICKS: u32 = 10;
 /// Death animation duration in ticks (vanilla's `deathTime` runs to 20).
@@ -150,6 +153,8 @@ pub struct Entity {
     /// The entity is a `minecraft:spectral_arrow` (its own per-tick particle,
     /// `SpectralArrow.tick`).
     pub spectral: bool,
+    /// A display entity's interpolated render state (`crate::display`); `None` otherwise.
+    pub display: Option<Box<crate::display::DisplayState>>,
 }
 
 /// The hands, equipment layers and custom head item of an entity, resolved through the shared
@@ -330,7 +335,9 @@ impl EntityStore {
     pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.lerp.on_delta(delta, e.current());
+                if let Some(snap) = e.lerp.on_delta(delta, e.current()) {
+                    e.snap_to(snap);
+                }
                 e.on_ground = on_ground;
             }
         }
@@ -341,7 +348,10 @@ impl EntityStore {
     pub fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.lerp.interpolate_to(None, Some((yaw, pitch)), e.current());
+                let current = e.current();
+                if let Some(snap) = e.lerp.interpolate_to(None, Some((yaw, pitch)), current) {
+                    e.snap_to(snap);
+                }
                 e.on_ground = on_ground;
             }
         }
@@ -356,17 +366,17 @@ impl EntityStore {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
                 e.on_ground = on_ground;
-                if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
-                    e.pos = pos;
-                    e.prev_pos = pos;
-                    e.yaw = yaw;
-                    e.prev_yaw = yaw;
-                    e.pitch = pitch;
-                    e.prev_pitch = pitch;
-                    e.lerp.snap(pos, yaw, pitch);
+                // A display's zero-step window snaps as well (`interpolateTo` with
+                // `interpolationSteps == 0`).
+                let snap = if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
+                    Some((pos, yaw, pitch))
                 } else {
+                    let current = e.current();
                     e.lerp
-                        .interpolate_to(Some(pos), Some((yaw, pitch)), e.current());
+                        .interpolate_to(Some(pos), Some((yaw, pitch)), current)
+                };
+                if let Some(snap) = snap {
+                    e.snap_to(snap);
                 }
             }
         }
@@ -407,6 +417,8 @@ impl EntityStore {
         if crate::arrow::is_arrow(e.kind) {
             crate::arrow::on_metadata(e, entries);
         }
+        // `Display.onSyncedDataUpdated`: flag what the next tick rebuilds.
+        crate::display::on_metadata(e, entries);
         // `onSyncedDataUpdated` for the living-flags byte: a use started or stopped.
         if e.is_living && e.metadata.living != old_living {
             crate::using_item::on_living_flags(e);
@@ -539,6 +551,10 @@ impl EntityStore {
                 pitch: &mut slot.pitch,
                 prev_pitch: &mut slot.prev_pitch,
             });
+            // `Display.tick`: the render state rebuilt from the synched data that changed.
+            if let Some(display) = slot.display.as_mut() {
+                display.tick(&slot.metadata, slot.tick_count);
+            }
             // `ItemEntity.tick`: gravity, move, drag, between position packets.
             if slot.is_item {
                 crate::item_entity::tick(slot, world);

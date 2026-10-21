@@ -47,6 +47,15 @@ impl EntityStore {
             // (`AbstractMinecartRenderer`, `ThrownItemRenderer`, `DragonFireballRenderer`),
             // but keep the entity's own interpolated position. Arrows too (`ArrowRenderer`),
             // keeping the entity's own position.
+            // `DisplayRenderer`: a display draws only once its render state exists, with the
+            // shadow its interpolated state casts.
+            let display = match slot.display {
+                Some(_) => match crate::display::decoration(slot, partial_tick) {
+                    Some(d) => Some(d),
+                    None => continue,
+                },
+                None => None,
+            };
             let minecart_variant = crate::minecart::variant_for_kind(slot.kind);
             let minecart = minecart_variant
                 .map(|v| crate::minecart::decoration(&slot.metadata, v, partial_tick));
@@ -58,6 +67,10 @@ impl EntityStore {
                 || crate::arrow::is_arrow(slot.kind);
             let decoration = minecart
                 .map(haste_core::model::Decoration::Minecart)
+                .or_else(|| {
+                    let d = display.as_ref()?.0.clone();
+                    Some(haste_core::model::Decoration::Display(d))
+                })
                 .or_else(|| {
                     thrown
                         .and_then(|t| crate::thrown_item::decoration(&t, &slot.metadata))
@@ -176,6 +189,8 @@ impl EntityStore {
             let shadow_strength = type_name
                 .map(crate::registry::shadow_strength_for_name)
                 .unwrap_or(1.0);
+            let (shadow_radius, shadow_strength) =
+                display.map_or((shadow_radius, shadow_strength), |(_, r, s)| (r, s));
             let invisible = slot.metadata.shared.invisible;
             // `EntityRenderer.extractNameTags`/`shouldShowName`: players always show their name
             // (`Player.shouldShowName`), mobs only a visible custom name (`LivingEntity`), both

@@ -9,6 +9,7 @@ pub mod avatar;
 pub mod boat;
 pub mod decoration;
 pub mod dims;
+pub mod display;
 pub mod dragon_fireball;
 pub mod entity;
 pub mod entity_events;

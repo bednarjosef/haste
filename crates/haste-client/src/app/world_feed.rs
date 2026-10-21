@@ -489,6 +489,7 @@ impl WorldFeed {
             leash_lines::convert(&*world, &self.leash, &mut self.leash_render);
         }
         renderer.set_leash_lines(&self.leash_render);
+        haste_entity::display::fill_light_emission(&mut self.instances, &*shared.data);
         (&self.instances, &self.be_instances)
     }
 

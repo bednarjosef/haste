@@ -19,6 +19,8 @@ pub enum Decoration {
     ThrownItem(ThrownItemDecoration),
     DragonFireball,
     Arrow(ArrowDecoration),
+    /// `DisplayRenderer` (block, item and text displays).
+    Display(crate::display::DisplayDecoration),
 }
 
 /// The state `ArrowRenderer.extractRenderState` collects for an arrow (vanilla

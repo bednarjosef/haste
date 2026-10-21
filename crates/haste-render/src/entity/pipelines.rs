@@ -416,7 +416,14 @@ impl EntityRenderer {
         });
         let mask_capacity = 256;
         let mask_buffer = crate::entity::boat::make_mask_buffer(&device, mask_capacity);
+        let displays = display::Displays::new(display::TextPass::new(
+            &device,
+            &pipeline_layout,
+            &shader,
+            target_format,
+        ));
         EntityRenderer {
+            displays,
             device,
             queue,
             pipeline,

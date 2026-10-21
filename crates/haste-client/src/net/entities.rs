@@ -210,6 +210,10 @@ impl Session {
             P::EntityEvent(e) if e.status == 70 => {
                 entities.prime_tnt_minecart(EntityId(e.entity_id))
             }
+            // Entity status 35: the totem of undying popped (`handleEntityEvent`'s TOTEM case).
+            P::EntityEvent(e) if e.status == 35 => {
+                super::totem::start_totem(self, EntityId(e.entity_id), entities)
+            }
             P::SetEntityData(d) => {
                 // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
                 // supply and the screen effects' on-fire and freeze ticks), and `_ if
