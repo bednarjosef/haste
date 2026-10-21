@@ -88,6 +88,22 @@ fn decoration_uses_the_synced_stack() {
     );
 }
 
+/// `FireworkRocketEntity.isShotAtAngle` reads `DATA_SHOT_AT_ANGLE` at index 10 (the attached
+/// target at 9 is a different slot): only a synched true turns the rocket to its flight.
+#[test]
+fn shot_at_angle_reads_the_boolean_at_index_ten() {
+    let flag = |index, value| {
+        metadata(vec![MetadataEntry {
+            index,
+            value: MetadataValue::Boolean(value),
+        }])
+    };
+    assert!(!thrown_item::shot_at_angle(&Metadata::default()));
+    assert!(thrown_item::shot_at_angle(&flag(10, true)));
+    assert!(!thrown_item::shot_at_angle(&flag(10, false)));
+    assert!(!thrown_item::shot_at_angle(&flag(9, true)));
+}
+
 /// Without a stack the type's default item resolves through the item registry: the
 /// snowball's `getDefaultItem` is `minecraft:snowball`, the fireballs' `FIRE_CHARGE`, the
 /// eye of ender's `ENDER_EYE`.

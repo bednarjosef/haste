@@ -15,6 +15,9 @@ use haste_core::RegistryIndex;
 
 use crate::metadata::Metadata;
 
+/// `FireworkRocketEntity.DATA_SHOT_AT_ANGLE`'s synched slot.
+const SHOT_AT_ANGLE_INDEX: u8 = 10;
+
 /// One thrown-item entity type: `EntityRenderers`' registration of it — the
 /// `ThrownItemRenderer` constructor's `scale` and `fullBright` — plus the item its class
 /// defaults to, drawn when the synched stack does not say otherwise.
@@ -108,6 +111,16 @@ fn item_of(metadata: &Metadata) -> Option<RegistryIndex> {
         Some(MetadataValue::ItemStack(s)) if !s.is_empty() => s.item,
         _ => None,
     }
+}
+
+/// `FireworkRocketEntity.isShotAtAngle` (`DATA_SHOT_AT_ANGLE`, the boolean at index 10, after
+/// the item at 8 and the attached target at 9): a rocket shot from a crossbow or at an angle
+/// is drawn turned to its flight. The renderer applies the turn; this only reads the flag.
+pub fn shot_at_angle(metadata: &Metadata) -> bool {
+    matches!(
+        metadata.get(SHOT_AT_ANGLE_INDEX).map(|e| &e.value),
+        Some(MetadataValue::Boolean(true))
+    )
 }
 
 /// A default item's registry index, from the data-generator report's `minecraft:item`
