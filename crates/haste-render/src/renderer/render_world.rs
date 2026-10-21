@@ -129,6 +129,10 @@ impl Renderer {
             &fog_data,
             frame.partial_tick,
         );
+        // The world border's wall (vanilla `WorldBorderRenderer.prepare`): camera-relative
+        // like the clouds, so it takes the rotation-only projection.
+        self.world_border
+            .prepare(&self.gpu.queue, &frame.camera, rot_view_proj);
         // The weather columns (vanilla draws them in the level pass after translucent
         // terrain, right where the sky overlays run) and the lightning bolts (the entities'
         // lightning decorations, camera-relative). Both submit camera-relative vertices,
@@ -469,6 +473,7 @@ impl Renderer {
             draw_calls += self.clouds.draw(&mut pass);
             draw_calls += self.weather.draw(&mut pass);
             draw_calls += self.weather.draw_lightning(&mut pass);
+            draw_calls += self.world_border.draw(&mut pass);
             brackets.end(&mut pass, timer, crate::timing::OVERLAYS);
         }
 

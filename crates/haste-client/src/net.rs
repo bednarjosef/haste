@@ -206,7 +206,7 @@ pub struct Session {
     /// The world border (`minecraft:initialize_border` and the `set_border_*` packets): the
     /// interaction step gates its packets on it (`useItemOn` fails without a packet outside
     /// it, `startDestroyBlock` returns false).
-    world_border: crate::world_border::WorldBorder,
+    pub(crate) world_border: crate::world_border::WorldBorder,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
     /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
