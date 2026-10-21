@@ -435,6 +435,7 @@ impl EntityRenderer {
             hand_buffer,
             hand_capacity: 1024,
             hand: Vec::new(),
+            item_activation: None,
             item_names: Vec::new(),
             item_models: HashMap::new(),
             arm_models: [None, None, None, None, None, None, None, None],

@@ -56,6 +56,16 @@ impl Renderer {
         self.first_person = fp;
     }
 
+    /// The totem pop's item and its pose this frame (`ItemActivation` and the curve in
+    /// `ScreenEffectRenderer.renderItemActivationAnimation`, computed by the client), drawn in
+    /// the first-person pass; `None` draws nothing. Stays until changed.
+    pub fn set_item_activation(
+        &mut self,
+        activation: Option<(haste_core::RegistryIndex, glam::Mat4)>,
+    ) {
+        self.entity.item_activation = activation;
+    }
+
     /// The camera entity is a spectator this frame (`Camera.extractRenderState` reads it off
     /// the player). With the camera inside a solid-render block, [`Self::sample_world`] turns
     /// the section occlusion cull off for the frame.

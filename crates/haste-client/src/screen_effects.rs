@@ -23,6 +23,7 @@ mod confusion;
 mod draw;
 mod fire;
 mod in_block;
+mod item_activation;
 mod mob_effect;
 mod portal;
 mod powder_snow;
@@ -37,6 +38,7 @@ pub use camera_overlay::camera_overlay;
 use draw::argb;
 use draw::white;
 use in_block::BLOCK_OVERLAY_TINT;
+pub use item_activation::{item_activation_for_frame, ItemActivationView};
 pub use mob_effect::Effect;
 pub use portal::PortalEffects;
 use powder_snow::powder_snow_outline;
@@ -123,6 +125,9 @@ pub struct ViewEffects {
     /// The local player is a spectator: vanilla's `ScreenEffectRenderer.submit` draws
     /// neither the water nor the fire overlay for one (`firstPerson && !isSpectator`).
     pub spectator: bool,
+    /// The totem pop's item while its countdown runs (`ItemActivation`); the renderer draws it
+    /// under [`item_activation_pose`] each frame. `None` once the countdown ends.
+    pub item_activation: Option<ItemActivationView>,
 }
 
 impl ViewEffects {

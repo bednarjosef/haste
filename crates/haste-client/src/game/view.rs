@@ -444,6 +444,17 @@ pub(super) fn publish(
         spinning_time: screen.spinning_time(),
         spinning_speed: screen.spinning_speed(),
         spectator: view.spectator,
+        item_activation: s.player.item_activation.item().and_then(|stack| {
+            let activation = &s.player.item_activation;
+            stack
+                .item
+                .map(|item| crate::screen_effects::ItemActivationView {
+                    item,
+                    ticks: activation.ticks(),
+                    off_x: activation.off_x(),
+                    off_y: activation.off_y(),
+                })
+        }),
     };
     drop(view);
     feet

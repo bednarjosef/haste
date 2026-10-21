@@ -265,6 +265,20 @@ impl EntityRenderer {
                 }
             }
         }
+        // The totem pop's item (`ScreenEffectRenderer.renderItemActivationAnimation`): the item
+        // drawn fixed under the curve's pose, after the hand, through the same item path.
+        if let Some((index, pose)) = self.item_activation {
+            if let Some(model) = self.item_model_for(index, assets) {
+                self.emit_item(
+                    &mut out,
+                    &model,
+                    Mat4::from_mat3(inv_view) * prefix * pose,
+                    light,
+                    ItemDisplay::Fixed,
+                    assets,
+                );
+            }
+        }
         let to_view = inv_view.transpose();
         for v in &mut out {
             v.pos = (to_view * Vec3::from(v.pos)).into();

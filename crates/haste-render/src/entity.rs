@@ -262,6 +262,9 @@ pub struct EntityRenderer {
     hand_buffer: wgpu::Buffer,
     hand_capacity: usize,
     hand: Vec<EntityVertex>,
+    /// The item a totem pop shows (`ItemActivation`) and its pose this frame, drawn in the hand
+    /// pass by `prepare_hand` (see `set_item_activation` on the renderer).
+    pub(crate) item_activation: Option<(haste_core::RegistryIndex, Mat4)>,
     item_names: Vec<Identifier>,
     item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
     /// The first-person arm models, by left, [`FirstPerson::slim`] and
