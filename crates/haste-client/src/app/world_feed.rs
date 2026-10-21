@@ -478,6 +478,7 @@ impl WorldFeed {
             // so it happens here too, per frame.
             haste_entity::minecart::snap_rails(&mut self.instances, &*world, &shared.data.blocks);
         }
+        haste_entity::display::fill_light_emission(&mut self.instances, &*shared.data);
         (&self.instances, &self.be_instances)
     }
 

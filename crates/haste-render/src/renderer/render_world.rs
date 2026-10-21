@@ -31,6 +31,9 @@ impl Renderer {
         ));
         let orientation =
             crate::blockentity::camera_orientation(frame.camera.yaw, frame.camera.pitch);
+        // Display billboards face the camera (`Camera.yRot()` / `xRot()`).
+        self.entity
+            .set_camera_rotation(frame.camera.yaw, frame.camera.pitch);
         self.entity.prepare(
             frame.entities,
             frame.camera_entity,
