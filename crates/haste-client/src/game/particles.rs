@@ -170,7 +170,7 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
                     pos: crate::sound::SoundPos::Fixed(s.pos),
                     volume: 20.0,
                     pitch: s.pitch,
-                    seed: driver.session.firework_sound_rng.next_long(),
+                    seed: driver.session.totem_rng.next_long(),
                 },
             ));
     }
