@@ -56,7 +56,7 @@ impl JvmConfig {
     /// repo's `cache/` symlink). Libraries come from `libraries/` (setup's download) or, until that
     /// exists, from the spike server's `server-spike/libraries`.
     pub fn from_cache(cache: &Path) -> Result<JvmConfig> {
-        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let crate_dir = crate::crate_dir::from_environment()?;
         let java_home = cache.join("jdk");
         let client_jar = cache
             .join("versions")

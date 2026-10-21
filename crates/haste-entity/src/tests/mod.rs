@@ -36,8 +36,10 @@ mod registry;
 mod riding;
 mod setup_rotations;
 mod sleeping;
+mod spin_attack;
 mod store;
 mod thrown_item;
+mod trident;
 mod using_item;
 fn store() -> EntityStore {
     EntityStore::new(EntityDimensions::default())

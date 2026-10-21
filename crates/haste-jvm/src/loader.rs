@@ -177,6 +177,12 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/PresenceSharing",
     "net/minecraft/client/sounds/MusicManager$MusicFrequency",
     "net/minecraft/client/sounds/SoundEngine$PlayResult",
+    // the subtitle overlay (real vanilla Java, client/gui) is a sound event listener: the listener
+    // interface, the listener transform record it reads (position and orientation, pure data) and
+    // the sound instances' attenuation enum are value types; the sounds themselves are Rust's
+    "net/minecraft/client/sounds/SoundEventListener",
+    "com/mojang/blaze3d/audio/ListenerTransform",
+    "net/minecraft/client/resources/sounds/SoundInstance$Attenuation",
     "net/minecraft/client/renderer/texture/MissingTextureAtlasSprite",
     "net/minecraft/client/renderer/culling/Frustum",
     "net/minecraft/client/renderer/Rect2i",

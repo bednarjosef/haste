@@ -103,6 +103,12 @@ impl crate::store::EntityStore {
     }
 }
 
+/// Whether an entity type is a firework rocket (`FireworkRocketEntity`), which trails its
+/// `FIREWORK` particles while it flies.
+pub fn is_firework_rocket(kind: RegistryIndex) -> bool {
+    crate::registry::entity_type_name(kind) == Some("minecraft:firework_rocket")
+}
+
 /// The render state `ThrownItemRenderer.extractRenderState` collects: the item to draw
 /// (`ItemSupplier.getItem`, the synched stack or the type's default), with the renderer's
 /// scale and full-bright. `None` when no item resolves (an unknown default item draws

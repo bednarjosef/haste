@@ -63,6 +63,9 @@ mod piston;
 mod shadow;
 mod should_render;
 mod sign;
+mod spin_attack;
+#[cfg(test)]
+mod spin_attack_tests;
 #[cfg(test)]
 mod tests;
 mod thrown_item;
@@ -487,6 +490,10 @@ impl EntityRenderer {
                 // Overlay layers: the same transform and pose, each with its own texture and
                 // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
                 for overlay in e.overlays.iter().flatten() {
+                    // The riptide spin is drawn below, invisible or not.
+                    if spin_attack::is_spin_layer(&overlay.model) {
+                        continue;
+                    }
                     // The water patch is not a coloured layer: its triangles go to the
                     // depth-only mask buffer (`BoatRenderer.submitTypeAdditions`).
                     if boat::is_water_patch(&overlay.model) {
@@ -512,6 +519,7 @@ impl EntityRenderer {
                 }
             }
             self.emit_equipment(e, root, light, assets);
+            self.emit_spin_attack(e, root, light, assets);
             self.emit_stuck(e, root, light, assets);
             // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
             if e.display_fire {

@@ -388,7 +388,7 @@ impl EntityStore {
         if let Some(e) = self.get_mut(id) {
             e.velocity = v;
             // `Projectile.lerpMotion`: a moving arrow leaves the ground it was stuck in.
-            if crate::arrow::is_arrow(e.kind) && v.length_squared() > 0.0 {
+            if crate::arrow::is_abstract_arrow(e.kind) && v.length_squared() > 0.0 {
                 e.arrow_in_ground = false;
             }
         }
@@ -403,7 +403,7 @@ impl EntityStore {
         e.metadata.apply(entries);
         // `AbstractArrow.onSyncedDataUpdated`: the in-ground flag flipping to true starts the
         // stuck-in-ground shake (arrows only; other types' index 10 means something else).
-        if crate::arrow::is_arrow(e.kind) {
+        if crate::arrow::is_abstract_arrow(e.kind) {
             crate::arrow::on_metadata(e, entries);
         }
         // `Display.onSyncedDataUpdated`: flag what the next tick rebuilds.
@@ -550,7 +550,7 @@ impl EntityStore {
             }
             // `AbstractArrow.tick`: the client-side flight simulation, between position
             // packets (arrows are `SERVER_AND_CLIENT` simulated like items).
-            if crate::arrow::is_arrow(slot.kind) {
+            if crate::arrow::is_abstract_arrow(slot.kind) {
                 crate::arrow::tick(slot, arrows, arrow_particles);
             }
             // `PrimedTnt.tick` runs on the client too: the fuse counts down locally

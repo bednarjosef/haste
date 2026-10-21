@@ -69,6 +69,14 @@ pub fn is_arrow(kind: haste_core::RegistryIndex) -> bool {
     i < len && (Some(i) == arrow || Some(i) == spectral)
 }
 
+/// Whether `kind` runs `AbstractArrow.tick` on the client: the two arrows and the trident
+/// (`ThrownTrident` extends `AbstractArrow`, so its flight is simulated between position
+/// packets the same way and it reads the same synced flags and in-ground slot). Only
+/// [`is_arrow`] kinds are drawn as arrows.
+pub fn is_abstract_arrow(kind: haste_core::RegistryIndex) -> bool {
+    is_arrow(kind) || crate::trident::is_trident(kind)
+}
+
 /// The potion colour of a tipped arrow (`Arrow.getColor`), `-1` when it has none.
 pub fn effect_color(metadata: &crate::metadata::Metadata) -> i32 {
     match metadata.get(EFFECT_COLOR_INDEX).map(|e| &e.value) {
@@ -200,6 +208,13 @@ impl ArrowWorld for NoArrowWorld {
 /// movement, the clip, the drag and gravity).
 pub(crate) fn tick(e: &mut Entity, world: &dyn ArrowWorld, particles: &mut Vec<ArrowParticle>) {
     let physics = !no_physics(&e.metadata);
+    let trident = crate::trident::is_trident(e.kind);
+    // `ThrownTrident.tick`'s loyalty return (the only thing that turns a trident's physics
+    // off) steers the velocity towards the owner before `super.tick()`; that homing is not
+    // modelled, so a returning trident follows the server's position packets instead.
+    if trident && !physics {
+        return;
+    }
     // The shake only starts once the entity has ticked (vanilla's `firstTick` guard, false
     // from the end of the first tick).
     let can_shake = e.tick_count > 1;
@@ -246,8 +261,13 @@ pub(crate) fn tick(e: &mut Entity, world: &dyn ArrowWorld, particles: &mut Vec<A
     let original = e.pos;
     let in_water = world.in_water(e.pos);
     if in_water {
-        // `applyInertia(getWaterInertia())`; the bubble trail is not modelled.
-        e.velocity *= WATER_INERTIA;
+        // `applyInertia(getWaterInertia())` (`ThrownTrident.getWaterInertia` keeps 0.99); the
+        // bubble trail is not modelled.
+        e.velocity *= if trident {
+            crate::trident::WATER_INERTIA
+        } else {
+            WATER_INERTIA
+        };
     }
     // `AbstractArrow.tick`: four crit particles along the step, at quarters of the movement.
     if is_crit(&e.metadata) {

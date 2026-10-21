@@ -240,7 +240,7 @@ Count: ~15 done, 2 missing (spectator menu, dialogs), 1 partial.
 | Mount bar (horse jump), spectator bar | done (mount); spectator menu missing | crates/haste-jvm/proxies/mount_hud.rs; see §5 | — |
 | Toasts (recipes, advancements, system) | done | ClientImpl.java:383 (ToastManager) | — |
 | Vignette/pumpkin/powder snow/portal/fire/in-wall/spyglass/nausea overlays | done | crates/haste-client/src/screen_effects/ (camera_overlay, fire, in_block, portal, powder_snow, spyglass, water, confusion) | — |
-| Subtitles (sound captions) | missing | deliberately noop'd: crates/haste-jvm/proxies.conf:118-120 (sounds live in Rust, the overlay cannot hear them) | low (accessibility) |
+| Subtitles (sound captions) | done | real vanilla `SubtitleOverlay`; Rust's played sounds reach it once per frame: haste-audio/src/sound_event_listener.rs, haste-jvm/src/sound_manager.rs, SoundImpl.java | — |
 | Debug screen (F3) | done | ui/input.rs:113-116; DebugImpl.java | — |
 | World border red vignette + wall | missing | no border draw code in haste-render; world_border.rs:7 keeps collision only | medium |
 | Item cooldown sweep on the hotbar icon | missing | Cooldown packet unhandled (see §1) | medium |
@@ -383,9 +383,8 @@ usual size; otherwise it says how to split.
     `handleProjectilePower`, `handleWaypoint`, `handleServerData`, `handleAddTransientBlock`.
     Split: 2 workers (a "small packets" batch each); all are one match arm plus a small effect.
 29. **Animate packet**: crit particles on remote attacks, wake-up animation. One worker, small.
-30. **Subtitles**: feed Rust sound plays to the Java `SubtitleOverlay` (the overlay is real
-    Java, currently noop'd, proxies.conf:118-120). One worker; needs a Rust→Java sound-event
-    bridge call.
+30. ~~**Subtitles**~~: done. Rust's sound plays reach the real Java `SubtitleOverlay`
+    (`SoundEngine.notifyListeners` batched per tick, drained by `haste.gui.SoundImpl` per frame).
 
 Items 1-12 are the ones a player sees in normal survival within minutes. Items 3-11 share a
 root cause (entities whose renderer is not a dumpable mob model), so a shared "special entity

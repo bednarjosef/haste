@@ -1,6 +1,5 @@
-//! The special renderer each decoration-like entity type takes (`ItemFrameRenderer`,
-//! `PaintingRenderer`, `LightningBoltRenderer`, `ExperienceOrbRenderer`, the display renderers).
-//! Moved out of `registry.rs` to keep that file within the size limit; a pure move.
+//! The decoration kind of an entity type: which special renderer (if any) draws it (see
+//! `registry`).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

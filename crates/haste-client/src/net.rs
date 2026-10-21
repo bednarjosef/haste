@@ -182,7 +182,7 @@ pub struct Session {
     /// thread into the particle pool).
     pub firework_bursts: Vec<fireworks::FireworkBurst>,
     /// The totem pops in progress (vanilla `TrackingEmitter`s the status 35 adds), ticked by
-    /// the game thread into the particle pool, and their random (vanilla's level random).
+    /// the game thread into the particle pool, and vanilla's level random (also the firework sounds' seeds).
     pub totem_emitters: Vec<crate::game::totem_emitter::TotemEmitter>,
     pub totem_rng: haste_audio::random::LegacyRandom,
     /// Block particles queued since the last tick (our own break and mining start, and the
