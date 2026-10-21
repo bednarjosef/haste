@@ -264,6 +264,22 @@ impl ParticleBehaviour {
                 speed_up_when_blocked: true,
                 ..ParticleBehaviour::DEFAULT
             },
+            // TotemParticle (totem_of_undying): a SimpleAnimatedParticle with gravity 1.25, friction
+            // 0.6, life 60 + nextInt(12), quad 0.75x, the packet's velocity kept verbatim
+            // (`setSpeed` is not called), colour and fade in `engine.rs` and `totem.rs`.
+            "totem_of_undying" => &ParticleBehaviour {
+                source: "TotemParticle",
+                gravity: 1.25,
+                friction: 0.6,
+                lifetime: Lifetime::Rand { base: 60, max: 12 },
+                quad: Quad::Default {
+                    scale: 0.75,
+                    lo: 1.0,
+                    hi: 1.0,
+                },
+                motion: Motion::Keep,
+                ..ParticleBehaviour::DEFAULT
+            },
             // CritParticle: gravity 0.5, friction 0.7, life max(6/(r*0.8+0.6), 1) = 4..=10,
             // quad 0.75x, bright grey that yellows with age, no collision, one constructor
             // tick.

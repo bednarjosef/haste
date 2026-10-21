@@ -284,6 +284,7 @@ impl Shared {
                 world_age: 0,
                 has_sky,
                 view_distance,
+                world_border: None,
                 block_target: None,
                 eye_in_water: false,
                 eye_in_lava: false,

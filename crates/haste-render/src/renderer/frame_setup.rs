@@ -176,6 +176,12 @@ impl Renderer {
         self.clouds.set_range(range_chunks);
     }
 
+    /// Vanilla `WorldBorderRenderState` for this frame: the border's square, its status tint
+    /// and the render distance in blocks. `None` (no border known) draws no wall.
+    pub fn set_world_border(&mut self, border: Option<crate::world_border::WorldBorderFrame>) {
+        self.world_border.set_border(border);
+    }
+
     /// Number of shadow quads batched for the last frame (tests/reporting).
     pub fn shadow_quad_count(&self) -> usize {
         self.entity.shadow_quad_count()
