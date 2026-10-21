@@ -21,9 +21,10 @@ use crate::walk_swing::{SwingState, WalkAnimationState};
 /// `Entity` construction from a spawn packet (`recreateFromPacket`).
 mod recreate;
 /// One entity's tick body (`Entity.commonTick` and the per-class `tick` steps).
-mod tick;
+pub(crate) mod tick;
 
-use tick::{tick_entity, TickEnv};
+use crate::ride_tick::RideTree;
+use tick::TickEnv;
 
 /// Hurt flash duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TICKS: u32 = 10;
@@ -519,10 +520,12 @@ impl EntityStore {
             dims: &self.dims,
             use_ticks: &mut self.use_ticks,
         };
-        for slot in self.slots.iter_mut().flatten() {
-            let passenger = self.riding.vehicle_of(slot.id).is_some();
-            tick_entity(slot, &mut env, passenger);
+        RideTree {
+            slots: &mut self.slots,
+            by_id: &self.by_id,
+            riding: &self.riding,
         }
+        .tick_all(&mut env);
     }
 
     /// `swing_animation`: an entity swung a hand.

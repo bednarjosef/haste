@@ -265,7 +265,10 @@ fn passengers_ride_along_the_walk() {
     let mut out = Vec::new();
     s.render_instances(0.5, &mut out);
     let passenger = out.iter().find(|i| i.id == EntityId(2)).unwrap();
-    near_pos(passenger.pos, DVec3::new(0.0, 65.0, 0.0) + offset);
+    // The passenger's stored position is its seat on the cart (`Entity.positionRider` each tick),
+    // which the walk's offset then moves.
+    let rider = s.get(EntityId(2)).unwrap();
+    near_pos(passenger.pos, rider.prev_pos.lerp(rider.pos, 0.5) + offset);
     // Once the walk is over there is no offset.
     for _ in 0..3 {
         s.tick();

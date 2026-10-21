@@ -28,6 +28,7 @@ pub mod new_minecart_behavior;
 pub mod registry;
 pub mod render;
 pub mod riding;
+mod ride_tick;
 pub mod skin;
 pub mod store;
 pub mod thrown_item;

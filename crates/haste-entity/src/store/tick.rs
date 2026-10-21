@@ -23,7 +23,7 @@ pub(crate) struct TickEnv<'a> {
 
 /// One entity's tick. `passenger` is whether it rides a vehicle: a passenger does not walk
 /// (`LivingEntity.calculateEntityAnimation`) and its position is set by its vehicle afterwards.
-pub(super) fn tick_entity(slot: &mut Entity, env: &mut TickEnv<'_>, passenger: bool) {
+pub(crate) fn tick_entity(slot: &mut Entity, env: &mut TickEnv<'_>, passenger: bool) {
     slot.tick_count += 1;
     slot.prev_body_yaw = slot.body_yaw;
     // `LivingEntity.baseTick` records `yHeadRotO`, then `aiStep` applies one
