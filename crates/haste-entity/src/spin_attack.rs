@@ -1,9 +1,14 @@
 //! `SpinAttackEffectLayer`: the two rotating boxes drawn over a player while
 //! `LivingEntity.isAutoSpinAttack` (the riptide spin, living flag 4). Vanilla's
-//! `SpinAttackEffectModel` is built here in code rather than taken from the model dump:
-//! `model_dump` folds a part's scale into the cube's inflation, and each box here needs its own
-//! scale (haste-core's `ModelPart` has none, so the scale is multiplied into the cube's origin
-//! and size instead).
+//! `SpinAttackEffectModel` is built here in code: the recorder's dump does not carry its
+//! per-part scale (the loader folds a part scale into the cube inflation).
+//!
+//! Each box is the layer definition's part: `PartPose.ZERO` (at the model origin, which the
+//! feet-at-zero convention puts at `y = -GROUND_Y`, like `model_dump` does for dumped layers)
+//! holding one unscaled 16 x 32 x 16 cube, so the box UV layout matches the 64 x 64 texture.
+//! haste-core's `ModelPart` has no scale, so the renderer (haste-render's `spin_attack`)
+//! recognises the layer by its texture and applies each box's part scale (0.75 and 1.5) about
+//! the part's pivot after its rotation (`ModelPart.translateAndRotate`).
 //!
 //! The layer is an overlay in slot 1 (slot 0 is the cape): [`dress`] adds it and sets the boxes'
 //! yaw for the entity's age, so it turns with the player's own ticks.
@@ -20,14 +25,9 @@ use crate::metadata::Metadata;
 pub const TEXTURE: &str = "textures/entity/trident/trident_riptide.png";
 
 /// The number of boxes in `SpinAttackEffectModel`.
-const BOXES: usize = 2;
+pub const BOXES: usize = 2;
 
-/// `SpinAttackEffectModel.createLayer`: box `i`'s scale, `0.75 * (i + 1)`.
-pub fn box_scale(i: usize) -> f32 {
-    0.75 * (i + 1) as f32
-}
-
-/// `SpinAttackEffectModel.createLayer`: box `i`'s y offset before its scale, `-3.2 + 9.6 * (i + 1)`.
+/// `SpinAttackEffectModel.createLayer`: box `i`'s y offset, `-3.2 + 9.6 * (i + 1)`.
 pub fn box_y_offset(i: usize) -> f32 {
     -3.2 + 9.6 * (i + 1) as f32
 }
@@ -49,27 +49,25 @@ fn box_name(i: usize) -> String {
     format!("box{i}")
 }
 
-/// The layer model: the root holds the boxes directly, each one cube at vanilla's origin
-/// (`-8`, `-16 + yOffset`, `-8`) and size (16, 32, 16), both multiplied by the box's scale.
+/// The layer model: the root holds the boxes directly, each a part at the model origin with
+/// one cube at vanilla's origin (`-8`, `-16 + yOffset`, `-8`) and size (16, 32, 16), texture
+/// offset (0, 0); the part scale is the renderer's.
 fn build_layer() -> CubeModel {
     let children = (0..BOXES)
-        .map(|i| {
-            let s = box_scale(i);
-            ModelPart {
-                name: box_name(i),
-                id: box_ids()[i],
-                pivot: Vec3::ZERO,
-                rotation: Vec3::ZERO,
-                visible: true,
-                cubes: vec![Cube {
-                    origin: Vec3::new(-8.0, -16.0 + box_y_offset(i), -8.0) * s,
-                    size: Vec3::new(16.0, 32.0, 16.0) * s,
-                    inflate: 0.0,
-                    uv: [0, 0],
-                    mirror: false,
-                }],
-                children: Vec::new(),
-            }
+        .map(|i| ModelPart {
+            name: box_name(i),
+            id: box_ids()[i],
+            pivot: Vec3::new(0.0, -crate::model_dump::GROUND_Y, 0.0),
+            rotation: Vec3::ZERO,
+            visible: true,
+            cubes: vec![Cube {
+                origin: Vec3::new(-8.0, -16.0 + box_y_offset(i), -8.0),
+                size: Vec3::new(16.0, 32.0, 16.0),
+                inflate: 0.0,
+                uv: [0, 0],
+                mirror: false,
+            }],
+            children: Vec::new(),
         })
         .collect();
     CubeModel {
