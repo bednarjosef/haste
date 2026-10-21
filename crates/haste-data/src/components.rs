@@ -45,7 +45,7 @@ pub use use_effects::UseEffects;
 
 use attributes::parse_modifiers;
 use consumable::parse_consumable;
-use patch::{damage_type, dyed_color_type, PatchReader};
+use patch::PatchTypes;
 use use_effects::parse_use_effects;
 
 /// Item default components: the `equippable` per `minecraft:item` registry index, and the
@@ -57,11 +57,9 @@ pub struct ItemComponents {
     /// `minecraft:max_damage` per `minecraft:item` registry index (`None` for items that do not
     /// take damage).
     max_damage: Vec<Option<u32>>,
-    /// The `minecraft:dyed_color` data-component-type id, from the registry report. `None` when
-    /// the report is absent.
-    dyed_color_type: Option<i32>,
-    /// The `minecraft:damage` data-component-type id, from the registry report.
-    damage_type: Option<i32>,
+    /// The data-component-type ids of the patch components the stack readers decode
+    /// (`dyed_color`, `damage`, ...), from the registry report.
+    patch_types: PatchTypes,
     attributes: HashMap<Identifier, Vec<AttributeModifier>>,
     consumables: HashMap<Identifier, Consumable>,
     /// `minecraft:food` by item: its `can_always_eat` flag (`FoodProperties.canAlwaysEat`).
@@ -190,46 +188,41 @@ impl ItemComponents {
         value
     }
 
-    /// The `dyed_color` (ARGB) a stack's component patch sets, if it is the patch's first added
-    /// component (`DyedItemColor.STREAM_CODEC` is a plain int; vanilla's `getOrDefault` falls
-    /// back to the layer's `color_when_undyed` when absent). A patch whose first add is a
-    /// component Haste cannot skip returns `None` (dye is then simply not applied).
+    /// The `dyed_color` (ARGB) a stack's component patch sets (`DyedItemColor.STREAM_CODEC` is
+    /// a plain int; vanilla's `getOrDefault` falls back to the layer's `color_when_undyed` when
+    /// absent). Read while the patch's adds are components Haste can skip (`damage`,
+    /// `max_damage`, `unbreakable`); behind any other component it returns `None` (dye is then
+    /// simply not applied).
     pub fn dyed_color(&self, components_raw: &[u8]) -> Option<u32> {
-        let dyed = self.dyed_color_type?;
-        let mut r = PatchReader::new(components_raw);
-        let adds = r.var_int()?;
-        let _removes = r.var_int()?;
-        if adds <= 0 {
-            return None;
-        }
-        let ty = r.var_int()?;
-        if ty != dyed {
-            return None;
-        }
-        r.i32().map(|c| c as u32)
+        self.patch_types.scan(components_raw).dyed_color
     }
 
-    /// The `damage` a stack's component patch sets, if it is the patch's first added component
-    /// (the same first-add rule as [`dyed_color`](Self::dyed_color); `minecraft:damage` is a
-    /// plain varint). `None` means the stack carries no damage, so it is undamaged.
-    pub fn damage(&self, components_raw: &[u8]) -> Option<u32> {
-        let damage = self.damage_type?;
-        let mut r = PatchReader::new(components_raw);
-        let adds = r.var_int()?;
-        let _removes = r.var_int()?;
-        if adds <= 0 {
+    /// A stack's wear as `Crackiness.byDamage` takes it: `(damage, max_damage)` when the stack
+    /// is damageable (`ItemStack.isDamageableItem`: it has a max damage and is not
+    /// unbreakable), `None` otherwise. Both values come from the stack's patch when it sets
+    /// them (read like [`dyed_color`](Self::dyed_color)), else from the item's defaults (an
+    /// item with a max damage defaults to 0 damage, `Item.Properties.durability`).
+    pub fn wear(&self, item: RegistryIndex, components_raw: &[u8]) -> Option<(u32, u32)> {
+        let adds = self.patch_types.scan(components_raw);
+        if adds.unbreakable {
             return None;
         }
-        let ty = r.var_int()?;
-        if ty != damage {
-            return None;
-        }
-        r.var_int().map(|d| d.max(0) as u32)
+        let max = adds.max_damage.or_else(|| self.max_damage(item))?;
+        Some((adds.damage.unwrap_or(0), max))
     }
 
     /// Sets an item's default `minecraft:attribute_modifiers` (tests and tools).
     pub fn insert(&mut self, item: Identifier, modifiers: Vec<AttributeModifier>) {
         self.attributes.insert(item, modifiers);
+    }
+
+    /// Sets item `i`'s default `minecraft:equippable` (tests and tools).
+    pub fn insert_equippable(&mut self, i: RegistryIndex, equippable: ItemEquippable) {
+        let at = i.0 as usize;
+        if self.equippable.len() <= at {
+            self.equippable.resize(at + 1, None);
+        }
+        self.equippable[at] = Some(equippable);
     }
 
     /// Sets an item's default `minecraft:consumable` (tests and tools).
@@ -284,8 +277,7 @@ impl ItemComponents {
         let mut use_cooldowns: HashMap<Identifier, Identifier> = HashMap::new();
         let Ok(entries) = std::fs::read_dir(components_dir) else {
             return ItemComponents {
-                dyed_color_type: dyed_color_type(registries),
-                damage_type: damage_type(registries),
+                patch_types: PatchTypes::load(registries),
                 ..ItemComponents::default()
             };
         };
@@ -384,8 +376,7 @@ impl ItemComponents {
         ItemComponents {
             equippable,
             max_damage,
-            dyed_color_type: dyed_color_type(registries),
-            damage_type: damage_type(registries),
+            patch_types: PatchTypes::load(registries),
             attributes,
             consumables,
             foods,
