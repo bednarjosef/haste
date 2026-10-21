@@ -20,7 +20,9 @@ use serde::Deserialize;
 use crate::model_dump;
 
 /// The renderers' shadow radius and strength by entity type (`EntityRenderer.shadowRadius`).
+mod decoration;
 mod shadow;
+pub use decoration::{decoration_kind, DecorationKind};
 pub use shadow::{shadow_radius_for_name, shadow_strength_for_name};
 
 /// One table row: adult and baby layer ids (`minecraft:pig#main`), textures (jar paths under
@@ -268,6 +270,11 @@ static TABLE: &[(&str, Entry)] = &[
         "minecraft:evoker",
         row_scaled("minecraft:evoker#main", "entity/illager/evoker", 0.9375),
     ),
+    // EvokerFangsRenderer: ModelLayers.EVOKER_FANGS, textures/entity/illager/evoker_fangs.png
+    (
+        "minecraft:evoker_fangs",
+        row("minecraft:evoker_fangs#main", "entity/illager/evoker_fangs"),
+    ),
     // FoxRenderer: ModelLayers.FOX / FOX_BABY, textures/entity/fox/fox.png / fox_baby.png
     //   (red variant is the default; snow/sleep textures later)
     (
@@ -382,6 +389,11 @@ static TABLE: &[(&str, Entry)] = &[
     (
         "minecraft:iron_golem",
         row("minecraft:iron_golem#main", "entity/iron_golem/iron_golem"),
+    ),
+    // LlamaSpitRenderer: ModelLayers.LLAMA_SPIT, textures/entity/llama/llama_spit.png
+    (
+        "minecraft:llama_spit",
+        row("minecraft:llama_spit#main", "entity/llama/llama_spit"),
     ),
     // LlamaRenderer: ModelLayers.LLAMA / LLAMA_BABY,
     //   textures/entity/llama/llama_creamy.png / llama_creamy_baby.png (default variant CREAMY)
@@ -921,38 +933,6 @@ fn load_entity_type_names() -> Option<HashMap<RegistryIndex, &'static str>> {
         );
     }
     Some(names)
-}
-
-/// What special renderer (if any) an entity type takes: `ItemFrame(glow)`, `Painting` or
-/// `LightningBolt`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DecorationKind {
-    ItemFrame {
-        glow: bool,
-    },
-    Painting,
-    LightningBolt,
-    ExperienceOrb,
-    /// `DisplayRenderer.BlockDisplayRenderer` / `ItemDisplayRenderer` / `TextDisplayRenderer`.
-    Display(crate::display::DisplayKind),
-}
-
-/// The decoration kind of an entity type (`minecraft:item_frame`, `glow_item_frame`,
-/// `painting`, `lightning_bolt`); `None` for every other type. Warm lookups are a map probe,
-/// never an allocation (called per entity per frame).
-pub fn decoration_kind(kind: RegistryIndex) -> Option<DecorationKind> {
-    static NAMES: OnceLock<HashMap<RegistryIndex, &'static str>> = OnceLock::new();
-    let name = *NAMES
-        .get_or_init(|| load_entity_type_names().unwrap_or_default())
-        .get(&kind)?;
-    match name {
-        "minecraft:item_frame" => Some(DecorationKind::ItemFrame { glow: false }),
-        "minecraft:glow_item_frame" => Some(DecorationKind::ItemFrame { glow: true }),
-        "minecraft:painting" => Some(DecorationKind::Painting),
-        "minecraft:lightning_bolt" => Some(DecorationKind::LightningBolt),
-        "minecraft:experience_orb" => Some(DecorationKind::ExperienceOrb),
-        name => crate::display::DisplayKind::for_name(name).map(DecorationKind::Display),
-    }
 }
 
 #[derive(Deserialize)]

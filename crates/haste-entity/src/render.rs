@@ -131,7 +131,17 @@ impl EntityStore {
             let is_boat = slot.is_boat && !slot.is_player_type;
             let is_armor_stand = !slot.is_player_type
                 && crate::registry::entity_type_name(slot.kind) == Some("minecraft:armor_stand");
-            let pose = if is_boat {
+            // The evoker fangs' bite (`EvokerFangsModel.setupAnim`) and the llama spit's fixed
+            // transform (`LlamaSpitRenderer.submit`) draw through the generic model path with
+            // the transforms their modules compute.
+            let is_fangs = crate::evoker_fangs::is_evoker_fangs(slot.kind);
+            let is_spit = crate::llama_spit_model::is_llama_spit(slot.kind);
+            let fangs = is_fangs.then(|| {
+                crate::evoker_fangs_model::pose(slot.fangs.animation_progress(partial_tick))
+            });
+            let pose = if let Some(f) = fangs {
+                crate::evoker_fangs_model::overrides(f)
+            } else if is_boat {
                 crate::boat::setup_anim(slot, &model, partial_tick)
             } else if is_armor_stand {
                 crate::armor_stand::pose(slot, slot.yaw_at(partial_tick))
@@ -143,7 +153,11 @@ impl EntityStore {
             // setupRotations is only the hit wobble (`ArmorStandRenderer.setupRotations` does
             // not call super, so no death tilt or sleeping rotations either); the generic
             // `setupRotations` for everything else.
-            let body = if is_boat {
+            let body = if let Some(f) = fangs {
+                crate::evoker_fangs_model::body(f)
+            } else if is_spit {
+                crate::llama_spit_model::body(slot.pitch_at(partial_tick))
+            } else if is_boat {
                 crate::boat::body_transform(slot, partial_tick)
             } else if is_armor_stand {
                 crate::armor_stand::body_transform(slot, partial_tick)
@@ -151,14 +165,20 @@ impl EntityStore {
                 crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"))
             };
             // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
-            let body_scale = if texture.contains("creeper") {
+            let body_scale = if let Some(f) = fangs {
+                Vec3::splat(f.pre_scale)
+            } else if texture.contains("creeper") {
                 crate::animation::creeper_scale(slot, partial_tick)
             } else {
                 Vec3::ONE
             };
             // Living models turn with their body yaw; a non-living box follows its yaw
             // (`Entity.getYRot(partialTicks)`).
-            let yaw = if has_head {
+            let yaw = if is_fangs {
+                crate::evoker_fangs_model::instance_yaw(slot.yaw_at(partial_tick))
+            } else if is_spit {
+                crate::llama_spit_model::instance_yaw(slot.yaw_at(partial_tick))
+            } else if has_head {
                 slot.body_yaw_at(partial_tick)
             } else {
                 slot.yaw_at(partial_tick)
@@ -182,7 +202,9 @@ impl EntityStore {
                 .unwrap_or(1.0);
             let (shadow_radius, shadow_strength) =
                 display.map_or((shadow_radius, shadow_strength), |(_, r, s)| (r, s));
-            let invisible = slot.metadata.shared.invisible;
+            // `EvokerFangsRenderer.submit` draws nothing before the bite starts (progress 0).
+            let invisible = slot.metadata.shared.invisible
+                || (is_fangs && slot.fangs.animation_progress(partial_tick) <= 0.0);
             // `EntityRenderer.extractNameTags`/`shouldShowName`: players always show their name
             // (`Player.shouldShowName`), mobs only a visible custom name (`LivingEntity`), both
             // hidden while invisible (`isVisibleToPlayer`).
