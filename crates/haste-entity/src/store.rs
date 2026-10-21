@@ -118,6 +118,8 @@ pub struct Entity {
     pub old_swell: i32,
     /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
     pub attack_ticks: i32,
+    /// `EvokerFangs`' client state: the bite started by entity event 4 and its `lifeTicks`.
+    pub fangs: crate::evoker_fangs::FangsState,
     /// The tick count when entity event 32 last arrived (`ArmorStand.handleEntityEvent` sets
     /// `lastHit = gameTime`): the armour stand's hit wobble counts from it. A sentinel far in
     /// the past means "never hit" (vanilla's `lastHit = 0` against a large game time).
@@ -656,6 +658,8 @@ impl EntityStore {
             slot.swell = (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
             // `IronGolem.tick`: the attack animation tick counts down.
             slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
+            // `EvokerFangs.tick`: the bite's `lifeTicks` counts down once it has started.
+            slot.fangs.tick();
             // `AbstractMinecart.tick`'s countdowns (hurt time, damage, the TNT cart's fuse);
             // read only by minecarts, harmless elsewhere.
             crate::minecart::tick(&mut slot.metadata);

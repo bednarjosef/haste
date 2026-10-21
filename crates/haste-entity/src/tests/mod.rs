@@ -19,6 +19,7 @@ mod armor_stand;
 mod arrow;
 mod boat;
 mod connectivity;
+mod evoker_fangs;
 mod hurt;
 mod item_entity;
 mod local_player;

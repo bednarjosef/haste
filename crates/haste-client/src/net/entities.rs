@@ -197,8 +197,11 @@ impl Session {
             }
             P::DamageEvent(d) => super::damage::apply_damage_event(self, &d, entities, regs),
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
-            // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
-            P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
+            // Entity status 4: the fangs' bite (`EvokerFangs.handleEntityEvent`), else the iron
+            // golem's melee swing (`IronGolem.handleEntityEvent`).
+            P::EntityEvent(e) if e.status == 4 => {
+                super::evoker_fangs::start_attack(self, EntityId(e.entity_id), entities)
+            }
             // Entity status 0 on an arrow is the potion puff of a stuck tipped arrow
             // reverting (`Arrow.handleEntityEvent`); other entities' status 0 is not ours.
             P::EntityEvent(e) if e.status == 0 => {

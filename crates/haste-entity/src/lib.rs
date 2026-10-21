@@ -12,6 +12,7 @@ pub mod dims;
 pub mod display;
 pub mod dragon_fireball;
 mod entity_events;
+pub mod evoker_fangs;
 pub mod item_entity;
 pub mod lerp;
 pub mod local_player;

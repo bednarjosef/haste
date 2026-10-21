@@ -79,6 +79,7 @@ impl Entity {
             swell: 0,
             old_swell: 0,
             attack_ticks: 0,
+            fangs: Default::default(),
             last_hit: -1000,
             item: None,
             is_item,

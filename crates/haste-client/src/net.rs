@@ -541,6 +541,7 @@ pub(crate) mod damage;
 mod driver;
 mod effects;
 mod entities;
+mod evoker_fangs;
 mod explosion;
 mod explosion_tracker;
 mod fov;
