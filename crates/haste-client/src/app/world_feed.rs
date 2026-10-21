@@ -501,17 +501,19 @@ impl WorldFeed {
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
     /// comparing the per-tick part is enough; the skin is cloned only when one happens.
     /// The hand only exists in first person (F5 hides it) and while the HUD is shown
-    /// (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
+    /// (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD). The totem pop's item
+    /// goes along in every perspective (`ScreenEffectRenderer.submit`: only F1 hides it).
     pub(crate) fn set_first_person(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
         perspective: game::Perspective,
         hud_hidden: bool,
-        first_person: Option<game::FirstPersonView>,
+        state: &game::ViewState,
     ) {
+        renderer.set_item_activation(state.screen.item_activation.filter(|_| !hud_hidden));
         let view = match perspective {
-            game::Perspective::FirstPerson if !hud_hidden => first_person,
+            game::Perspective::FirstPerson if !hud_hidden => state.first_person,
             _ => None,
         };
         // Our skin changes when its download lands: compare it by identity as well.
