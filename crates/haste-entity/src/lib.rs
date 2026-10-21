@@ -24,6 +24,7 @@ pub mod riding;
 pub mod skin;
 pub mod store;
 pub mod thrown_item;
+pub mod trident;
 pub mod using_item;
 pub mod variants;
 pub mod walk_swing;
