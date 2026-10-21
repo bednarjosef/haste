@@ -103,7 +103,7 @@ impl EntityStore {
                     _ => slot.prev_pos.lerp(slot.pos, partial_tick as f64),
                 }
             };
-            let (model, has_head, overlays) = crate::models::model_for_entity(
+            let (model, has_head, mut overlays) = crate::models::model_for_entity(
                 slot,
                 minecart_variant.is_some(),
                 &self.mob_variants,
@@ -193,10 +193,32 @@ impl EntityStore {
             // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
             let humanoid = has_head
                 && crate::models::model_has_part(&model.root, haste_core::parts::RIGHT_ARM);
+            // Mounts (horse, wolf, pig, strider, camel, nautilus) take only their body armour and
+            // saddle (vanilla `EquipmentSlot.Type.ANIMAL_ARMOR` / `SADDLE` layers); the wolf's
+            // crack overlay is its armour's second layer (`WolfArmorLayer.maybeRenderCracks`).
             let (hands, equipment, head_item) = if humanoid {
                 crate::local_player::equipment_of(slot, &self.item_components)
             } else {
-                ([None, None], Vec::new(), None)
+                let mut pieces = if slot.equipment.is_empty() {
+                    Vec::new()
+                } else {
+                    crate::local_player::equipment_of(slot, &self.item_components).1
+                };
+                pieces.retain(|p| {
+                    matches!(
+                        p.slot,
+                        haste_core::model::EquipmentSlot::Body
+                            | haste_core::model::EquipmentSlot::Saddle
+                    )
+                });
+                if let Some(crack) = crate::mount_equipment::crack_overlay(
+                    texture,
+                    &slot.equipment,
+                    &self.item_components,
+                ) {
+                    overlays[1] = Some(crack);
+                }
+                ([None, None], pieces, None)
             };
             let mut inst = EntityInstance {
                 id: slot.id,

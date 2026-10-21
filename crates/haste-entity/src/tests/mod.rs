@@ -26,6 +26,7 @@ mod minecart;
 mod mob_animation;
 mod model_dump;
 mod models;
+mod mount_equipment;
 mod registry;
 mod riding;
 mod setup_rotations;

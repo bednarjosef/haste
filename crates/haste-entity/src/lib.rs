@@ -17,6 +17,7 @@ pub mod metadata;
 pub mod minecart;
 pub mod model_dump;
 pub mod models;
+pub mod mount_equipment;
 pub mod registry;
 pub mod render;
 pub mod riding;
