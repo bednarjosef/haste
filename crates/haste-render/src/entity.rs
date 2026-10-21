@@ -46,7 +46,6 @@ mod map_tests;
 mod minecart;
 #[cfg(test)]
 mod minecart_tests;
-mod mount;
 mod painting;
 mod pipelines;
 mod piston;
@@ -503,10 +502,6 @@ impl EntityRenderer {
                         self.emit_water_mask(&overlay.model, root);
                         continue;
                     }
-                    // The wolf armour's crack is drawn after the armour (`emit_mount_equipment`).
-                    if mount::is_crack_overlay(&overlay.model) {
-                        continue;
-                    }
                     let Some((oroot, hurt)) = self.overlay_root(e, &overlay.model, root, assets)
                     else {
                         continue;
@@ -526,7 +521,6 @@ impl EntityRenderer {
                 }
             }
             self.emit_equipment(e, root, light, assets);
-            self.emit_wolf_crack(e, root, light, assets);
             // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
             if e.display_fire {
                 self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
