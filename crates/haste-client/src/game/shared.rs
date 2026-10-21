@@ -323,6 +323,7 @@ impl Shared {
                 rain_fog_multiplier: 0.0,
                 sea_level: 63,
                 horizon_height: 63.0,
+                camera_entity: None,
             }),
             breaking: Mutex::new(Vec::new()),
             pickup_particles: Mutex::new(Vec::new()),

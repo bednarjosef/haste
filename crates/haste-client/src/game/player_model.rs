@@ -81,6 +81,8 @@ pub(super) fn tick(s: &Session, shared: &Shared, prev_look: (f32, f32), look: (f
 
 /// Pushes the local player's own instance onto the render list (the render thread's step for
 /// the own model: one short lock on the shared model state, like the store read beside it).
+/// Nothing while a spectator views from another entity (vanilla `LevelExtractor
+/// .extractVisibleEntities` only draws a `LocalPlayer` that is the camera entity).
 pub fn push_local_instance(
     instances: &mut Vec<EntityInstance>,
     shared: &Shared,
@@ -89,6 +91,9 @@ pub fn push_local_instance(
     partial: f32,
     skin: &haste_entity::skin::PlayerSkin,
 ) {
+    if !super::camera_entity::draws_local_player(view) {
+        return;
+    }
     let model = shared.local_model.lock();
     instances.push(player_instance(
         local.0,

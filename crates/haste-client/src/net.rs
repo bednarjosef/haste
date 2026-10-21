@@ -238,6 +238,9 @@ pub struct Session {
     /// The remote uses' sound-request scratch (see `net::remote_use`): drawn in vanilla's
     /// order with the particles, then dropped — the server's sound packets carry the sound.
     remote_use_sounds: Vec<crate::sound::SoundRequest>,
+    /// The camera entity (vanilla `Camera.entity`): the player, or the entity a spectator
+    /// spectates (`set_camera`, see [`crate::game::camera_entity`]).
+    pub camera: crate::game::camera_entity::CameraEntity,
 }
 
 impl Session {
@@ -336,6 +339,7 @@ impl Session {
             mounted_message: false,
             remote_use: HashMap::new(),
             remote_use_sounds: Vec::new(),
+            camera: Default::default(),
         }
     }
 

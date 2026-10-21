@@ -558,7 +558,7 @@ impl LocalPlayer {
                 .is_some_and(|s| s.contains(&index))
     }
 
-    fn eye(&self) -> DVec3 {
+    pub(super) fn eye(&self) -> DVec3 {
         self.state.pos + DVec3::new(0.0, self.attrs.eye_height_for(self.state.pose), 0.0)
     }
 }
