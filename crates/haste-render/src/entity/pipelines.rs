@@ -481,6 +481,7 @@ impl EntityRenderer {
             map_textures: HashMap::new(),
             map_decoration_rects: HashMap::new(),
             map_decoration_names: Vec::new(),
+            fishing_bobbers: Vec::new(),
             drawn: 0,
             leash_lines: Vec::new(),
         }

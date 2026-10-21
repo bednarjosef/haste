@@ -189,7 +189,7 @@ pub fn poses(e: &Entity, uses: &ItemUses) -> (ArmPose, ArmPose) {
 
 /// `Avatar.getMainArm` (the synced `DATA_PLAYER_MAIN_HAND` byte at metadata index 15:
 /// 0 right, 1 left; right when the server never sent it).
-fn main_arm_is_right(e: &Entity) -> bool {
+pub(crate) fn main_arm_is_right(e: &Entity) -> bool {
     use haste_core::entity::{MetadataEntry, MetadataValue};
     match e.metadata.get(crate::avatar::DATA_PLAYER_MAIN_HAND) {
         Some(MetadataEntry {

@@ -49,10 +49,12 @@ use crate::ui::keys;
 use crate::Args;
 use haste_jvm::JvmHost;
 use menu_background::{menu_camera, menu_frame, menu_sky};
+use mouse_buttons::{mouse_button_id, vanilla_button};
 
 mod bench;
 mod frame;
 mod menu_background;
+mod mouse_buttons;
 mod world_feed;
 pub use bench::{bench, bench_window};
 use bench::{bench_camera_turns, BenchPath, BenchSample, WindowBench};
@@ -1238,18 +1240,6 @@ fn typed_char_of(text: Option<&str>) -> Option<char> {
     text.and_then(|s| s.chars().next())
 }
 
-/// A winit mouse button in vanilla's numbering (1 left, 2 middle, 3 right, the same as SDL's).
-fn vanilla_button(button: MouseButton) -> i32 {
-    match button {
-        MouseButton::Left => 1,
-        MouseButton::Middle => 2,
-        MouseButton::Right => 3,
-        MouseButton::Back => 4,
-        MouseButton::Forward => 5,
-        _ => 0,
-    }
-}
-
 /// The key routing decision (pure, so the routing is testable without a JVM): whether the
 /// event goes to the UI at all. Repeats (a held key) only reach an open screen (held
 /// Backspace in the chat box); with no screen the first press and the release go, so Tab's
@@ -2015,8 +2005,14 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         if hud_on {
             feed.set_first_person(&shared, &mut renderer, perspective, false, &view);
         }
-        let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, session.local, partial, &view);
+        let (entities, block_entities) = feed.entities(
+            &shared,
+            &mut renderer,
+            session.local,
+            partial,
+            &view,
+            matches!(perspective, game::Perspective::FirstPerson).then_some(camera),
+        );
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
@@ -2189,15 +2185,6 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     }
     drop(session);
     Ok(())
-}
-
-/// A script mouse button in vanilla's numbering (1 left, 2 middle, 3 right).
-fn mouse_button_id(button: script::MouseButton) -> i32 {
-    match button {
-        script::MouseButton::Left => 1,
-        script::MouseButton::Middle => 2,
-        script::MouseButton::Right => 3,
-    }
 }
 
 /// `--script FILE`: with `--server`, join like `--screenshot` and drive the parsed script's
@@ -2757,8 +2744,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             false,
             view,
         );
-        let (entities, block_entities) =
-            feed.entities(shared, &mut renderer, session_ref.local, partial, view);
+        let (entities, block_entities) = feed.entities(
+            shared,
+            &mut renderer,
+            session_ref.local,
+            partial,
+            view,
+            Some(camera),
+        );
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {

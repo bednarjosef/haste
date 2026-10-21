@@ -3,9 +3,38 @@
 //! changes, when a chunk a first-build hold waited on loads, and an always-on rotating
 //! sweep that covers the whole held-back list every few frames.
 
-use haste_core::SectionPos;
+use haste_core::{ChunkPos, SectionPos};
+use haste_world::World;
 
 use super::{Renderer, WorldFeed};
+
+/// Vanilla `SectionUpdateTracker.hasAllNeighbors`: the eight horizontal neighbour
+/// chunks of the section are loaded (vanilla also requires their light, which Haste
+/// applies with the chunk). A chunk outside the server's reach around the camera never
+/// loads, so it does not count as missing — otherwise the outermost ring of the view
+/// would never have its first build and settle would never finish.
+pub(super) fn has_all_neighbours(
+    world: &World,
+    pos: SectionPos,
+    camera: SectionPos,
+    server_reach: i32,
+) -> bool {
+    (-1..=1).all(|dx| {
+        (-1..=1).all(|dz| {
+            let (nx, nz) = (pos.x + dx, pos.z + dz);
+            (dx == 0 && dz == 0)
+                || world.chunk(ChunkPos::new(nx, nz)).is_some()
+                // Vanilla's chunk-send shape (ChunkTrackingView.isWithinDistance without
+                // neighbours): a chunk outside the rounded square never loads, so it does
+                // not count as missing.
+                || {
+                    let ex = ((nx - camera.x).abs() - 1).max(0) as i64;
+                    let ez = ((nz - camera.z).abs() - 1).max(0) as i64;
+                    ex * ex + ez * ez >= server_reach as i64 * server_reach as i64
+                }
+        })
+    })
+}
 
 /// The waiting re-check sweep covers the held-back list over this many frames: vanilla
 /// re-checks its whole dirty set every frame (`LevelRenderer.scanChunks`); Haste's

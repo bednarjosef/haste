@@ -20,6 +20,7 @@ mod arrow;
 mod boat;
 mod camera_view;
 mod connectivity;
+mod fishing_hook;
 mod hurt;
 mod item_entity;
 mod local_player;

@@ -16,6 +16,8 @@ pub mod entity;
 pub mod entity_events;
 pub mod eye;
 mod firework_rocket;
+pub mod fishing_bobber;
+pub mod fishing_hook;
 pub mod item_entity;
 pub mod leash;
 pub mod leash_knot;
