@@ -39,7 +39,7 @@ pub const HEALTH_METADATA_INDEX: u8 = 9;
 
 // The angle helpers live in `walk_swing` (the rotation states' home); re-exported for the
 // callers that still reach them through this module.
-pub(crate) use crate::walk_swing::{lerp, rot_lerp, wrap_degrees};
+pub(crate) use crate::walk_swing::{rot_lerp, wrap_degrees};
 // `hurt_strength` moved to `render.rs` with the draw list that reads it.
 pub use crate::render::hurt_strength;
 
@@ -90,8 +90,8 @@ pub struct Entity {
     pub(crate) prev_head_yaw: f32,
     /// `LivingEntity.lerpYHeadRot` / `lerpHeadSteps`: the head yaw a `rotate_head` packet asked
     /// for and the ticks left to ease `head_yaw` onto it (`lerpHeadTo(yaw, 3)`).
-    lerp_head_yaw: f32,
-    lerp_head_steps: u8,
+    pub(crate) lerp_head_yaw: f32,
+    pub(crate) lerp_head_steps: u8,
     /// The hand swing state (`LivingEntity.swingState`, started by `swing_animation`).
     pub swing: SwingState,
     /// Smoothed swimming amount (`LivingEntity.swimAmount` / `swimAmountO`), 0..1.
@@ -107,7 +107,7 @@ pub struct Entity {
     pub o_flap: f32,
     pub flap_speed: f32,
     pub o_flap_speed: f32,
-    flapping: f32,
+    pub(crate) flapping: f32,
     /// Ticks of hurt animation left (10 per hit; `hurt_animation`/`damage_event` restart it).
     pub hurt_ticks: u32,
     /// Set on the death event: holds the hurt tint instead of easing out.
@@ -162,66 +162,12 @@ pub struct Entity {
     pub display: Option<Box<crate::display::DisplayState>>,
 }
 
-impl Entity {
-    /// `LivingEntity.isDeadOrDying` became true: `deathTime` starts counting on the next tick
-    /// (`hurt_ticks` runs the 20-tick death counter down; see `animation::death_time`). A
-    /// second trigger (event 3 after the health metadata, or the reverse) changes nothing.
-    pub(crate) fn start_death(&mut self) {
-        if !self.dead {
-            self.dead = true;
-            self.hurt_ticks = DEATH_TICKS;
-        }
-    }
-
-    /// `Entity.getYRot(partialTicks)`: `Mth.rotLerp(partial, yRotO, yRot)`.
-    pub fn yaw_at(&self, partial: f32) -> f32 {
-        if partial == 1.0 {
-            self.yaw
-        } else {
-            rot_lerp(partial, self.prev_yaw, self.yaw)
-        }
-    }
-
-    /// `Entity.getXRot(partialTicks)`: `Mth.lerp(partial, xRotO, xRot)`.
-    pub fn pitch_at(&self, partial: f32) -> f32 {
-        if partial == 1.0 {
-            self.pitch
-        } else {
-            lerp(partial, self.prev_pitch, self.pitch)
-        }
-    }
-
-    /// `Entity.snapTo`: jump to the values with no interpolation (the old position and
-    /// rotation move too, so no frame draws the gap) and drop any smoothing in flight.
-    pub(crate) fn snap_to(&mut self, (pos, yaw, pitch): (DVec3, f32, f32)) {
-        (self.pos, self.prev_pos) = (pos, pos);
-        (self.yaw, self.prev_yaw) = (yaw, yaw);
-        (self.pitch, self.prev_pitch) = (pitch, pitch);
-        self.lerp.snap(pos, yaw, pitch);
-    }
-
-    /// `LinearInterpolationHandler.setInterpolationLength` (a display's teleport duration).
-    pub(crate) fn set_interpolation_steps(&mut self, steps: u8) {
-        self.lerp.set_steps(steps);
-    }
-
-    /// Body yaw between the last two ticks (`Mth.rotLerp(partial, yBodyRotO, yBodyRot)`).
-    pub fn body_yaw_at(&self, partial: f32) -> f32 {
-        self.prev_body_yaw + partial * wrap_degrees(self.body_yaw - self.prev_body_yaw)
-    }
-
-    /// Head yaw between the last two ticks (`Mth.rotLerp(partial, yHeadRotO, yHeadRot)`).
-    pub fn head_yaw_at(&self, partial: f32) -> f32 {
-        self.prev_head_yaw + partial * wrap_degrees(self.head_yaw - self.prev_head_yaw)
-    }
-}
-
 /// The hands, equipment layers and custom head item of an entity, resolved through the shared
 /// per-slot rules ([`crate::local_player::equipment_of`]).
 pub struct EntityStore {
     pub(crate) slots: Vec<Option<Entity>>,
     free: Vec<u32>,
-    by_id: AHashMap<EntityId, u32>,
+    pub(crate) by_id: AHashMap<EntityId, u32>,
     pub(crate) dims: EntityDimensions,
     players: AHashMap<Uuid, PlayerInfo>,
     /// Who rides whom (`set_passengers`).
@@ -248,6 +194,8 @@ pub struct EntityStore {
     /// The tick's use steps (`LivingEntity.updateUsingItem`), recorded per entity for the
     /// client's effects; reused, so a tick without a use allocates nothing.
     pub(crate) use_ticks: Vec<crate::using_item::UseTick>,
+    /// Who is leashed to whom (`SetEntityLink`); the ropes are drawn from it (`leash_lines`).
+    pub(crate) leashes: crate::leash::Leashes,
 }
 
 impl EntityStore {
@@ -272,6 +220,7 @@ impl EntityStore {
             item_components: haste_data::ItemComponents::default(),
             default_tnt_state: BlockStateId::AIR,
             use_ticks: Vec::new(),
+            leashes: crate::leash::Leashes::default(),
         }
     }
 
@@ -313,7 +262,7 @@ impl EntityStore {
         self.world_age = world_age;
     }
 
-    fn slot(&self, id: EntityId) -> Option<u32> {
+    pub(crate) fn slot(&self, id: EntityId) -> Option<u32> {
         self.by_id.get(&id).copied()
     }
 
@@ -349,6 +298,7 @@ impl EntityStore {
         self.free.clear();
         self.by_id.clear();
         self.riding = Riding::new();
+        self.leashes.clear();
     }
 
     pub fn remove(&mut self, ids: &[EntityId]) {
@@ -361,6 +311,7 @@ impl EntityStore {
         // A removed entity drops out of riding on both sides: its own passengers, and any
         // vehicle it was riding.
         self.riding.on_removed(ids);
+        self.leashes.remove_entities(ids);
     }
 
     /// `set_passengers` for one vehicle: the list replaces the previous one. Passengers that

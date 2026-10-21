@@ -3,7 +3,7 @@
 // screen effects' tick, and the accessors the renderer and the HUD read out between ticks.
 
 use haste_core::input::InputState;
-use haste_protocol::haste_core::BlockPos;
+use haste_protocol::haste_core::{BlockPos, Identifier};
 use haste_protocol::ServerboundPlay;
 
 use super::sinks::{NoBlocks, StriderWarm};
@@ -26,6 +26,8 @@ impl Session {
         // drains them between `receive` and `end_tick`.
         self.sound_requests.clear();
         self.tick += 1;
+        // `GameRenderer.tick` -> `player.itemActivation().tick()`: the totem's item counts down.
+        self.player.item_activation.tick();
         // The player's own block sounds this tick (footsteps, mining, placing): played
         // through the same request channel the packets use, so the game thread's
         // `Sounds::apply` picks them up; headless only counts them. Each one is logged
@@ -74,6 +76,10 @@ impl Session {
             let s = &mut self.player.state;
             s.velocity = haste_physics::elytra::firework_boost(s.velocity, s.yaw, s.pitch);
         }
+        // The camera entity the player's tick sees (vanilla reads `Minecraft.getCameraEntity`
+        // in `Camera.tick`, `LocalPlayer.isControlledCamera` and the pick).
+        self.player
+            .set_camera_entity(self.camera.snapshot().copied());
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
@@ -104,10 +110,21 @@ impl Session {
                 out,
             ),
         }
+        // `Player.attack` -> `attackVisualEffects` -> `LocalPlayer.crit`: the local player's own
+        // critical hits start the crit emitter on the living target (a non-living target gets
+        // nothing, as `Player.attack` checks `instanceof LivingEntity`).
+        for id in self.player.take_own_crit_hits() {
+            if entities.is_living(id) {
+                self.create_tracking_emitter(id, Identifier::minecraft("crit"), entities);
+            }
+        }
         // The pickup particles' tick, after the player moved this tick (vanilla's
         // `ParticleEngine.tick` runs after `tickEntities`/`level.tick`), so their target is the
         // collector's position at the end of the tick.
         self.tick_pickup_particles(entities);
+        // The tracking emitters' tick (vanilla `ParticleEngine.tick`, the same place): the
+        // critical hit particles follow their entities.
+        self.tick_tracking_emitters(entities);
         // The explosion tracker's tick (vanilla `ClientLevel.tick` ->
         // `ClientExplosionTracker.tick`): the block particles the `explode` packets
         // carried, spawned into air blocks weighted by block count, into this tick's

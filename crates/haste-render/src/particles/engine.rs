@@ -6,6 +6,7 @@ use std::sync::Arc;
 use glam::{DVec3, Vec3};
 use haste_core::{BlockPos, Identifier};
 
+use super::firework::{self, Firework};
 use super::particle::Motion;
 use super::providers::ParticleBehaviour;
 use super::resources::ParticleTypes;
@@ -39,6 +40,8 @@ pub(super) struct ParticleState {
     /// sub-piece (uv offsets `uo`/`vo` of vanilla `TerrainParticle`), in place of
     /// the type's sprite list.
     pub(super) block_sprite: Option<BlockSpriteUv>,
+    /// The firework state of a spark or a flash (`None` for every other particle).
+    pub(super) firework: Option<Firework>,
 }
 
 /// A terrain particle's texture: the sprite rect (for the shader's clamp) and the
@@ -70,6 +73,11 @@ pub struct Particles {
     /// tick in `particlesToAdd` and appends them after it). Reused, so a tick without a
     /// seed allocates nothing.
     pub(super) seed_children: Vec<ParticleSpawn>,
+    /// Particles added this tick (firework sparks, trails, flashes), appended after the tick
+    /// loop like vanilla's `particlesToAdd`. Reused across ticks.
+    pub(super) pending: Vec<ParticleState>,
+    /// The firework bursts in progress (`FireworkParticles.Starter`), ticked before the pool.
+    pub(super) starters: Vec<firework::Starter>,
 }
 
 impl Particles {
@@ -83,6 +91,8 @@ impl Particles {
             rng: Rng(0x853C_49E6_748F_EA9B),
             camera: DVec3::ZERO,
             seed_children: Vec::new(),
+            pending: Vec::new(),
+            starters: Vec::new(),
         }
     }
 
@@ -100,6 +110,8 @@ impl Particles {
     /// Drops every particle (dimension change).
     pub fn clear(&mut self) {
         self.pool.clear();
+        self.pending.clear();
+        self.starters.clear();
     }
 
     /// Spawns per the packet's semantics (see the module docs). Unknown types are skipped,
@@ -366,6 +378,7 @@ impl Particles {
             alpha,
             portal_start: pos,
             block_sprite: None,
+            firework: None,
         };
         self.pool.push(state);
         if behaviour.tick_at_spawn {
@@ -381,6 +394,9 @@ impl Particles {
     /// eye position the seed particles' children are limiter-checked against.
     pub fn tick(&mut self, camera: DVec3) {
         self.camera = camera;
+        // The bursts in progress tick first; their sparks queue like every add this tick.
+        self.starters
+            .retain_mut(|s| s.tick(&mut self.pending, &mut self.rng));
         let mut i = 0;
         while i < self.pool.len() {
             if self.tick_one(i) {
@@ -391,6 +407,13 @@ impl Particles {
                 self.pool.swap(i, last);
                 self.pool.truncate(last);
             }
+        }
+        // The queued adds join the pool after the loop, up to the cap.
+        for p in self.pending.drain(..) {
+            if self.pool.len() >= MAX_PARTICLES {
+                break;
+            }
+            self.pool.push(p);
         }
         // The seed particles' children, appended after the tick loop like vanilla's
         // `particlesToAdd` (they are not stepped this tick).
@@ -412,6 +435,10 @@ impl Particles {
             return false;
         }
         p.prev_pos = p.pos;
+        if p.firework.is_some() {
+            firework::tick(p, &mut self.pending, &mut self.rng);
+            return true;
+        }
         let b = p.behaviour;
         if b.no_render {
             // HugeExplosionSeedParticle.tick: six `explosion` particles per tick at ±4

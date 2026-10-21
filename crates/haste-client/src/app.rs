@@ -811,12 +811,11 @@ pub fn view_bob(
 }
 
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
-/// input layer's look; the player's server rotation offset is added here so mouse look is
-/// smooth at frame rate while the player itself turns once per tick. In the third-person
-/// perspectives the camera is moved off the eye (`game::third_person_camera`). The FOV is the
-/// saved option with vanilla's per-tick FOV modifier interpolated, then the submerged and
-/// death adjustments; the hurt/death tilts and the view bobbing come from the view's per-tick
-/// state (vanilla's `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
+/// input layer's look (plus the server's offset, or the spectated entity's view instead:
+/// `game::camera_entity::frame_eye`), moved off the eye in third person. The FOV is the option
+/// with vanilla's per-tick FOV modifier interpolated, then the submerged and death adjustments;
+/// the hurt/death tilts and the view bobbing come from the view's per-tick state (vanilla's
+/// `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
 #[allow(clippy::too_many_arguments)]
 fn frame_view<'w>(
     shared: &Shared,
@@ -838,11 +837,8 @@ fn frame_view<'w>(
     Option<&'w haste_render::WeatherFrame>,
 ) {
     let partial = game::partial_tick(view.tick_at, now);
-    let eye = game::camera_eye(view, shared, partial);
-    let look = (
-        yaw + view.look_offset.0,
-        (pitch + view.look_offset.1).clamp(-90.0, 90.0),
-    );
+    // The player's eye and look, or the spectated entity's (`Camera.alignWithEntity`).
+    let (eye, look) = game::camera_entity::frame_eye(view, shared, partial, (yaw, pitch));
     // The world is read for the third-person camera and the fog environment (the fluid and
     // biome at the camera), held for the rest of this function.
     let world = shared.world.read();
@@ -2058,13 +2054,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         if hud_on {
-            feed.set_first_person(
-                &shared,
-                &mut renderer,
-                perspective,
-                false,
-                view.first_person,
-            );
+            feed.set_first_person(&shared, &mut renderer, perspective, false, &view);
         }
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial, &view);
@@ -2112,7 +2102,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             // Vanilla's F1 hides the block outline too (`shouldRenderBlockOutline`: hud hidden).
             block_target: hud_on.then_some(block_target).flatten(),
             breaking: &breaking,
-            camera_entity: (!perspective.draws_player()).then_some(session.local.0),
+            camera_entity: game::camera_entity::hidden_entity(
+                &view,
+                !perspective.draws_player(),
+                session.local.0,
+            ),
             spin,
             weather,
         };
@@ -2802,7 +2796,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &mut renderer,
             game::Perspective::FirstPerson,
             false,
-            view.first_person,
+            view,
         );
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial, view);
@@ -2869,7 +2863,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
-            camera_entity: Some(session_ref.local.0),
+            camera_entity: game::camera_entity::hidden_entity(view, true, session_ref.local.0),
             spin,
             weather,
         };

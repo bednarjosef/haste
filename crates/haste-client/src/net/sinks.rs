@@ -152,6 +152,16 @@ pub trait EntitySink {
     fn mark_hit(&mut self, id: EntityId) {
         let _ = id;
     }
+    /// `EntityStore::wake_up`: the leave-bed animation (animate action 0) on a sleeping player.
+    /// Default no-op.
+    fn wake_up(&mut self, id: EntityId) {
+        let _ = id;
+    }
+    /// `EntityStore::is_living` (`instanceof LivingEntity`). Default: not living.
+    fn is_living(&self, id: EntityId) -> bool {
+        let _ = id;
+        false
+    }
     /// `EntityStore::prime_tnt_minecart`: entity event 70 (a TNT cart's fuse starts).
     fn prime_tnt_minecart(&mut self, id: EntityId) {
         let _ = id;
@@ -174,6 +184,10 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::set_leash` (`SetEntityLink`): `holder` `None` unties. Default no-op.
+    fn set_leash(&mut self, attached: EntityId, holder: Option<EntityId>) {
+        let _ = (attached, holder);
+    }
     /// `EntityStore::set_world_age` (from `set_time`); the bee's anger end time compares
     /// against it. Default no-op.
     fn set_world_age(&mut self, world_age: i64) {
@@ -181,6 +195,10 @@ pub trait EntitySink {
     }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        None
+    }
+    /// `Entity.getEyeY` of an entity (`EntityStore::eye_y`). None in fakes.
+    fn entity_eye_y(&self, _id: EntityId) -> Option<f64> {
         None
     }
     /// The entity's equipment slots (vanilla `LivingEntity` equipment): (wire slot, stack)
@@ -221,6 +239,12 @@ pub trait EntitySink {
         out: &mut Vec<haste_entity::arrow::ArrowParticle>,
     ) {
         let _ = (id, out);
+    }
+    /// `FireworkRocketEntity.handleEntityEvent` 17: a tracked rocket's burst (its position,
+    /// movement and synched stack). Fakes know no rockets.
+    fn firework_burst(&self, id: EntityId) -> Option<super::fireworks::FireworkBurst> {
+        let _ = id;
+        None
     }
     /// `EntityStore::tick_in_world`: the tick with the world the dropped items and the
     /// arrows move in (`ItemEntity.tick`'s and `AbstractArrow.tick`'s collision, friction
@@ -330,6 +354,12 @@ impl EntitySink for EntityStore {
     fn mark_hit(&mut self, id: EntityId) {
         EntityStore::mark_hit(self, id)
     }
+    fn wake_up(&mut self, id: EntityId) {
+        EntityStore::wake_up(self, id)
+    }
+    fn is_living(&self, id: EntityId) -> bool {
+        EntityStore::is_living(self, id)
+    }
     fn use_new_minecart_behavior(&mut self, id: EntityId) {
         EntityStore::use_new_minecart_behavior(self, id)
     }
@@ -359,11 +389,17 @@ impl EntitySink for EntityStore {
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
         EntityStore::set_passengers(self, vehicle, passengers)
     }
+    fn set_leash(&mut self, attached: EntityId, holder: Option<EntityId>) {
+        EntityStore::set_leash(self, attached, holder)
+    }
     fn set_world_age(&mut self, world_age: i64) {
         EntityStore::set_world_age(self, world_age)
     }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
+    }
+    fn entity_eye_y(&self, id: EntityId) -> Option<f64> {
+        EntityStore::eye_y(self, id)
     }
     fn equipment(&self, id: EntityId) -> Option<&[(u8, ItemStackData)]> {
         self.get(id).map(|e| e.equipment.as_slice())
@@ -402,6 +438,20 @@ impl EntitySink for EntityStore {
         if let Some(e) = EntityStore::get(self, id) {
             haste_entity::arrow::potion_puff(e, out);
         }
+    }
+    fn firework_burst(&self, id: EntityId) -> Option<super::fireworks::FireworkBurst> {
+        let e = EntityStore::get(self, id)?;
+        // The synched stack (`DATA_ITEM_STACK`, slot 8); a rocket without one bursts as the
+        // default rocket, which has no explosions.
+        let stack = match e.metadata.get(8).map(|m| &m.value) {
+            Some(MetadataValue::ItemStack(s)) => s.clone(),
+            _ => ItemStackData::default(),
+        };
+        Some(super::fireworks::FireworkBurst {
+            pos: e.pos,
+            velocity: e.velocity,
+            stack,
+        })
     }
     fn tick_in_world(
         &mut self,

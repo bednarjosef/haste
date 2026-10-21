@@ -560,6 +560,21 @@ impl ParticleBehaviour {
                 portal_motion: true,
                 ..ParticleBehaviour::DEFAULT
             },
+            // FireworkParticles.SparkParticle: its lifetime, quad, colour and fade are set when
+            // it is spawned (see the firework module); the gravity is its own.
+            "firework" => &ParticleBehaviour {
+                source: "SparkParticle",
+                gravity: 0.1,
+                ..ParticleBehaviour::DEFAULT
+            },
+            // FireworkParticles.OverlayParticle (FLASH): life 4, no physics; its quad and
+            // alpha follow its age (see the firework module).
+            "flash" => &ParticleBehaviour {
+                source: "OverlayParticle",
+                lifetime: Lifetime::Fixed(4),
+                motion: Motion::None,
+                ..ParticleBehaviour::DEFAULT
+            },
             _ => &ParticleBehaviour::DEFAULT,
         }
     }

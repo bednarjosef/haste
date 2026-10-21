@@ -210,12 +210,88 @@ fn loads_by_registry_name_and_ignores_unknown_items() {
     // `dyed_color` as the patch's first add (type id 1, a big-endian int) decodes.
     let patch = [1u8, 0, 1, 0x00, 0x11, 0x22, 0x33];
     assert_eq!(components.dyed_color(&patch), Some(0x0011_2233));
-    // A patch whose first add is another component gives up (dye not applied).
+    // A damage add (type 0, a varint) is skipped on the way to the dye; a damage alone has no
+    // dye.
+    assert_eq!(
+        components.dyed_color(&[2, 0, 0, 5, 1, 0x00, 0x11, 0x22, 0x33]),
+        Some(0x0011_2233)
+    );
     assert_eq!(components.dyed_color(&[1, 0, 0, 5]), None);
+    // An add Haste cannot skip (type 9) ends the scan: the dye behind it is not seen.
+    assert_eq!(
+        components.dyed_color(&[2, 0, 9, 1, 1, 0x00, 0x11, 0x22, 0x33]),
+        None
+    );
     assert_eq!(components.dyed_color(&[0, 0]), None);
     // A missing directory is empty, not an error.
     let empty = ItemComponents::load(&dir.join("nope"), &regs);
     assert!(empty.equippable(RegistryIndex(1)).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `minecraft:max_damage` loads per item index, and a stack's wear (`Crackiness.byDamage`'s
+/// damage and max damage) reads the patch's `damage`, `max_damage` and `unbreakable` adds, the
+/// way `ItemStack.isDamageableItem` / `getDamageValue` / `getMaxDamage` see them.
+#[test]
+fn loads_max_damage_and_reads_the_wear() {
+    let dir = std::env::temp_dir().join(format!("haste-max-damage-{}", std::process::id()));
+    let item_dir = dir.join("item");
+    std::fs::create_dir_all(&item_dir).unwrap();
+    std::fs::write(
+        item_dir.join("wolf_armor.json"),
+        br#"{"components":{"minecraft:max_damage":64,"minecraft:equippable":{"slot":"body","asset_id":"minecraft:armadillo_scute"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(item_dir.join("stone.json"), br#"{"components":{}}"#).unwrap();
+    let registries_json = r#"{
+  "minecraft:item": {
+    "entries": {
+      "minecraft:air": { "protocol_id": 0 },
+      "minecraft:stone": { "protocol_id": 1 },
+      "minecraft:wolf_armor": { "protocol_id": 2 }
+    }
+  },
+  "minecraft:data_component_type": {
+    "entries": {
+      "minecraft:damage": { "protocol_id": 0 },
+      "minecraft:dyed_color": { "protocol_id": 1 },
+      "minecraft:max_damage": { "protocol_id": 2 },
+      "minecraft:unbreakable": { "protocol_id": 3 }
+    }
+  }
+}"#;
+    let regs = Registries::parse(registries_json).unwrap();
+    let components = ItemComponents::load(&item_dir, &regs);
+    let armor = RegistryIndex(2);
+    assert_eq!(components.max_damage(armor), Some(64));
+    assert_eq!(components.max_damage(RegistryIndex(1)), None);
+    // No patch: undamaged, the default max.
+    assert_eq!(components.wear(armor, &[0, 0]), Some((0, 64)));
+    // A damage of 40 (type id 0, varint 40); a two-byte varint 200 (0xC8 0x01).
+    assert_eq!(components.wear(armor, &[1, 0, 0, 40]), Some((40, 64)));
+    assert_eq!(
+        components.wear(armor, &[1, 0, 0, 0xC8, 0x01]),
+        Some((200, 64))
+    );
+    // Dyed first, then damaged: the dye is skipped to reach the damage.
+    assert_eq!(
+        components.wear(armor, &[2, 0, 1, 0x00, 0x11, 0x22, 0x33, 0, 12]),
+        Some((12, 64))
+    );
+    // A patched max damage wins over the default.
+    assert_eq!(
+        components.wear(armor, &[2, 0, 2, 100, 0, 30]),
+        Some((30, 100))
+    );
+    // Unbreakable stacks and items without a max damage are not damageable.
+    assert_eq!(components.wear(armor, &[2, 0, 0, 30, 3]), None);
+    assert_eq!(components.wear(RegistryIndex(1), &[1, 0, 0, 30]), None);
+    // A missing directory loads as an empty table: no default max, so nothing is damageable
+    // unless the patch sets one.
+    let empty = ItemComponents::load(&dir.join("nope"), &regs);
+    assert_eq!(empty.max_damage(armor), None);
+    assert_eq!(empty.wear(armor, &[1, 0, 0, 7]), None);
+    assert_eq!(empty.wear(armor, &[2, 0, 2, 10, 0, 7]), Some((7, 10)));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -257,6 +333,11 @@ fn loads_equippable_attributes_consumables_tools_and_gliders() {
     std::fs::write(
         item_dir.join("elytra.json"),
         br#"{"components":{"minecraft:glider": {}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        item_dir.join("totem_of_undying.json"),
+        br#"{"components":{"minecraft:death_protection": {"death_effects": []}}}"#,
     )
     .unwrap();
     // A malformed tool entry is skipped, not fatal.
@@ -303,6 +384,9 @@ fn loads_equippable_attributes_consumables_tools_and_gliders() {
     // glider.
     assert!(c.is_glider(&attr("elytra")));
     assert!(!c.is_glider(&attr("stick")));
+    // death protection (`ClientPacketListener.findTotem`).
+    assert!(c.has_death_protection(&attr("totem_of_undying")));
+    assert!(!c.has_death_protection(&attr("elytra")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

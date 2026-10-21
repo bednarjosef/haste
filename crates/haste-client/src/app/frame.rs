@@ -245,7 +245,7 @@ impl App {
             renderer,
             self.perspective,
             hud_hidden,
-            view.first_person,
+            &view,
         );
         let (entities, block_entities) =
             self.feed
@@ -331,7 +331,11 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
-            camera_entity: (!self.perspective.draws_player()).then_some(session.local.0),
+            camera_entity: game::camera_entity::hidden_entity(
+                &view,
+                !self.perspective.draws_player(),
+                session.local.0,
+            ),
             spin: view.screen.spin_warp(partial),
             weather,
         };

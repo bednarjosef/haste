@@ -505,6 +505,8 @@ fn totem_pop_starts_an_emitter_and_plays_the_sound() {
     assert_eq!(sound.pitch, 1.0);
     assert_eq!(sound.pos, SoundPos::Entity(42));
     assert_eq!(sound.category, 5);
+    // Only our own pop shows the item in front of the camera.
+    assert!(!r.session.player.item_activation.is_active());
 }
 
 #[test]
@@ -524,4 +526,7 @@ fn totem_pop_on_the_local_player_plays_at_our_position() {
     assert_eq!(sound.pos, SoundPos::Fixed(r.session.player.state.pos));
     // Our own entity is a player, so the sound is in the PLAYERS category (vanilla SoundSource 7).
     assert_eq!(sound.category, 7);
+    // `LocalPlayer.displayItemActivation`: the totem shows in front of the camera for 40 ticks.
+    assert!(r.session.player.item_activation.is_active());
+    assert_eq!(r.session.player.item_activation.ticks(), 40);
 }

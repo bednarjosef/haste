@@ -70,6 +70,8 @@ impl EntityRenderer {
             let image = if id.namespace() == "haste" {
                 if id.path() == "missing" {
                     missing_texture()
+                } else if id.path() == "white" {
+                    white_texture()
                 } else {
                     placeholder_texture()
                 }
