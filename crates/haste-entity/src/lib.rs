@@ -7,6 +7,7 @@ pub mod armor_stand;
 pub mod arrow;
 pub mod avatar;
 pub mod boat;
+pub mod camera_view;
 pub mod decoration;
 pub mod dims;
 pub mod dragon_fireball;
