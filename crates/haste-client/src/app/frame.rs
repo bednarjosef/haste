@@ -245,7 +245,7 @@ impl App {
             renderer,
             self.perspective,
             hud_hidden,
-            view.first_person,
+            &view,
         );
         let (entities, block_entities) =
             self.feed

@@ -26,6 +26,8 @@ impl Session {
         // drains them between `receive` and `end_tick`.
         self.sound_requests.clear();
         self.tick += 1;
+        // `GameRenderer.tick` -> `player.itemActivation().tick()`: the totem's item counts down.
+        self.player.item_activation.tick();
         // The player's own block sounds this tick (footsteps, mining, placing): played
         // through the same request channel the packets use, so the game thread's
         // `Sounds::apply` picks them up; headless only counts them. Each one is logged

@@ -335,6 +335,11 @@ fn loads_equippable_attributes_consumables_tools_and_gliders() {
         br#"{"components":{"minecraft:glider": {}}}"#,
     )
     .unwrap();
+    std::fs::write(
+        item_dir.join("totem_of_undying.json"),
+        br#"{"components":{"minecraft:death_protection": {"death_effects": []}}}"#,
+    )
+    .unwrap();
     // A malformed tool entry is skipped, not fatal.
     std::fs::write(
         item_dir.join("broken_pickaxe.json"),
@@ -379,6 +384,9 @@ fn loads_equippable_attributes_consumables_tools_and_gliders() {
     // glider.
     assert!(c.is_glider(&attr("elytra")));
     assert!(!c.is_glider(&attr("stick")));
+    // death protection (`ClientPacketListener.findTotem`).
+    assert!(c.has_death_protection(&attr("totem_of_undying")));
+    assert!(!c.has_death_protection(&attr("elytra")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

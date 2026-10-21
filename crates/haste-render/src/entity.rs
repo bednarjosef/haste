@@ -37,6 +37,9 @@ mod flame;
 #[cfg(test)]
 mod flame_tests;
 mod item;
+mod item_activation;
+#[cfg(test)]
+mod item_activation_tests;
 mod leash;
 #[cfg(test)]
 mod leash_tests;
@@ -227,6 +230,7 @@ impl TickPair {
 /// What the first-person view holds (vanilla `FirstPersonHandsAndItemsRenderState`): see
 /// [`first_person`](self::first_person).
 pub use first_person::FirstPerson;
+pub use item_activation::{item_activation_pose, ItemActivation};
 
 /// A name tag to draw: world anchor (above the head) and the text.
 #[derive(Clone, Debug)]
@@ -266,6 +270,9 @@ pub struct EntityRenderer {
     hand_buffer: wgpu::Buffer,
     hand_capacity: usize,
     hand: Vec<EntityVertex>,
+    /// The item a totem pop shows and its countdown (`set_item_activation`), drawn into the
+    /// hand pass by `prepare_hand` in every perspective.
+    item_activation: Option<ItemActivation>,
     item_names: Vec<Identifier>,
     item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
     /// The first-person arm models, by left, [`FirstPerson::slim`] and

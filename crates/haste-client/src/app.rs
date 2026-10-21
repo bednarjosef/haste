@@ -2054,13 +2054,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         if hud_on {
-            feed.set_first_person(
-                &shared,
-                &mut renderer,
-                perspective,
-                false,
-                view.first_person,
-            );
+            feed.set_first_person(&shared, &mut renderer, perspective, false, &view);
         }
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial, &view);
@@ -2802,7 +2796,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &mut renderer,
             game::Perspective::FirstPerson,
             false,
-            view.first_person,
+            view,
         );
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial, view);

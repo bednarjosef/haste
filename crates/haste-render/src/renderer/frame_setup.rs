@@ -56,6 +56,13 @@ impl Renderer {
         self.first_person = fp;
     }
 
+    /// The totem pop's item and countdown (the local player's `ItemActivation`), which the
+    /// hand pass poses each frame (`ScreenEffectRenderer.renderItemActivationAnimation`) in
+    /// every perspective; `None` draws nothing. Stays until changed.
+    pub fn set_item_activation(&mut self, activation: Option<crate::entity::ItemActivation>) {
+        self.entity.set_item_activation(activation);
+    }
+
     /// The camera entity is a spectator this frame (`Camera.extractRenderState` reads it off
     /// the player). With the camera inside a solid-render block, [`Self::sample_world`] turns
     /// the section occlusion cull off for the frame.

@@ -13,6 +13,7 @@
 //! - `minecraft:consumable`: how long an item is used and the animation played while it is;
 //! - `minecraft:tool`: what an item mines and how fast (physics turns it into its mining `Tool`);
 //! - `minecraft:glider`: the elytra (and any mod item that carries it);
+//! - `minecraft:death_protection`: the totem of undying (and any mod item that carries it);
 //! - `minecraft:use_effects`: what using the item does to the player (sprint, input speed).
 //!
 //! A missing report directory or unreadable file yields an empty table, never an error: the
@@ -66,6 +67,8 @@ pub struct ItemComponents {
     foods: HashMap<Identifier, bool>,
     tools: HashMap<Identifier, ToolComponent>,
     gliders: HashSet<Identifier>,
+    /// Items whose default components carry `minecraft:death_protection`.
+    death_protection: HashSet<Identifier>,
     use_effects: HashMap<Identifier, UseEffects>,
     /// Items whose default components carry `minecraft:piercing_weapon` (the spears): the
     /// weapon's optional draw sound, if the report names one.
@@ -155,6 +158,12 @@ impl ItemComponents {
     /// `LivingEntity.canGlideUsing`'s `DataComponents.GLIDER`).
     pub fn is_glider(&self, item: &Identifier) -> bool {
         self.gliders.contains(item)
+    }
+
+    /// Whether item's default components carry `minecraft:death_protection` (vanilla
+    /// `ItemStack.has(DataComponents.DEATH_PROTECTION)` for a stack without a patch).
+    pub fn has_death_protection(&self, item: &Identifier) -> bool {
+        self.death_protection.contains(item)
     }
 
     /// The item's `minecraft:use_effects`, `UseEffects.DEFAULT` when the report named none or
@@ -271,6 +280,7 @@ impl ItemComponents {
         let mut foods: HashMap<Identifier, bool> = HashMap::new();
         let mut tools: HashMap<Identifier, ToolComponent> = HashMap::new();
         let mut gliders: HashSet<Identifier> = HashSet::new();
+        let mut death_protection: HashSet<Identifier> = HashSet::new();
         let mut use_effects: HashMap<Identifier, UseEffects> = HashMap::new();
         let mut piercing_weapons: HashMap<Identifier, Option<String>> = HashMap::new();
         let mut minimum_attack_charges: HashMap<Identifier, f32> = HashMap::new();
@@ -348,6 +358,9 @@ impl ItemComponents {
             if components.get("minecraft:glider").is_some() {
                 gliders.insert(item.clone());
             }
+            if components.get("minecraft:death_protection").is_some() {
+                death_protection.insert(item.clone());
+            }
             if let Some(e) = components.get("minecraft:use_effects") {
                 use_effects.insert(item.clone(), parse_use_effects(e));
             }
@@ -382,6 +395,7 @@ impl ItemComponents {
             foods,
             tools,
             gliders,
+            death_protection,
             use_effects,
             piercing_weapons,
             minimum_attack_charges,
