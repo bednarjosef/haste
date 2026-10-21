@@ -38,8 +38,8 @@ mod run;
 mod settle_diet;
 mod shared;
 mod sound;
-mod tracked_world;
 pub(crate) mod totem_emitter;
+mod tracked_world;
 mod view;
 mod weather;
 
