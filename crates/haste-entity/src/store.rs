@@ -184,6 +184,8 @@ pub struct EntityStore {
     /// The tick's use steps (`LivingEntity.updateUsingItem`), recorded per entity for the
     /// client's effects; reused, so a tick without a use allocates nothing.
     pub(crate) use_ticks: Vec<crate::using_item::UseTick>,
+    /// Who is leashed to whom (`SetEntityLink`); the ropes are drawn from it (`leash_lines`).
+    pub(crate) leashes: crate::leash::Leashes,
 }
 
 impl EntityStore {
@@ -208,6 +210,7 @@ impl EntityStore {
             item_components: haste_data::ItemComponents::default(),
             default_tnt_state: BlockStateId::AIR,
             use_ticks: Vec::new(),
+            leashes: crate::leash::Leashes::default(),
         }
     }
 
@@ -249,7 +252,7 @@ impl EntityStore {
         self.world_age = world_age;
     }
 
-    fn slot(&self, id: EntityId) -> Option<u32> {
+    pub(crate) fn slot(&self, id: EntityId) -> Option<u32> {
         self.by_id.get(&id).copied()
     }
 
@@ -285,6 +288,7 @@ impl EntityStore {
         self.free.clear();
         self.by_id.clear();
         self.riding = Riding::new();
+        self.leashes.clear();
     }
 
     pub fn remove(&mut self, ids: &[EntityId]) {
@@ -297,6 +301,7 @@ impl EntityStore {
         // A removed entity drops out of riding on both sides: its own passengers, and any
         // vehicle it was riding.
         self.riding.on_removed(ids);
+        self.leashes.remove_entities(ids);
     }
 
     /// `set_passengers` for one vehicle: the list replaces the previous one. Passengers that
@@ -386,57 +391,6 @@ impl EntityStore {
                 if crate::arrow::is_arrow(e.kind) && v.length_squared() > 0.0 {
                     e.arrow_in_ground = false;
                 }
-            }
-        }
-    }
-
-    /// `hurt_animation` / `damage_event`: (re)start the 10-tick red flash.
-    pub fn mark_hurt(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.hurt_ticks = HURT_TICKS;
-            }
-        }
-    }
-
-    /// The death event (entity status 3, `LivingEntity.handleEntityEvent`): starts the death
-    /// animation (`deathTime` counting from the next tick) and holds the hurt tint until the
-    /// server's `remove_entities`. Health reaching 0 in the metadata starts it too
-    /// (`LivingEntity.isDeadOrDying` -> `tickDeath`); the first of the two wins.
-    pub fn mark_dead(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.start_death();
-            }
-        }
-    }
-
-    /// Entity event 4: a melee attack animation (`IronGolem.handleEntityEvent` sets
-    /// `attackAnimationTick = 10`; several mobs share the status).
-    pub fn mark_attack(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.attack_ticks = 10;
-            }
-        }
-    }
-
-    /// Entity event 32 (`ArmorStand.handleEntityEvent`): the armour stand was hit; its
-    /// render-side wobble counts from now (`lastHit = gameTime`).
-    pub fn mark_hit(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                e.last_hit = e.tick_count as i64;
-            }
-        }
-    }
-
-    /// Entity event 70 (`MinecartTNT.handleEntityEvent` -> `primeFuse`): the TNT cart's fuse
-    /// starts at 80 ticks and counts down client-side (`MinecartTNT.tick`).
-    pub fn prime_tnt_minecart(&mut self, id: EntityId) {
-        if let Some(i) = self.slot(id) {
-            if let Some(e) = &mut self.slots[i as usize] {
-                crate::minecart::prime(&mut e.metadata);
             }
         }
     }

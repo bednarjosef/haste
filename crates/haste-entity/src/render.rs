@@ -3,7 +3,7 @@
 //! `store.rs` to keep that file within the size limit; a pure move.
 
 use haste_core::math::Vec3;
-use haste_core::model::EntityInstance;
+use haste_core::model::{BodyTransform, EntityInstance};
 
 use crate::store::{Entity, EntityStore, HURT_TICKS};
 
@@ -79,7 +79,11 @@ impl EntityStore {
                         self.default_tnt_state,
                     )
                 });
-            let pos = if non_hanging {
+            // The fence knot sits at the box centre of its block (`crate::leash::knot_center`).
+            let knot = crate::leash::is_knot(slot.kind);
+            let pos = if knot {
+                crate::leash::knot_center(slot.prev_pos.lerp(slot.pos, partial_tick as f64))
+            } else if non_hanging {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             } else {
                 match &decoration {
@@ -132,6 +136,8 @@ impl EntityStore {
             // `setupRotations` for everything else.
             let body = if is_boat {
                 crate::boat::body_transform(slot, partial_tick)
+            } else if knot {
+                BodyTransform::default()
             } else if is_armor_stand {
                 crate::armor_stand::body_transform(slot, partial_tick)
             } else {
@@ -145,8 +151,11 @@ impl EntityStore {
             };
             // Living models turn with their body yaw; a non-living box follows its yaw
             // (`Entity.getYRot(partialTicks)`).
+            // `LeashKnotRenderer.submit` turns the knot by no yaw at all.
             let yaw = if has_head {
                 slot.body_yaw_at(partial_tick)
+            } else if knot {
+                0.0
             } else {
                 slot.yaw_at(partial_tick)
             };
