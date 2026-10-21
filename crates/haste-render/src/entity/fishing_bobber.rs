@@ -91,7 +91,9 @@ impl EntityRenderer {
                     let p0 = rel + line[i];
                     let p1 = rel + line[i + 1];
                     let side = ribbon_side(p1 - p0, (p0 + p1) * 0.5, orientation);
-                    let corners = [p0 - side, p0 + side, p1 + side, p1 - side];
+                    // Wound so the front face (CCW, the entity pipeline culls back faces) faces
+                    // the camera: the segment crossed with the side points back at it.
+                    let corners = [p0 - side, p1 - side, p1 + side, p0 + side];
                     push_quad(
                         &mut out,
                         corners,
