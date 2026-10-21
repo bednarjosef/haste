@@ -5,7 +5,7 @@
 use haste_core::view::BlockView as _;
 use haste_entity::fishing_bobber::{self, FishingBobber};
 use haste_entity::EntityStore;
-use haste_render::entity::FishingBobber as Draw;
+use haste_render::entity::{BobberOwner, FishingBobber as Draw};
 use haste_render::Renderer;
 use haste_world::World;
 
@@ -36,6 +36,10 @@ impl FishingFeed {
                 pos: b.pos,
                 light: (world.sky_light(p), world.block_light(p)),
                 line: b.line,
+                owner: b.owner.map(|o| BobberOwner {
+                    id: o.id,
+                    holding_right: o.holding_right,
+                }),
             });
         }
         renderer.set_fishing_bobbers(&self.draws);

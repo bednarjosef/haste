@@ -4,6 +4,9 @@
 
 use super::{parse_transformation, PartTransformation};
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct Leaf {
     pub(super) model: Option<String>,
     pub(super) tints: Vec<serde_json::Value>,
@@ -18,9 +21,19 @@ fn node_type(node: &serde_json::Value) -> &str {
         .trim_start_matches("minecraft:")
 }
 
+/// A condition's `property`, without its `minecraft:` namespace.
+fn property_name(node: &serde_json::Value) -> Option<&str> {
+    node.get("property")
+        .and_then(|p| p.as_str())
+        .map(|p| p.trim_start_matches("minecraft:"))
+}
+
+/// `cast` is the `minecraft:fishing_rod/cast` property: whether the holder's hook is out
+/// (vanilla `FishingRodCast.get`). Only that property is answered; the others take `on_false`.
 pub(super) fn collect_leaves(
     node: &serde_json::Value,
     transformation: Option<PartTransformation>,
+    cast: bool,
     out: &mut Vec<Leaf>,
 ) {
     let transformation = node
@@ -51,12 +64,14 @@ pub(super) fn collect_leaves(
                 .into_iter()
                 .flatten()
             {
-                collect_leaves(m, transformation, out);
+                collect_leaves(m, transformation, cast, out);
             }
         }
         "condition" => {
-            if let Some(n) = node.get("on_false") {
-                collect_leaves(n, transformation, out);
+            let holds = cast && property_name(node) == Some("fishing_rod/cast");
+            let branch = if holds { "on_true" } else { "on_false" };
+            if let Some(n) = node.get(branch) {
+                collect_leaves(n, transformation, cast, out);
             }
         }
         "select" => {
@@ -66,7 +81,7 @@ pub(super) fn collect_leaves(
                 .and_then(|c| c.first())
                 .and_then(|c| c.get("model"));
             if let Some(n) = node.get("fallback").or(first_case) {
-                collect_leaves(n, transformation, out);
+                collect_leaves(n, transformation, cast, out);
             }
         }
         "range_dispatch" => {
@@ -87,7 +102,7 @@ pub(super) fn collect_leaves(
                 })
                 .and_then(|e| e.get("model"));
             if let Some(n) = entry.or(node.get("fallback")) {
-                collect_leaves(n, transformation, out);
+                collect_leaves(n, transformation, cast, out);
             }
         }
         // `empty`, `bundle/selected_item`, unknown types: nothing to draw.

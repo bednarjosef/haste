@@ -224,7 +224,7 @@ impl TickPair {
 /// What the first-person view holds (vanilla `FirstPersonHandsAndItemsRenderState`): see
 /// [`first_person`](self::first_person).
 pub use first_person::FirstPerson;
-pub use fishing_bobber::{FishingBobber, LINE_POINTS};
+pub use fishing_bobber::{BobberOwner, FishingBobber, LINE_POINTS};
 
 /// A name tag to draw: world anchor (above the head) and the text.
 #[derive(Clone, Debug)]
@@ -265,7 +265,8 @@ pub struct EntityRenderer {
     hand_capacity: usize,
     hand: Vec<EntityVertex>,
     item_names: Vec<Identifier>,
-    item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
+    /// Item models by registry index and the `fishing_rod/cast` property they resolve with.
+    item_models: HashMap<(u32, bool), Option<Arc<haste_assets::ItemModel>>>,
     /// The first-person arm models, by left, [`FirstPerson::slim`] and
     /// [`FirstPerson::sleeve`] (built once on first use; the left arm serves the two-handed
     /// map pose).

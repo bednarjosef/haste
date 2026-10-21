@@ -27,9 +27,27 @@ pub struct FishingBobber {
     pub pos: DVec3,
     pub light: (u8, u8),
     pub line: Option<[Vec3; LINE_POINTS]>,
+    /// The owner, while it is a player (the owner of the line).
+    pub owner: Option<BobberOwner>,
+}
+
+/// A bobber's player owner: its entity id and the arm that holds the rod.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BobberOwner {
+    pub id: haste_core::EntityId,
+    pub holding_right: bool,
 }
 
 impl EntityRenderer {
+    /// Whether an entity's hand holds a cast rod: `FishingRodCast.get` for the stack in that
+    /// hand, true while the entity's bobber is out and the hand is its holding arm.
+    pub(super) fn rod_is_cast(&self, entity: haste_core::EntityId, right: bool) -> bool {
+        self.fishing_bobbers.iter().any(|b| {
+            b.owner
+                .is_some_and(|o| o.id == entity && o.holding_right == right)
+        })
+    }
+
     /// Every fishing bobber this frame: its sprite, then its line when an owner's hand is known.
     pub(super) fn emit_fishing_bobbers(
         &mut self,

@@ -93,6 +93,12 @@ pub struct PartTransformation {
 impl Assets {
     /// The GUI model of an item (`minecraft:stone` -> `items/stone.json`).
     pub fn item_model(&mut self, item: &Identifier) -> Result<ItemModel> {
+        self.item_model_cast(item, false)
+    }
+
+    /// The GUI model of an item for a holder whose `minecraft:fishing_rod/cast` property is
+    /// `cast` (the rod's hook is out): the branch the item definition takes for it.
+    pub fn item_model_cast(&mut self, item: &Identifier, cast: bool) -> Result<ItemModel> {
         let key = crate::assets::asset_key(item, "items", ".json");
         let bytes = self.read_asset(&key)?;
         let json: serde_json::Value =
@@ -101,7 +107,7 @@ impl Assets {
             .get("model")
             .context("item definition without `model`")?;
         let mut leaves = Vec::new();
-        collect_leaves(root, None, &mut leaves);
+        collect_leaves(root, None, cast, &mut leaves);
         let mut parts = Vec::with_capacity(leaves.len());
         for leaf in leaves {
             parts.push(self.item_part(&leaf)?);
@@ -247,7 +253,6 @@ fn parse_rgb(v: &serde_json::Value) -> Option<u32> {
     Some(0xFF00_0000 | c(0) << 16 | c(1) << 8 | c(2))
 }
 
-
 fn parse_transformation(v: &serde_json::Value) -> Option<PartTransformation> {
     let arr = |k: &str| -> Option<Vec<f32>> {
         v.get(k)?
@@ -322,7 +327,7 @@ mod model_tests {
     fn leaves(json: &str) -> Vec<Leaf> {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         let mut out = Vec::new();
-        collect_leaves(&v["model"], None, &mut out);
+        collect_leaves(&v["model"], None, false, &mut out);
         out
     }
 

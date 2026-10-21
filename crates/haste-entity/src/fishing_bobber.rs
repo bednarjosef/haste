@@ -32,6 +32,16 @@ pub struct FishingBobber {
     /// Block and sky light at the bobber, sampled by the client after the build (the store
     /// holds no world); zero until then.
     pub light: (u8, u8),
+    /// The owner, while it is a player: the fishing rod cast property (`FishingRodCast.get`)
+    /// is true for the owner's holding arm.
+    pub owner: Option<BobberOwner>,
+}
+
+/// A bobber's player owner: its id and the arm that holds the rod (`FishingHookRenderer.getHoldingArm`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BobberOwner {
+    pub id: EntityId,
+    pub holding_right: bool,
 }
 
 /// Whether an entity type is a fishing bobber (`EntityType.FISHING_BOBBER`).
@@ -69,15 +79,28 @@ pub fn bobbers(store: &EntityStore, partial: f32, out: &mut Vec<FishingBobber>) 
             continue;
         }
         let pos = slot.prev_pos.lerp(slot.pos, f64::from(partial));
-        let line = store
+        let owner = store
             .get(EntityId(slot.data))
-            .filter(|owner| owner.is_player_type)
-            .map(|owner| line_points(owner_hand(owner, &store.dims, partial), pos));
+            .filter(|owner| owner.is_player_type);
+        let (line, owner) = match owner {
+            Some(owner) => {
+                let (hand, holding_right) = owner_hand(owner, &store.dims, partial);
+                (
+                    Some(line_points(hand, pos)),
+                    Some(BobberOwner {
+                        id: owner.id,
+                        holding_right,
+                    }),
+                )
+            }
+            None => (None, None),
+        };
         out.push(FishingBobber {
             id: slot.id,
             pos,
             line,
             light: (0, 0),
+            owner,
         });
     }
 }
@@ -89,19 +112,20 @@ fn line_points(hand: DVec3, hook_pos: DVec3) -> [Vec3; LINE_POINTS] {
     std::array::from_fn(|i| string_point(line, fraction(i as u32, STRING_SEGMENTS)))
 }
 
-/// The owner's rod hand, third person: the arm that holds the rod (`getHoldingArm`) at the
-/// eye position moved by the body yaw.
-fn owner_hand(owner: &Entity, dims: &EntityDimensions, partial: f32) -> DVec3 {
+/// The owner's rod hand, third person, and the arm that holds the rod (`getHoldingArm`): the
+/// hand at the eye position moved by the body yaw.
+fn owner_hand(owner: &Entity, dims: &EntityDimensions, partial: f32) -> (DVec3, bool) {
     let main_is_right = crate::animation::arm_pose::main_arm_is_right(owner);
     let main_is_rod = is_fishing_rod(hand_item(owner, 0));
     let holding_right = holding_arm_is_right(main_is_right, main_is_rod);
     let pos = owner.prev_pos.lerp(owner.pos, f64::from(partial));
     let eye = pos + DVec3::new(0.0, f64::from(dims.eye_height(owner.kind, false)), 0.0);
-    hand_pos_third_person(
+    let hand = hand_pos_third_person(
         eye,
         owner.body_yaw_at(partial),
         1.0,
         holding_right,
         owner.pose == Pose::Crouching,
-    )
+    );
+    (hand, holding_right)
 }
