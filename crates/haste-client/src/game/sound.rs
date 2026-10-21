@@ -124,5 +124,8 @@ pub(super) fn tick_listener(
         let situation =
             crate::sound::music_situation(s.player.game_mode, s.player.state.eyes_in_water);
         sounds.tick(listener.0, listener.1, listener.2, situation);
+        // The subtitled sounds this tick played, to the subtitle overlay (vanilla
+        // `SoundEngine.notifyListeners`, batched per tick).
+        sounds.publish_played_sounds();
     }
 }
