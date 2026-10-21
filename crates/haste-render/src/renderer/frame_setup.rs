@@ -56,14 +56,11 @@ impl Renderer {
         self.first_person = fp;
     }
 
-    /// The totem pop's item and its pose this frame (`ItemActivation` and the curve in
-    /// `ScreenEffectRenderer.renderItemActivationAnimation`, computed by the client), drawn in
-    /// the first-person pass; `None` draws nothing. Stays until changed.
-    pub fn set_item_activation(
-        &mut self,
-        activation: Option<(haste_core::RegistryIndex, glam::Mat4)>,
-    ) {
-        self.entity.item_activation = activation;
+    /// The totem pop's item and countdown (the local player's `ItemActivation`), which the
+    /// hand pass poses each frame (`ScreenEffectRenderer.renderItemActivationAnimation`) in
+    /// every perspective; `None` draws nothing. Stays until changed.
+    pub fn set_item_activation(&mut self, activation: Option<crate::entity::ItemActivation>) {
+        self.entity.set_item_activation(activation);
     }
 
     /// The camera entity is a spectator this frame (`Camera.extractRenderState` reads it off

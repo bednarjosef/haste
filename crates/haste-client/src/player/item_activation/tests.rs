@@ -68,3 +68,18 @@ fn offsets_are_in_minus_one_to_one_and_follow_the_random_stream() {
     assert!((-1.0..1.0).contains(&a.off_x()));
     assert!((-1.0..1.0).contains(&a.off_y()));
 }
+
+#[test]
+fn the_renderer_sees_the_item_only_while_the_countdown_runs() {
+    let mut a = ItemActivation::default();
+    assert_eq!(a.render_state(), None);
+    a.activate(&stack(5), &mut LegacyRandom::new(3));
+    a.tick();
+    let s = a.render_state().expect("active");
+    assert_eq!((s.item, s.ticks), (RegistryIndex(5), 39));
+    assert_eq!((s.off_x, s.off_y), (a.off_x(), a.off_y()));
+    for _ in 0..39 {
+        a.tick();
+    }
+    assert_eq!(a.render_state(), None);
+}

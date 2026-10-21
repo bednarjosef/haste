@@ -72,6 +72,18 @@ impl ItemActivation {
     pub fn off_y(&self) -> f32 {
         self.off_y
     }
+
+    /// What the renderer draws this tick (vanilla `LevelExtractor` fills
+    /// `PlayerRenderState.itemActivation` only while `isActive`); `None` when idle.
+    pub fn render_state(&self) -> Option<haste_render::entity::ItemActivation> {
+        let item = self.item.as_ref().filter(|_| self.is_active())?.item?;
+        Some(haste_render::entity::ItemActivation {
+            item,
+            ticks: self.ticks,
+            off_x: self.off_x,
+            off_y: self.off_y,
+        })
+    }
 }
 
 #[cfg(test)]

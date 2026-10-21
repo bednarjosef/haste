@@ -50,6 +50,7 @@ impl Renderer {
                 Self::bob_transform(&frame.camera),
                 (frame.camera.yaw, frame.camera.pitch),
                 frame.partial_tick,
+                aspect,
                 &mut self.assets,
             );
         }

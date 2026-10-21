@@ -80,7 +80,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             &mut renderer,
             game::Perspective::FirstPerson,
             false,
-            view.first_person,
+            &view,
         );
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial, &view);

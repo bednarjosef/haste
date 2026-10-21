@@ -190,16 +190,18 @@ impl EntityRenderer {
             .clone()
     }
 
-    /// Builds the first-person arm or held item, following vanilla's
-    /// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`: the hurt tilt and walk bob
-    /// (`GameRenderer.renderItemInHand`'s pose stack) and the hand's lag behind the camera
-    /// turn are applied to the whole hand in view space, then per hand vanilla's own
-    /// transform, then the model.
+    /// Builds the hand pass's vertices: the first-person arm or held item (when `fp` is set),
+    /// then the totem pop's item (`emit_item_activation`, in every perspective).
+    ///
+    /// The hand follows vanilla's `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`: the
+    /// hurt tilt and walk bob (`GameRenderer.renderItemInHand`'s pose stack) and the hand's lag
+    /// behind the camera turn are applied to the whole hand in view space, then per hand
+    /// vanilla's own transform, then the model.
     ///
     /// `prefix` is the pose stack the hand is submitted under (view space stays view space:
-    /// x right, y up, -z forward), `view` is the camera's look (yaw, pitch) in degrees and
-    /// `partial` the partial tick; the per-tick animation values live in `fp` and are only
-    /// lerped here.
+    /// x right, y up, -z forward), `view` is the camera's look (yaw, pitch) in degrees,
+    /// `partial` the partial tick and `aspect` the window's width over its height; the
+    /// per-tick animation values live in `fp` and are only lerped here.
     ///
     /// Nothing is allocated per frame: the arm model is cached by `slim` and the vertices go
     /// into the reused hand buffer.
@@ -209,12 +211,38 @@ impl EntityRenderer {
         prefix: Mat4,
         view: (f32, f32),
         partial: f32,
+        aspect: f32,
         assets: &mut Assets,
     ) {
         self.hand.clear();
-        let Some(fp) = fp else {
-            return;
-        };
+        let mut out = std::mem::take(&mut self.hand);
+        if let Some(fp) = fp {
+            self.emit_first_person(&mut out, fp, prefix, view, partial, assets);
+        }
+        // `ScreenEffectRenderer.submit` after `renderItemInHand`: same projection and depth.
+        self.emit_item_activation(&mut out, partial, aspect, assets);
+        self.hand = out;
+        if self.hand.len() > self.hand_capacity {
+            self.hand_capacity = self.hand.len().next_power_of_two();
+            self.hand_buffer = make_vertex_buffer(&self.device, self.hand_capacity);
+        }
+        if !self.hand.is_empty() {
+            self.queue
+                .write_buffer(&self.hand_buffer, 0, bytemuck::cast_slice(&self.hand));
+        }
+    }
+
+    /// The first-person arm or held item into `out`, in view space (see `prepare_hand`).
+    fn emit_first_person(
+        &mut self,
+        out: &mut Vec<EntityVertex>,
+        fp: &FirstPerson,
+        prefix: Mat4,
+        view: (f32, f32),
+        partial: f32,
+        assets: &mut Assets,
+    ) {
+        let start = out.len();
         // Hand normals are world-oriented: vanilla puts the inverse view rotation on the
         // hand's pose stack (`GameRenderer.renderItemInHand`) and the view rotation on the
         // model-view, so the fixed world light directions shade the arm/item as you look
@@ -224,23 +252,15 @@ impl EntityRenderer {
         // `FirstPerson::light` is (sky, block); the vertex wants (block, sky).
         let light = (fp.light.1, fp.light.0);
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
-        let mut out = std::mem::take(&mut self.hand);
         let root = Mat4::from_mat3(inv_view) * prefix * hand_root_matrix(fp, view, partial);
         // A held map replaces the item model (`submitArmWithItem`'s MAP_ID branch).
         if fp.map.is_some() {
-            self.emit_held_map(&mut out, root, fp, view, partial, light, assets);
+            self.emit_held_map(out, root, fp, view, partial, light, assets);
         } else {
             match item {
                 Some(model) => {
                     let root = root * item_arm_matrix(fp, partial);
-                    self.emit_item(
-                        &mut out,
-                        &model,
-                        root,
-                        light,
-                        ItemDisplay::FirstPerson,
-                        assets,
-                    );
+                    self.emit_item(out, &model, root, light, ItemDisplay::FirstPerson, assets);
                 }
                 None => {
                     let steve = Identifier::minecraft("entity/player/wide/steve");
@@ -252,7 +272,7 @@ impl EntityRenderer {
                     let m =
                         root * arm_matrix(fp, partial) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
                     emit_part_tinted(
-                        &mut out,
+                        out,
                         &model,
                         &model.root,
                         &PoseOverrides::default(),
@@ -265,32 +285,9 @@ impl EntityRenderer {
                 }
             }
         }
-        // The totem pop's item (`ScreenEffectRenderer.renderItemActivationAnimation`): the item
-        // drawn fixed under the curve's pose, after the hand, through the same item path.
-        if let Some((index, pose)) = self.item_activation {
-            if let Some(model) = self.item_model_for(index, assets) {
-                self.emit_item(
-                    &mut out,
-                    &model,
-                    Mat4::from_mat3(inv_view) * prefix * pose,
-                    light,
-                    ItemDisplay::Fixed,
-                    assets,
-                );
-            }
-        }
         let to_view = inv_view.transpose();
-        for v in &mut out {
+        for v in &mut out[start..] {
             v.pos = (to_view * Vec3::from(v.pos)).into();
-        }
-        self.hand = out;
-        if self.hand.len() > self.hand_capacity {
-            self.hand_capacity = self.hand.len().next_power_of_two();
-            self.hand_buffer = make_vertex_buffer(&self.device, self.hand_capacity);
-        }
-        if !self.hand.is_empty() {
-            self.queue
-                .write_buffer(&self.hand_buffer, 0, bytemuck::cast_slice(&self.hand));
         }
     }
 

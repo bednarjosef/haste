@@ -243,7 +243,7 @@ impl App {
             renderer,
             self.perspective,
             hud_hidden,
-            view.first_person,
+            &view,
         );
         let (entities, block_entities) =
             self.feed
@@ -319,14 +319,6 @@ impl App {
             };
             frame.append_to(&mut self.gui.commands);
         }
-        // The totem pop's item (`ScreenEffectRenderer.renderItemActivationAnimation`), posed
-        // for this frame's partial tick and the window's aspect ratio.
-        renderer.set_item_activation(crate::screen_effects::item_activation_for_frame(
-            view.screen.item_activation.as_ref(),
-            partial,
-            w,
-            h,
-        ));
         let t_pre = Instant::now();
         let frame = FrameInput {
             camera,
