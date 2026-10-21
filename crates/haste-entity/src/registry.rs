@@ -11,17 +11,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::model_dump;
 use haste_core::entity::MetadataValue;
 use haste_core::ids::RegistryIndex;
 use haste_core::model::CubeModel;
 use haste_core::Identifier;
-use serde::Deserialize;
-
-use crate::model_dump;
 
 /// The renderers' shadow radius and strength by entity type (`EntityRenderer.shadowRadius`).
 mod shadow;
 pub use shadow::{shadow_radius_for_name, shadow_strength_for_name};
+
+mod names;
+use names::load_entity_type_names;
 
 mod decoration_kind;
 pub use decoration_kind::{decoration_kind, DecorationKind};
@@ -616,6 +617,11 @@ static TABLE: &[(&str, Entry)] = &[
         "minecraft:tadpole",
         row("minecraft:tadpole#main", "entity/tadpole/tadpole"),
     ),
+    // ThrownTridentRenderer: ModelLayers.TRIDENT, textures/entity/trident/trident.png
+    (
+        "minecraft:trident",
+        row("minecraft:trident#main", "entity/trident/trident"),
+    ),
     // TraderLlamaRenderer: ModelLayers.TRADER_LLAMA / TRADER_LLAMA_BABY,
     //   textures/entity/llama/llama_creamy.png / llama_creamy_baby.png (creamy is the default)
     (
@@ -864,36 +870,6 @@ pub fn table_textures() -> impl Iterator<Item = &'static str> {
         .iter()
         .flat_map(|(_, e)| entry_textures(e))
         .filter(|t| !t.is_empty())
-}
-
-/// `minecraft:entity_type` names by protocol id, from the data-generator reports
-/// (`haste_core::paths::datagen_reports`, owned by world-and-data). haste-entity reads the one
-/// registry it needs itself: haste-data's `Registries::parse` is not exported and pulling all
-/// of `GameData` in here would duplicate the client's load. Every entity type is kept (the
-/// decoration kinds need names the model table does not cover); `model_entry` filters.
-fn load_entity_type_names() -> Option<HashMap<RegistryIndex, &'static str>> {
-    let path = haste_core::paths::datagen_reports().join("registries.json");
-    let bytes = std::fs::read(path).ok()?;
-    let registries: HashMap<&str, EntityTypeRegistryJson> = serde_json::from_slice(&bytes).ok()?;
-    let reg = registries.get("minecraft:entity_type")?;
-    let mut names = HashMap::with_capacity(reg.entries.len());
-    for (name, e) in &reg.entries {
-        names.insert(
-            RegistryIndex(e.protocol_id),
-            Box::leak((*name).to_owned().into_boxed_str()) as &'static str,
-        );
-    }
-    Some(names)
-}
-
-#[derive(Deserialize)]
-struct EntityTypeRegistryJson {
-    entries: HashMap<String, EntryId>,
-}
-
-#[derive(Deserialize)]
-struct EntryId {
-    protocol_id: u32,
 }
 
 /// The model for entity type `name` (a full registry id like `minecraft:pig`), from the dump.
