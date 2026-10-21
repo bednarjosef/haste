@@ -57,6 +57,10 @@ pub fn variant_for_name(name: &str) -> Option<ThrownItem> {
         "minecraft:splash_potion" => plain("minecraft:splash_potion"),
         // EYE_OF_ENDER: (context, 1.0F, true), EyeOfEnder.getDefaultItem = ENDER_EYE.
         "minecraft:eye_of_ender" => scaled("minecraft:ender_eye", 1.0),
+        // FireworkEntityRenderer: the camera-facing item at scale 1, not full-bright, the
+        // same transform as ThrownItemRenderer. Its rocket item is synched (slot 8) and
+        // always sent; the shot-at-angle turn is not modelled (see the report).
+        "minecraft:firework_rocket" => plain("minecraft:firework_rocket"),
         // FIREBALL: (context, 3.0F, true), Fireball.getDefaultItem = FIRE_CHARGE.
         "minecraft:fireball" => scaled("minecraft:fire_charge", 3.0),
         // SMALL_FIREBALL: (context, 0.75F, true), SmallFireball inherits FIRE_CHARGE.

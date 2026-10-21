@@ -52,6 +52,7 @@ fn registration_matches_vanilla() {
         ("minecraft:eye_of_ender", 1.0, true),
         ("minecraft:fireball", 3.0, true),
         ("minecraft:small_fireball", 0.75, true),
+        ("minecraft:firework_rocket", 1.0, false),
     ];
     for (name, scale, full_bright) in cases {
         let t = thrown_item::variant_for_name(name).unwrap_or_else(|| panic!("{name}"));
