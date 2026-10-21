@@ -27,6 +27,8 @@ mod boat;
 mod cape;
 mod dragon_fireball;
 mod equipment;
+#[cfg(test)]
+mod equipment_tests;
 mod experience_orb;
 mod falling_block;
 mod first_person;
