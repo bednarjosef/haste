@@ -14,7 +14,7 @@ crates/haste-client/src/script.rs 1159
 crates/haste-client/src/sound/tests.rs 1163
 crates/haste-data/src/blocks.rs 635
 crates/haste-entity/src/animation.rs 714
-crates/haste-entity/src/registry.rs 930
+crates/haste-entity/src/registry.rs 923
 crates/haste-entity/src/riding.rs 640
 crates/haste-entity/src/store.rs 651
 crates/haste-jvm/src/host.rs 622

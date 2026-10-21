@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::model_dump;
-use haste_core::entity::MetadataValue;
 use haste_core::ids::RegistryIndex;
 use haste_core::model::CubeModel;
 use haste_core::Identifier;
@@ -27,6 +26,8 @@ use names::load_entity_type_names;
 mod decoration_kind;
 pub use decoration_kind::{decoration_kind, DecorationKind};
 
+mod baby;
+pub use baby::{is_baby, BABY_METADATA_INDEX};
 mod row;
 use row::{row, row_baby, row_scaled, Entry};
 
@@ -809,13 +810,6 @@ static TABLE: &[(&str, Entry)] = &[
     ),
 ];
 
-/// The metadata index of `AgeableMob.DATA_BABY_ID` (and `Zombie`/`Zoglin`/`Piglin`'s own
-/// `DATA_BABY_ID`, which lands on the same slot): `Entity` defines indices 0-7, `LivingEntity`
-/// 8-14, `Mob` 15, and `AgeableMob` appends its boolean at 16 (Entity.java:323-330,
-/// LivingEntity.java:323-331, Mob.java:270-273, AgeableMob.java:105-107 in the decompiled
-/// source; each class's `defineSynchedData` calls `super` first, then appends).
-pub const BABY_METADATA_INDEX: u8 = 16;
-
 /// The model for entity type `kind`, from the dump. `None` when the type is not in the table,
 /// the registry name cannot be resolved, the dump is missing or the dump lacks the layer:
 /// callers fall back to the dimension box. Results are cached per type (models stay shared
@@ -916,16 +910,6 @@ pub fn baby_model_for_name(name: &str) -> Option<Arc<CubeModel>> {
     let mut m = (*model).clone();
     m.texture = texture;
     Some(Arc::new(m))
-}
-
-/// Whether the entity's metadata says it is a baby: `AgeableMob.DATA_BABY_ID` (index 16) or
-/// the same-slot flags `Zombie`/`Zoglin`/`Piglin` define. Types without any baby flag are
-/// never babies.
-pub fn is_baby(metadata: &crate::metadata::Metadata) -> bool {
-    matches!(
-        metadata.get(BABY_METADATA_INDEX).map(|e| &e.value),
-        Some(MetadataValue::Boolean(true))
-    )
 }
 
 /// The `EntityAttachment.NAME_TAG` anchor above the entity's feet: the `AT_HEIGHT` fallback is
