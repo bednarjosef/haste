@@ -92,15 +92,19 @@ impl EntityStore {
 
 fn stuck_state(e: &Entity, partial: f32) -> StuckState {
     let m = &e.metadata;
-    let parrots = if e.is_player_type {
+    // Only `AvatarRenderer` adds `ArrowLayer`, `BeeStingerLayer` and `ParrotOnShoulderLayer`:
+    // a mob's arrow and stinger counts are synched but never drawn.
+    let avatar = e.is_player_type;
+    let parrots = if avatar {
         SHOULDER_PARROT.map(|index| optional_unsigned_int(m, index))
     } else {
         [None, None]
     };
+    let count = |index| if avatar { var_int(m, index) } else { 0 };
     StuckState {
         id: e.id,
-        arrows: var_int(m, ARROW_COUNT),
-        stingers: var_int(m, STINGER_COUNT),
+        arrows: count(ARROW_COUNT),
+        stingers: count(STINGER_COUNT),
         parrots,
         crouching: m.shared.crouching,
         head_yaw: wrap_degrees(e.head_yaw_at(partial) - e.yaw_at(partial)).to_radians(),
