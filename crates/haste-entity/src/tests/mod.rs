@@ -32,6 +32,7 @@ mod new_minecart_behavior;
 mod registry;
 mod riding;
 mod setup_rotations;
+mod sleeping;
 mod store;
 mod thrown_item;
 mod using_item;
