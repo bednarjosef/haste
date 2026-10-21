@@ -39,15 +39,21 @@ impl Session {
             1.0
         };
         let movement_speed = p.attrs.movement_speed * sprinting;
-        let target = fov_modifier_target(
-            p.state.flying,
-            movement_speed,
-            p.abilities.fov_modifier,
-            using,
-            self.use_ticks,
-            first_person,
-            self.fov_effect_scale,
-        );
+        // `Camera.tickFov`: only a player camera entity has a modifier; any other eases to 1.
+        // (A spectated remote player's own modifier is not modelled: it eases to 1 as well.)
+        let target = if self.camera.snapshot().is_some() {
+            1.0
+        } else {
+            fov_modifier_target(
+                p.state.flying,
+                movement_speed,
+                p.abilities.fov_modifier,
+                using,
+                self.use_ticks,
+                first_person,
+                self.fov_effect_scale,
+            )
+        };
         self.old_fov_modifier = self.fov_modifier;
         self.fov_modifier =
             (self.fov_modifier + (target - self.fov_modifier) * 0.5).clamp(0.1, 1.5);
@@ -61,5 +67,11 @@ impl Session {
         } else {
             self.death_ticks = 0;
         }
+    }
+
+    /// The camera's eye position and look at `partial` (the player's, or the spectated
+    /// entity's: [`crate::game::camera_entity::camera_pose`]).
+    pub fn camera_pose(&self, partial: f32) -> (glam::DVec3, f32, f32) {
+        crate::game::camera_entity::camera_pose(&self.camera, &self.player, partial)
     }
 }

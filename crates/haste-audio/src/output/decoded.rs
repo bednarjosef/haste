@@ -6,6 +6,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rodio::decoder::LoopedDecoder;
 use rodio::{Decoder, Sample, Source};
 use tracing::{debug, warn};
 
@@ -71,6 +72,9 @@ pub(super) struct CachedSamples {
     sample_rate: u32,
     /// Interleaved-sample cursor.
     cursor: usize,
+    /// Start over at the end instead of ending (a looping sound instance, vanilla's
+    /// `Channel.setLooping` on a static buffer).
+    looping: bool,
 }
 
 impl CachedSamples {
@@ -80,7 +84,14 @@ impl CachedSamples {
             frame_len: sound.channels as usize,
             sample_rate: sound.sample_rate,
             cursor: 0,
+            looping: false,
         }
+    }
+
+    /// The same source, playing on from the start every time it reaches the end.
+    pub(super) fn looping(mut self, looping: bool) -> Self {
+        self.looping = looping;
+        self
     }
 }
 
@@ -88,6 +99,9 @@ impl Iterator for CachedSamples {
     type Item = Sample;
 
     fn next(&mut self) -> Option<Sample> {
+        if self.looping && self.cursor + self.frame_len > self.samples.len() {
+            self.cursor = 0;
+        }
         let frame = self
             .samples
             .get(self.cursor..self.cursor + self.frame_len)?;
@@ -96,6 +110,9 @@ impl Iterator for CachedSamples {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.looping {
+            return (usize::MAX, None);
+        }
         let frames = (self.samples.len() - self.cursor) / self.frame_len;
         (frames, Some(frames))
     }
@@ -103,6 +120,7 @@ impl Iterator for CachedSamples {
 
 impl Source for CachedSamples {
     fn current_span_len(&self) -> Option<usize> {
+        // A loop never changes format, so it is one endless span.
         self.size_hint().1
     }
 
@@ -115,16 +133,21 @@ impl Source for CachedSamples {
     }
 
     fn total_duration(&self) -> Option<Duration> {
+        if self.looping {
+            return None;
+        }
         Some(Duration::from_secs_f64(
             self.size_hint().0 as f64 / self.sample_rate as f64,
         ))
     }
 }
 
-/// What the worker plays: a streamed decode (music), a cached mono sound (channels
-/// averaged per frame), or a cached stereo file passed through interleaved and untouched.
+/// What the worker plays: a streamed decode (music), a looping streamed decode (the
+/// ambient loops, vanilla's `LoopingAudioStream`), a cached mono sound (channels averaged
+/// per frame), or a cached stereo file passed through interleaved and untouched.
 pub(super) enum DecodedSource {
     Streamed(Decoder<Cursor<Vec<u8>>>),
+    StreamedLooping(LoopedDecoder<Cursor<Vec<u8>>>),
     Cached(CachedSamples),
     Stereo(StereoSamples),
 }
@@ -137,6 +160,7 @@ impl DecodedSource {
         match self {
             // The decoder reports the file's own channels.
             DecodedSource::Streamed(decoder) => decoder.channels().get(),
+            DecodedSource::StreamedLooping(decoder) => decoder.channels().get(),
             DecodedSource::Cached(_) => 1,
             DecodedSource::Stereo(stereo) => stereo.channels,
         }
@@ -149,6 +173,7 @@ impl Iterator for DecodedSource {
     fn next(&mut self) -> Option<Sample> {
         match self {
             DecodedSource::Streamed(decoder) => decoder.next(),
+            DecodedSource::StreamedLooping(decoder) => decoder.next(),
             DecodedSource::Cached(cached) => cached.next(),
             DecodedSource::Stereo(stereo) => stereo.next(),
         }
@@ -157,6 +182,7 @@ impl Iterator for DecodedSource {
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             DecodedSource::Streamed(decoder) => decoder.size_hint(),
+            DecodedSource::StreamedLooping(decoder) => decoder.size_hint(),
             DecodedSource::Cached(cached) => cached.size_hint(),
             DecodedSource::Stereo(stereo) => stereo.size_hint(),
         }
@@ -167,6 +193,7 @@ impl Source for DecodedSource {
     fn current_span_len(&self) -> Option<usize> {
         match self {
             DecodedSource::Streamed(decoder) => decoder.current_span_len(),
+            DecodedSource::StreamedLooping(decoder) => decoder.current_span_len(),
             DecodedSource::Cached(cached) => cached.current_span_len(),
             DecodedSource::Stereo(stereo) => stereo.current_span_len(),
         }
@@ -175,6 +202,7 @@ impl Source for DecodedSource {
     fn channels(&self) -> rodio::ChannelCount {
         match self {
             DecodedSource::Streamed(decoder) => decoder.channels(),
+            DecodedSource::StreamedLooping(decoder) => decoder.channels(),
             DecodedSource::Cached(cached) => cached.channels(),
             DecodedSource::Stereo(stereo) => stereo.channels(),
         }
@@ -183,6 +211,7 @@ impl Source for DecodedSource {
     fn sample_rate(&self) -> rodio::SampleRate {
         match self {
             DecodedSource::Streamed(decoder) => decoder.sample_rate(),
+            DecodedSource::StreamedLooping(decoder) => decoder.sample_rate(),
             DecodedSource::Cached(cached) => cached.sample_rate(),
             DecodedSource::Stereo(stereo) => stereo.sample_rate(),
         }
@@ -191,6 +220,7 @@ impl Source for DecodedSource {
     fn total_duration(&self) -> Option<Duration> {
         match self {
             DecodedSource::Streamed(decoder) => decoder.total_duration(),
+            DecodedSource::StreamedLooping(decoder) => decoder.total_duration(),
             DecodedSource::Cached(cached) => cached.total_duration(),
             DecodedSource::Stereo(stereo) => stereo.total_duration(),
         }
@@ -206,6 +236,8 @@ pub(super) struct StereoSamples {
     sample_rate: u32,
     /// Sample cursor.
     cursor: usize,
+    /// Start over at the end instead of ending (see [`CachedSamples::looping`]).
+    looping: bool,
 }
 
 impl StereoSamples {
@@ -215,7 +247,14 @@ impl StereoSamples {
             channels: sound.channels,
             sample_rate: sound.sample_rate,
             cursor: 0,
+            looping: false,
         }
+    }
+
+    /// The same source, playing on from the start every time it reaches the end.
+    pub(super) fn looping(mut self, looping: bool) -> Self {
+        self.looping = looping;
+        self
     }
 }
 
@@ -223,6 +262,9 @@ impl Iterator for StereoSamples {
     type Item = Sample;
 
     fn next(&mut self) -> Option<Sample> {
+        if self.looping && self.cursor >= self.samples.len() {
+            self.cursor = 0;
+        }
         self.samples.get(self.cursor).map(|s| {
             self.cursor += 1;
             *s
@@ -230,6 +272,9 @@ impl Iterator for StereoSamples {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.looping {
+            return (usize::MAX, None);
+        }
         let left = self.samples.len() - self.cursor;
         (left, Some(left))
     }
@@ -249,6 +294,9 @@ impl Source for StereoSamples {
     }
 
     fn total_duration(&self) -> Option<Duration> {
+        if self.looping {
+            return None;
+        }
         Some(Duration::from_secs_f64(
             self.size_hint().0 as f64 / self.channels as f64 / self.sample_rate as f64,
         ))

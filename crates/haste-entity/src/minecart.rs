@@ -1,8 +1,9 @@
 //! Minecarts: the model (`MinecartModel.createBodyLayer`), the render state
 //! `AbstractMinecartRenderer.extractRenderState` builds (`MinecartRenderState`), and the
 //! old-behavior rail snapping (`OldMinecartBehavior.getPos`/`getPosOffs`) that poses the cart
-//! along its track. The new-style track movement packet (`NewMinecartBehavior`) is a separate
-//! task; only the old path is ported here, which is what a vanilla server runs.
+//! along its track. A cart on the new behaviour (the `minecart_improvements` experiment) moves
+//! along the steps the server sends instead and is never snapped (`crate::new_minecart_behavior`);
+//! a vanilla server without the experiment runs the old path.
 //!
 //! The synched data this reads (index = `Entity`'s eight slots 0-7, `VehicleEntity`'s
 //! hurt/hurtDir/damage 8-10, `AbstractMinecart`'s custom display block 11 and display offset 12,
@@ -479,8 +480,15 @@ pub fn snap_rails(
     blocks: &BlockStates,
 ) {
     for e in instances {
+        // A cart on the new behaviour carries `newRender`'s pose in its body ops instead
+        // (`crate::new_minecart_behavior::new_render`): vanilla never snaps it to the rails.
+        let new_render = e.body.len > 0;
         if let Some(haste_core::model::Decoration::Minecart(cart)) = &mut e.decoration {
-            cart.rail = rail_positions(view, blocks, e.pos);
+            cart.rail = if new_render {
+                None
+            } else {
+                rail_positions(view, blocks, e.pos)
+            };
         }
     }
 }

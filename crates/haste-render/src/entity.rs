@@ -25,6 +25,7 @@ mod block_entities;
 mod block_model;
 mod boat;
 mod cape;
+mod display;
 mod dragon_fireball;
 mod equipment;
 mod experience_orb;
@@ -34,6 +35,10 @@ mod flame;
 #[cfg(test)]
 mod flame_tests;
 mod item;
+mod leash;
+#[cfg(test)]
+mod leash_tests;
+pub use leash::LeashLine;
 mod item_entity;
 mod item_frame;
 pub mod map;
@@ -50,6 +55,7 @@ mod painting;
 mod pipelines;
 mod piston;
 mod shadow;
+mod should_render;
 mod sign;
 #[cfg(test)]
 mod tests;
@@ -57,6 +63,7 @@ mod thrown_item;
 #[cfg(test)]
 mod thrown_item_tests;
 mod tnt;
+mod world_glyph;
 
 mod armor_stand;
 mod hand;
@@ -69,7 +76,7 @@ pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matr
 #[cfg(test)]
 use hand::{arm_model, hand_root_matrix, item_arm_matrix};
 pub(crate) use humanoid::{elytra_model, humanoid_armor};
-use humanoid::{missing_item_model, missing_texture, placeholder_texture};
+use humanoid::{missing_item_model, missing_texture, placeholder_texture, white_texture};
 use item_display::item_model_bbox;
 pub(crate) use item_display::{
     argb_linear, item_display_matrix, item_frame_item_transform, item_frame_transform,
@@ -80,6 +87,7 @@ pub(crate) use model_parts::{
     aabb_in_frustum, emit_part, emit_part_tinted, model_extents, model_top, part_matrix,
     pose_without_hidden,
 };
+pub use should_render::should_render_at_sqr_distance;
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
 pub(crate) use vertex::{
@@ -90,20 +98,6 @@ pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha, Enti
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
-/// Vanilla `Entity.shouldRenderAtSqrDistance`: whether an entity whose model is `size`
-/// blocks and has entity `scale` should be drawn at squared distance `dist_sq`, given the
-/// `view_scale` (`Entity.viewScale`, from `options.entityDistanceScaling`).
-pub fn should_render_at_sqr_distance(
-    size: f32,
-    entity_scale: f32,
-    dist_sq: f64,
-    view_scale: f32,
-) -> bool {
-    let size = if size.is_nan() { 1.0 } else { size };
-    let limit = 64.0 * size.max(1.0) * entity_scale * view_scale;
-    dist_sq < f64::from(limit * limit)
-}
-
 pub(crate) use item_entity::{
     item_entity_bob, item_entity_copies, item_entity_lift, item_entity_spin,
 };
@@ -116,7 +110,12 @@ const PLAYER_SCALE: f32 = 0.9375;
 /// item frames, ground for dropped items, thirdperson for held items on mobs and players).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemDisplay {
+    /// `none`: no display transform (item displays default to it).
+    None,
     FirstPerson,
+    /// `firstperson_lefthand`: drawn through the right hand's entry with the left-hand fix
+    /// (the item models' own left entry is not loaded yet).
+    FirstPersonLeft,
     /// `thirdperson_righthand` (`ItemInHandLayer`, the right hand).
     ThirdPersonRight,
     /// `thirdperson_lefthand`: the same transform with vanilla's left-hand fix (translation.x
@@ -124,6 +123,8 @@ pub enum ItemDisplay {
     ThirdPersonLeft,
     /// `head` (`CustomHeadLayer`: heads and hats worn on the head).
     Head,
+    /// `gui` (inventory slots; item displays may name it too).
+    Gui,
     Fixed,
     Ground,
     /// `on_shelf` (`ShelfRenderer`: items on a shelf block, small and sunk into the board).
@@ -305,6 +306,8 @@ pub struct EntityRenderer {
     water_mask_pipeline: wgpu::RenderPipeline,
     /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
     pub beams: crate::blockentity::BeamPipelines,
+    /// The display entities' per-frame state and text passes (`DisplayRenderer`).
+    displays: display::Displays,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
     font: Arc<haste_assets::BitmapFont>,
     /// Equipment asset info (`equipment/<asset>.json`), by asset id, loaded once (`None` for an
@@ -320,6 +323,8 @@ pub struct EntityRenderer {
     /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
     map_decoration_names: Vec<Identifier>,
     pub drawn: u32,
+    /// The leash ropes to draw this frame (set by the client through [`Self::set_leash_lines`]).
+    leash_lines: Vec<leash::LeashLine>,
 }
 
 impl EntityRenderer {
@@ -350,28 +355,11 @@ impl EntityRenderer {
         self.mask_vertices.clear();
         self.nametags.clear();
         self.drawn = 0;
-        for e in entities {
-            if Some(e.id) == skip {
-                continue;
-            }
-            // Vanilla `EntityRenderer.shouldRender`: skip entities beyond
-            // `64 * boundingBox.size` blocks (`Entity.shouldRenderAtSqrDistance`) or
-            // outside the camera frustum (the AABB inflated by 0.5, `Frustum.isVisible`).
-            // Same look: those entities would draw nothing visible anyway.
-            let (size, half) = model_extents(&e.model.root);
-            let rel = e.pos - camera;
-            let dist2 = rel.length_squared();
-            // `AbstractArrow.shouldRenderAtSqrDistance` overrides the generic limit with the
-            // bounding box diagonal times ten, so arrows stay visible much farther out.
-            let visible = if matches!(&e.decoration, Some(Decoration::Arrow(_))) {
-                arrow::arrow_should_render(dist2, e.width, e.height, view_scale)
-            } else {
-                should_render_at_sqr_distance(size, e.scale, dist2, view_scale)
-            };
-            if !visible {
-                continue;
-            }
-            if !aabb_in_frustum(frustum, rel, half + 0.5) {
+        self.displays.begin_frame();
+        for (index, e) in entities.iter().enumerate() {
+            if Some(e.id) == skip
+                || !should_render::should_render(e, e.pos - camera, frustum, view_scale)
+            {
                 continue;
             }
             let (sky, block) = e.light;
@@ -422,6 +410,7 @@ impl EntityRenderer {
                         self.emit_falling_block(e, f, camera, light, assets)
                     }
                     Decoration::PrimedTnt(t) => self.emit_primed_tnt(e, t, camera, light, assets),
+                    Decoration::Display(d) => self.emit_display(index, e, d, camera, light, assets),
                 }
                 // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer —
                 // a burning small fireball carries its `displayFireAnimation` flames on top
@@ -544,6 +533,16 @@ impl EntityRenderer {
                 }
             }
         }
+        // `LeashFeatureRenderer`: the ropes after the entities, on the white texel so the
+        // colour is the rope's own.
+        if !self.leash_lines.is_empty() {
+            let white = self.texture_rect(&parse_tex("haste:white"), assets);
+            for line in &self.leash_lines {
+                leash::push_leash(&mut self.vertices, line, camera, white);
+            }
+        }
+        // `DisplayRenderer.TextDisplayRenderer`: the text displays, back to front.
+        self.emit_text_displays(entities, camera);
         if self.vertices.len() > self.vertex_capacity {
             self.vertex_capacity = self.vertices.len().next_power_of_two();
             self.vertex_buffer = make_vertex_buffer(&self.device, self.vertex_capacity);
@@ -568,9 +567,6 @@ impl EntityRenderer {
     /// Draws into the main pass (camera bind group at group 0); the boats' water masks ride
     /// along after the models (vanilla submits the patch inside the boat's own submission).
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
-        if self.vertices.is_empty() && self.mask_vertices.is_empty() {
-            return 0;
-        }
         let mut calls = 0;
         if !self.vertices.is_empty() {
             pass.set_pipeline(&self.pipeline);
@@ -579,6 +575,9 @@ impl EntityRenderer {
             pass.draw(0..self.vertices.len() as u32, 0..1);
             calls += 1;
         }
-        calls + boat::draw_masks(self, pass)
+        calls += boat::draw_masks(self, pass);
+        // The text displays' translucent text after every solid entity (vanilla draws the
+        // text features after the solid ones).
+        calls + self.displays.text.draw(pass, &self.bind_group)
     }
 }

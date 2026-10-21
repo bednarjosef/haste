@@ -74,6 +74,10 @@ impl Session {
             let s = &mut self.player.state;
             s.velocity = haste_physics::elytra::firework_boost(s.velocity, s.yaw, s.pitch);
         }
+        // The camera entity the player's tick sees (vanilla reads `Minecraft.getCameraEntity`
+        // in `Camera.tick`, `LocalPlayer.isControlledCamera` and the pick).
+        self.player
+            .set_camera_entity(self.camera.snapshot().copied());
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);

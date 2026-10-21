@@ -98,7 +98,9 @@ pub(super) fn item_model_bbox(
         // composite transformation, then the -0.5 recentring (no left-hand fix here: block
         // entities never draw an item in the left hand).
         let display = match display {
-            ItemDisplay::FirstPerson => &part.firstperson,
+            ItemDisplay::None => &haste_assets::DisplayTransform::IDENTITY,
+            ItemDisplay::FirstPerson | ItemDisplay::FirstPersonLeft => &part.firstperson,
+            ItemDisplay::Gui => &part.gui,
             ItemDisplay::ThirdPersonRight => &part.thirdperson,
             ItemDisplay::ThirdPersonLeft => &part.thirdperson_left,
             ItemDisplay::Head => &part.head,

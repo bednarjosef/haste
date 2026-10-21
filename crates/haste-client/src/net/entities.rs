@@ -5,7 +5,7 @@ use glam::DVec3;
 use haste_entity::riding::SeatPoint;
 use haste_protocol::haste_core::entity::MetadataEntry;
 use haste_protocol::haste_core::EntityId;
-use haste_protocol::packets::play::clientbound::teleport_flags;
+use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::{ClientboundPlay, ServerboundPlay, SyncedRegistries};
 
 use super::{EntitySink, Session, WorldSink, HEAD_SLOT, VEHICLE_CORRECTION_EPSILON};
@@ -32,7 +32,12 @@ impl Session {
                 if self.is_lightning_type(s.kind) {
                     self.lightmap.lightning();
                 }
-                entities.spawn(&s)
+                entities.spawn(&s);
+                // `AbstractMinecart`'s constructor picks its behaviour from the level's
+                // features (the store leaves every other type alone).
+                if super::minecart::use_experimental_movement(regs) {
+                    entities.use_new_minecart_behavior(s.id);
+                }
             }
             P::RemoveEntities(r) => {
                 let ids: Vec<EntityId> = r.entity_ids.iter().map(|i| EntityId(*i)).collect();
@@ -52,6 +57,11 @@ impl Session {
                     }
                 }
                 entities.remove(&ids);
+            }
+            // `ClientPacketListener.handleEntityLinkPacket`: a holder of -1 unties the leash.
+            P::SetEntityLink(s) => {
+                let holder = (s.holder != -1).then_some(EntityId(s.holder));
+                entities.set_leash(EntityId(s.attached), holder);
             }
             P::SetPassengers(s) => {
                 let vehicle = EntityId(s.vehicle);
@@ -175,6 +185,7 @@ impl Session {
                 };
                 entities.teleport(id, pos, yaw, pitch, t.on_ground);
             }
+            P::MoveMinecartAlongTrack(m) => Self::handle_minecart_along_track(&m, entities),
             P::RotateHead(h) => entities.set_head_yaw(EntityId(h.entity_id), h.head_yaw),
             P::SwingAnimation(s) => {
                 entities.swing(EntityId(s.entity_id), s.hand, s.animation, s.duration)
@@ -195,6 +206,11 @@ impl Session {
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             // Entity status 0 on an arrow is the potion puff of a stuck tipped arrow
             // reverting (`Arrow.handleEntityEvent`); other entities' status 0 is not ours.
+            // Entity status 17: a firework rocket bursts (`FireworkRocketEntity.handleEntityEvent`);
+            // its explosions are read from the rocket's stack by the particle tick.
+            P::EntityEvent(e) if e.status == 17 => {
+                self.firework_status(EntityId(e.entity_id), entities)
+            }
             P::EntityEvent(e) if e.status == 0 => {
                 entities.arrow_potion_puff(EntityId(e.entity_id), &mut self.arrow_particles)
             }
@@ -206,6 +222,10 @@ impl Session {
             // Entity status 70 primes a TNT minecart's fuse (MinecartTNT.handleEntityEvent).
             P::EntityEvent(e) if e.status == 70 => {
                 entities.prime_tnt_minecart(EntityId(e.entity_id))
+            }
+            // Entity status 35: the totem of undying popped (`handleEntityEvent`'s TOTEM case).
+            P::EntityEvent(e) if e.status == 35 => {
+                super::totem::start_totem(self, EntityId(e.entity_id), entities)
             }
             P::SetEntityData(d) => {
                 // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
@@ -267,9 +287,22 @@ impl Session {
                 entities.player_info(&u.infos());
                 crate::game::skins::added_profiles(&u, &mut self.profiles);
             }
+            P::SetCamera(c) => self.handle_set_camera(&c, own),
             _ => return Some(p),
         }
         None
+    }
+
+    /// `ClientPacketListener.handleSetCamera`: the camera views the world from the packet's
+    /// entity when this level knows it (`packet.getEntity(level)`; our own id is known, and
+    /// gives the camera back to the player), else nothing changes (`Minecraft
+    /// .setCameraEntity` only runs for a resolved entity). The post effect vanilla's
+    /// `GameRenderer.checkEntityPostEffect` picks for a creeper, spider or enderman is not
+    /// drawn: Haste has no post chains besides the menu blur.
+    fn handle_set_camera(&mut self, c: &cb::SetCamera, own: EntityId) {
+        let id = EntityId(c.camera_id);
+        let known = id == own || self.entity_ids.contains(&id);
+        self.camera.set_camera(id, own, known);
     }
 }
 

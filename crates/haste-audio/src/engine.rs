@@ -133,6 +133,9 @@ struct PlayingSound {
     pos: Option<DVec3>,
     /// Overall volume of the sound: the play volume times the variant's volume.
     volume: f32,
+    /// The variant's own volume from `sounds.json`, so a ticking instance's new volume
+    /// ([`SilentEngine::set_sound_volume`]) multiplies with it as the play volume did.
+    variant_volume: f32,
     /// Final pitch multiplier: the play pitch times the variant's pitch, clamped to
     /// 0.5..=2.0.
     pitch: f32,
@@ -234,6 +237,7 @@ impl SilentEngine {
             source,
             pos,
             volume: volume * variant.volume,
+            variant_volume: variant.volume,
             pitch: clamp_pitch(pitch * variant.pitch),
             attenuation_distance: variant.attenuation_distance,
             stereo: false,
@@ -288,6 +292,16 @@ impl SilentEngine {
     /// shift down. The output stage uses this for sounds whose player finished.
     pub fn remove(&mut self, index: usize) {
         self.sounds.remove(index);
+    }
+
+    /// Set the instance volume of the sound at `index` (play order): a ticking sound
+    /// instance's new volume, which vanilla's `SoundEngine.tickInGameSound` pushes to the
+    /// channel every tick (`calculateVolume(instance)`). It multiplies with the variant's
+    /// volume like the play volume; the gains follow on the next `tick()`.
+    pub fn set_sound_volume(&mut self, index: usize, volume: f32) {
+        if let Some(sound) = self.sounds.get_mut(index) {
+            sound.volume = volume * sound.variant_volume;
+        }
     }
 
     /// Mark the sound at `index` (play order) as stereo (its file has more than one
