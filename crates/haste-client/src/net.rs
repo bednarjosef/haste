@@ -240,6 +240,12 @@ pub struct Session {
     /// `LevelData.RespawnData`, the compass's target). Starts at the overworld's origin, as
     /// vanilla's `RespawnData.DEFAULT` does.
     pub respawn: respawn::RespawnData,
+    /// The level's difficulty and its lock (`handleChangeDifficulty`); a login resets them.
+    pub level_difficulty: difficulty::LevelDifficulty,
+    /// The server's MOTD (`handleServerData`); None until the server sends one.
+    pub server_motd: Option<haste_protocol::haste_core::Component>,
+    /// The server's icon, kept only once it passes `ServerData.validateIcon`.
+    pub server_icon: Option<Vec<u8>>,
 }
 
 impl Session {
@@ -338,6 +344,9 @@ impl Session {
             remote_use: HashMap::new(),
             remote_use_sounds: Vec::new(),
             respawn: respawn::RespawnData::default(),
+            level_difficulty: difficulty::LevelDifficulty::default(),
+            server_motd: None,
+            server_icon: None,
         }
     }
 
@@ -530,6 +539,7 @@ mod chat;
 pub mod chat_session;
 mod counters;
 pub(crate) mod damage;
+mod difficulty;
 mod driver;
 mod effects;
 mod entities;
@@ -548,6 +558,7 @@ mod player_state;
 mod registries;
 mod remote_use;
 mod respawn;
+mod server_data;
 mod session_tick;
 mod sinks;
 mod sync_block_state;

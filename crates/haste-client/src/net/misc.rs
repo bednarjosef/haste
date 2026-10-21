@@ -42,6 +42,8 @@ impl Session {
             }
             P::MapItemData(m) => self.apply_map_item_data(&m),
             P::SetDefaultSpawnPosition(s) => self.set_respawn_data(&s),
+            P::ChangeDifficulty(c) => self.set_difficulty(&c),
+            P::ServerData(s) => self.set_server_data(&s),
             _ => return Some(p),
         }
         None

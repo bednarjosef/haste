@@ -32,6 +32,8 @@ impl Session {
                 world.set_biome_zoom_seed(l.spawn.hashed_seed);
                 self.is_flat = l.spawn.is_flat;
                 self.view_distance = l.view_distance;
+                // A login makes a new `ClientLevelData` at `Difficulty.NORMAL`, unlocked.
+                self.level_difficulty = Default::default();
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
