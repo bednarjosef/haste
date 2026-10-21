@@ -37,6 +37,9 @@ mod fishing_bobber;
 mod flame;
 #[cfg(test)]
 mod flame_tests;
+mod glyph_pages;
+#[cfg(test)]
+mod glyph_pages_tests;
 mod item;
 mod item_activation;
 #[cfg(test)]
@@ -251,6 +254,8 @@ pub struct EntityRenderer {
     atlas: wgpu::Texture,
     shelf: Shelf,
     textures: HashMap<Identifier, EntityTexture>,
+    /// Each font page's texture key, so a glyph's page is looked up without building one.
+    glyph_pages: glyph_pages::GlyphPageKeys,
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: usize,
     vertices: Vec<EntityVertex>,

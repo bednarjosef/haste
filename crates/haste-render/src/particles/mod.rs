@@ -56,7 +56,7 @@ use glam::DVec3;
 use haste_core::{BlockStateId, Identifier};
 
 pub use engine::Particles;
-pub use firework::{FireworkExplosion, FireworkShape};
+pub use firework::{FireworkExplosion, FireworkShape, FireworkSound, FireworkSoundKind};
 pub use particle_renderer::ParticleRenderer;
 pub use resources::ParticleTypes;
 pub use snapshot::{ParticleSnapshot, ParticleSnapshots, ParticleView};

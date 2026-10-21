@@ -561,10 +561,12 @@ impl ParticleBehaviour {
                 ..ParticleBehaviour::DEFAULT
             },
             // FireworkParticles.SparkParticle: its lifetime, quad, colour and fade are set when
-            // it is spawned (see the firework module); the gravity is its own.
+            // it is spawned (see the firework module); the gravity is its own. Its speed is the
+            // packet's, kept verbatim (`xd = xa`), as a rocket's trail spawns it.
             "firework" => &ParticleBehaviour {
                 source: "SparkParticle",
                 gravity: 0.1,
+                motion: Motion::Keep,
                 ..ParticleBehaviour::DEFAULT
             },
             // FireworkParticles.OverlayParticle (FLASH): life 4, no physics; its quad and

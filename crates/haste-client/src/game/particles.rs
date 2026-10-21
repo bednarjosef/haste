@@ -127,6 +127,11 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
                 [0.0; 3],
             ));
         }
+        // `FireworkRocketEntity.tick`'s client trail: each rocket in flight leaves a FIREWORK
+        // particle at its position, every tick, with its velocity's fall.
+        for (pos, velocity) in shared.entities.read().firework_rockets() {
+            particles.firework_rocket_trail(pos, velocity);
+        }
         // The totem pops (`TrackingEmitter.tick`): each emitter follows its entity's box and
         // is dropped once it has lived its 30 ticks, or its entity is gone.
         let entities = shared.entities.read();
@@ -152,6 +157,23 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
     }
     driver.session.ambient_spawns = ambient;
     particles.tick(camera);
+    // The firework bursts' sounds (`Starter.tick`'s `playLocalSound`), queued by the tick above
+    // and played at the burst: category AMBIENT (index 8), volume 20, the pitch the burst drew.
+    for s in particles.drain_firework_sounds() {
+        driver
+            .session
+            .sound_requests
+            .push(crate::sound::SoundRequest::Play(
+                crate::sound::PlayRequest {
+                    sound: crate::sound::SoundRef::Inline(s.event().to_owned()),
+                    category: 8,
+                    pos: crate::sound::SoundPos::Fixed(s.pos),
+                    volume: 20.0,
+                    pitch: s.pitch,
+                    seed: driver.session.totem_rng.next_long(),
+                },
+            ));
+    }
     // The render snapshot for the coming frames (vanilla's per-frame
     // `ParticleEngine.extract` folded into the tick: light sampled at the tick
     // position, see `build_snapshot`), published while the locks are still held —
