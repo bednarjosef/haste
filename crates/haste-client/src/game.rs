@@ -104,6 +104,10 @@ fn tick_once(
     // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
     // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
     let tick_moved = level::tick(driver, shared, &input)?;
+    // The local player's ambient sound handlers, at the end of its tick (vanilla
+    // `LocalPlayer.tick`): underwater enter/exit and additions, the biome loop, mood and
+    // additions.
+    sound::tick_ambient_handlers(driver, shared);
     // The pickup particles the tick produced or advanced, published to the render thread.
     pickup::publish(driver, shared);
     // The maps' data, published when a map's packets changed it.

@@ -47,6 +47,14 @@ pub struct Session {
     /// The dimension type's `audio/music_volume` (vanilla's constant dimension layer of
     /// the environment attribute system): the base the camera's biome overrides each tick.
     pub dimension_music_volume: f32,
+    /// The `audio/ambient_sounds` attribute's layers for the current level (the
+    /// dimension type's value, each synced biome's override), read at the player's
+    /// position by the biome ambient sounds handler.
+    pub ambient_sounds_layers: crate::app::biomes::ambient_sounds::AmbientSoundsLayers,
+    /// The local player's ambient sound handlers (vanilla `LocalPlayer.ambientSoundHandlers`).
+    pub ambient_sound_handlers: crate::sound::AmbientSoundHandlers,
+    /// The ticking sound instances they start (vanilla `SoundEngine.tickingSounds`).
+    pub ticking_sounds: crate::sound::TickingSounds,
     /// The camera's `MUSIC_VOLUME` as of the last tick (vanilla
     /// `Minecraft.getMusicVolume`): `dimension_music_volume` overridden by the camera's
     /// biome, clamped to the attribute's unit range (`biomes::audio` resolves it).
@@ -255,6 +263,9 @@ impl Session {
             biome_audio: Vec::new(),
             dimension_music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
             music_volume: crate::app::biomes::audio::MUSIC_VOLUME_ATTRIBUTE_DEFAULT,
+            ambient_sounds_layers: Default::default(),
+            ambient_sound_handlers: Default::default(),
+            ticking_sounds: Default::default(),
             breaking: HashMap::new(),
             lids: HashMap::new(),
             lid_states: None,
@@ -397,6 +408,12 @@ impl Session {
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.remote_use.clear();
+                // A new level and player: the ambient handlers start over and every sound
+                // stops (`Minecraft.updateLevelInEngines`); the dimension layer re-resolves.
+                self.ambient_sound_handlers
+                    .respawn(&mut self.ticking_sounds, true);
+                self.ambient_sounds_layers.dimension =
+                    crate::app::biomes::ambient_sounds::dimension_ambient_sounds(regs, &dim);
                 self.dimension = dim;
                 self.world_border = crate::world_border::WorldBorder::default();
                 self.entity_id = EntityId(l.entity_id);
