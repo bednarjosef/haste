@@ -5,7 +5,7 @@
 //!
 //! The bobber itself is a billboard at the hook's interpolated position, and its line runs from
 //! the owner's rod hand (`FishingHookRenderer.getPlayerHandPos`). The hand is resolved here in
-//! third person; the first-person hand needs the camera and is the renderer's job.
+//! third person; for the local player in first person it comes from the camera (`FirstPersonHand`).
 
 use haste_core::entity::Pose;
 use haste_core::ids::{EntityId, RegistryIndex};
@@ -13,13 +13,23 @@ use haste_core::{DVec3, Vec3};
 
 use crate::dims::EntityDimensions;
 use crate::fishing_hook::{
-    fraction, hand_pos_third_person, holding_arm_is_right, line_origin_offset, string_point,
-    STRING_SEGMENTS,
+    fraction, hand_pos_first_person, hand_pos_third_person, holding_arm_is_right, line_origin_offset,
+    string_point, NearPlane, STRING_SEGMENTS,
 };
 use crate::store::{Entity, EntityStore};
 
 /// The line's sample points: `STRING_SEGMENTS + 1` fractions along it, from the bobber to the hand.
 pub const LINE_POINTS: usize = STRING_SEGMENTS as usize + 1;
+
+/// The local player's hand in first person, from the camera: the eye, the near plane, the FOV in
+/// degrees and the swing factor (`FishingHookRenderer.getPlayerHandPos`, first branch).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FirstPersonHand {
+    pub eye: DVec3,
+    pub near: NearPlane,
+    pub fov: f32,
+    pub swing: f32,
+}
 
 /// One bobber this frame: its interpolated position and, while its owner is a player, the
 /// line's points from the bobber to the owner's rod hand (`FishingHookRenderer.stringVertex`
@@ -77,6 +87,7 @@ fn is_fishing_rod(item: Option<RegistryIndex>) -> bool {
 pub fn bobbers(
     store: &EntityStore,
     local: (EntityId, &Entity),
+    first_person: Option<&FirstPersonHand>,
     partial: f32,
     out: &mut Vec<FishingBobber>,
 ) {
@@ -94,7 +105,13 @@ pub fn bobbers(
         };
         let (line, owner) = match owner {
             Some(owner) => {
-                let (hand, holding_right) = owner_hand(owner, &store.dims, partial);
+                let holding_right = owner_holds_right(owner);
+                let hand = match first_person {
+                    Some(fp) if owner_id == local.0 => {
+                        hand_pos_first_person(fp.eye, &fp.near, fp.fov, holding_right, fp.swing)
+                    }
+                    _ => owner_hand(owner, &store.dims, partial, holding_right),
+                };
                 (
                     Some(line_points(hand, pos)),
                     Some(BobberOwner {
@@ -122,20 +139,22 @@ fn line_points(hand: DVec3, hook_pos: DVec3) -> [Vec3; LINE_POINTS] {
     std::array::from_fn(|i| string_point(line, fraction(i as u32, STRING_SEGMENTS)))
 }
 
-/// The owner's rod hand, third person, and the arm that holds the rod (`getHoldingArm`): the
-/// hand at the eye position moved by the body yaw.
-fn owner_hand(owner: &Entity, dims: &EntityDimensions, partial: f32) -> (DVec3, bool) {
+/// Whether the owner holds its rod in the right hand (`FishingHookRenderer.getHoldingArm`).
+fn owner_holds_right(owner: &Entity) -> bool {
     let main_is_right = crate::animation::arm_pose::main_arm_is_right(owner);
     let main_is_rod = is_fishing_rod(hand_item(owner, 0));
-    let holding_right = holding_arm_is_right(main_is_right, main_is_rod);
+    holding_arm_is_right(main_is_right, main_is_rod)
+}
+
+/// The owner's rod hand, third person: the hand at the eye position moved by the body yaw.
+fn owner_hand(owner: &Entity, dims: &EntityDimensions, partial: f32, holding_right: bool) -> DVec3 {
     let pos = owner.prev_pos.lerp(owner.pos, f64::from(partial));
     let eye = pos + DVec3::new(0.0, f64::from(dims.eye_height(owner.kind, false)), 0.0);
-    let hand = hand_pos_third_person(
+    hand_pos_third_person(
         eye,
         owner.body_yaw_at(partial),
         1.0,
         holding_right,
         owner.pose == Pose::Crouching,
-    );
-    (hand, holding_right)
+    )
 }

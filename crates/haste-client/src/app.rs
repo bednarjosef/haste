@@ -2067,7 +2067,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             );
         }
         let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, session.local, partial, &view);
+            feed.entities(&shared, &mut renderer, session.local, partial, &view, matches!(perspective, game::Perspective::FirstPerson).then_some(camera));
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
@@ -2805,7 +2805,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             view.first_person,
         );
         let (entities, block_entities) =
-            feed.entities(shared, &mut renderer, session_ref.local, partial, view);
+            feed.entities(shared, &mut renderer, session_ref.local, partial, view, Some(camera));
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {

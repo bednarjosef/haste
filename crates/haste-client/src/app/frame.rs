@@ -247,7 +247,7 @@ impl App {
         );
         let (entities, block_entities) =
             self.feed
-                .entities(&session.shared, renderer, session.local, partial, &view);
+                .entities(&session.shared, renderer, session.local, partial, &view, matches!(self.perspective, game::Perspective::FirstPerson).then_some(camera));
         let block_target = view.block_target;
         self.breaking.clear();
         self.breaking

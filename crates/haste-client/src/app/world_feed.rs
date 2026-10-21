@@ -17,8 +17,7 @@ use haste_render::{
 };
 use haste_world::World;
 
-use super::biomes;
-use super::block_entity_extract::{self, BlockEntityTickFrame};
+use super::{biomes, block_entity_extract::{self, BlockEntityTickFrame}};
 use crate::game::{self, Shared};
 
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
@@ -421,6 +420,7 @@ impl WorldFeed {
         local: (EntityId, u128),
         partial: f32,
         view: &game::ViewState,
+        first_person: Option<haste_render::Camera>,
     ) -> (&[EntityInstance], &[BlockEntityInstance]) {
         // The maps' snapshot for this frame: one `Arc` clone (the renderer re-uploads only
         // the maps whose data changed). Every path that draws goes through here, so the
@@ -442,7 +442,7 @@ impl WorldFeed {
         let own_skin = {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
-            self.fishing.collect(&store, shared, local.0, partial);
+            self.fishing.collect(&store, shared, local.0, partial, first_person, view, renderer);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
         game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);
