@@ -446,7 +446,8 @@ impl WorldFeed {
         let own_skin = {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
-            store.leash_lines(partial, &mut self.leash);
+            let model = shared.local_model.lock();
+            store.leash_lines(partial, Some(&model), &mut self.leash);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
         game::push_local_instance(&mut self.instances, shared, local, view, partial, &own_skin);

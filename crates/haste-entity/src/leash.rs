@@ -103,11 +103,16 @@ impl EntityStore {
     }
 
     /// The ropes at `partial`, written into `out` (cleared first). A link whose end is not
-    /// tracked yet draws nothing; the link itself stays until removed or untied.
-    pub fn leash_lines(&self, partial: f32, out: &mut Vec<LeashLine>) {
+    /// tracked yet draws nothing; the link itself stays until removed or untied. `local` is the
+    /// local player's model, which is kept outside the store, so a link held by it resolves.
+    pub fn leash_lines(&self, partial: f32, local: Option<&Entity>, out: &mut Vec<LeashLine>) {
         out.clear();
         for (attached, holder) in self.leashes.iter() {
-            let (Some(a), Some(h)) = (self.get(attached), self.get(holder)) else {
+            let track = |id| match local {
+                Some(l) if l.id == id => Some(l),
+                _ => self.get(id),
+            };
+            let (Some(a), Some(h)) = (track(attached), track(holder)) else {
                 continue;
             };
             out.push(LeashLine {
