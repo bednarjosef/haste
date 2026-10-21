@@ -63,6 +63,7 @@ mod pick;
 mod place;
 pub(crate) mod prediction;
 mod step;
+mod totem;
 mod use_item;
 pub(crate) use consume_effects::{should_emit, ConsumeEffects};
 pub(crate) use cooldowns::ItemCooldowns;
@@ -198,6 +199,8 @@ pub struct Interaction {
     /// Item registry indices whose default components carry `minecraft:glider`
     /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
     pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
+    /// `minecraft:totem_of_undying` in `minecraft:item` (`find_totem`'s fallback and check).
+    pub(crate) totem_item: Option<RegistryIndex>,
     /// Item registry indices that steer a ridden animal while held (vanilla
     /// `Pig.getControllingPassenger`'s carrot on a stick, `Strider`'s warped fungus on a
     /// stick), resolved from the item registry in `prepare`.
@@ -268,6 +271,7 @@ impl Interaction {
             });
             self.tools = Some(Arc::new(t));
         }
+        self.resolve_totem(data);
         if self.glider_items.is_none() {
             // The glider items the reports name, as `minecraft:item` registry indices (the
             // chest stack only carries its index).
@@ -569,3 +573,5 @@ mod cooldowns_tests;
 mod spectator_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod totem_tests;
