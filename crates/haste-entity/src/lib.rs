@@ -22,6 +22,7 @@ pub mod metadata;
 pub mod minecart;
 pub mod model_dump;
 pub mod models;
+pub mod new_minecart_behavior;
 pub mod registry;
 pub mod render;
 pub mod riding;

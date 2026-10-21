@@ -49,11 +49,6 @@ impl Entity {
         self.lerp.set_steps(steps);
     }
 
-    /// The present (pos, yaw, pitch): what `LerpState` keeps for the part a packet lacks.
-    pub(crate) fn current(&self) -> (DVec3, f32, f32) {
-        (self.pos, self.yaw, self.pitch)
-    }
-
     /// Body yaw between the last two ticks (`Mth.rotLerp(partial, yBodyRotO, yBodyRot)`).
     pub fn body_yaw_at(&self, partial: f32) -> f32 {
         self.prev_body_yaw + partial * wrap_degrees(self.body_yaw - self.prev_body_yaw)
