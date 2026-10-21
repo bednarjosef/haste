@@ -127,7 +127,9 @@ impl EntityRenderer {
                 None => humanoid_armor(slot),
             };
             let mut out = std::mem::take(&mut self.vertices);
-            // `EquipmentLayerRenderer.renderLayers`: the glint rides on the first layer drawn.
+            // `EquipmentLayerRenderer.renderLayers`: the glint rides on the first layer drawn,
+            // and every layer (the wings too) is submitted with `OverlayTexture.NO_OVERLAY`, so
+            // worn armour never takes the wearer's red hurt flash.
             let mut glint = piece.foil.has_foil();
             for layer in info.layers_of(layer_type) {
                 let Some(tint) = layer_tint(layer, piece.dye) else {
@@ -148,7 +150,7 @@ impl EntityRenderer {
                                 root * armor_stand::small_part_scale(child),
                                 rect,
                                 light,
-                                e.hurt,
+                                0.0,
                                 tint,
                             );
                         }
@@ -161,7 +163,7 @@ impl EntityRenderer {
                         root,
                         rect,
                         light,
-                        e.hurt,
+                        0.0,
                         tint,
                     ),
                 }
@@ -190,7 +192,7 @@ impl EntityRenderer {
                         wings_root,
                         rect,
                         light,
-                        e.hurt,
+                        0.0,
                         tint,
                     );
                     mark_armor_glint(&mut out[start..], &mut glint);
