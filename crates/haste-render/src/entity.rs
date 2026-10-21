@@ -28,6 +28,8 @@ mod cape;
 mod display;
 mod dragon_fireball;
 mod equipment;
+#[cfg(test)]
+mod equipment_tests;
 mod experience_orb;
 mod falling_block;
 mod first_person;
@@ -35,6 +37,13 @@ mod flame;
 #[cfg(test)]
 mod flame_tests;
 mod item;
+mod item_activation;
+#[cfg(test)]
+mod item_activation_tests;
+mod leash;
+#[cfg(test)]
+mod leash_tests;
+pub use leash::LeashLine;
 mod item_entity;
 mod item_frame;
 pub mod map;
@@ -47,6 +56,7 @@ mod map_tests;
 mod minecart;
 #[cfg(test)]
 mod minecart_tests;
+mod model_equipment;
 mod painting;
 mod pipelines;
 mod piston;
@@ -65,17 +75,29 @@ mod tnt;
 mod world_glyph;
 
 mod armor_stand;
+mod arrow_layer;
+mod bee_stinger_layer;
 mod hand;
 mod humanoid;
 mod item_display;
 mod model_parts;
+mod parrot_on_shoulder;
+#[cfg(test)]
+mod parrot_on_shoulder_tests;
+mod stuck_in_body;
+#[cfg(test)]
+mod stuck_in_body_tests;
+mod stuck_layers;
+mod tick_pair;
+pub use stuck_layers::{StuckInput, StuckModels};
+pub use tick_pair::TickPair;
 mod vertex;
 
 pub(crate) use hand::{arm_matrix, custom_head_layer_matrix, held_item_layer_matrix};
 #[cfg(test)]
 use hand::{arm_model, hand_root_matrix, item_arm_matrix};
 pub(crate) use humanoid::{elytra_model, humanoid_armor};
-use humanoid::{missing_item_model, missing_texture, placeholder_texture};
+use humanoid::{missing_item_model, missing_texture, placeholder_texture, white_texture};
 use item_display::item_model_bbox;
 pub(crate) use item_display::{
     argb_linear, item_display_matrix, item_frame_item_transform, item_frame_transform,
@@ -197,32 +219,10 @@ fn body_matrix(b: &BodyTransform) -> Mat4 {
     m
 }
 
-/// A per-tick value the renderer lerps by partial tick, the way a vanilla render state
-/// extracts one (`Mth.lerp(partialTicks, xO, x)`): the value at the start and at the end of the
-/// last game tick. The client owns the tick, the renderer only interpolates it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TickPair {
-    /// The value at the end of the previous tick (vanilla's `oX` field).
-    pub start: f32,
-    /// The value at the end of the last tick.
-    pub end: f32,
-}
-
-impl TickPair {
-    /// A value that never changes.
-    pub const fn fixed(v: f32) -> TickPair {
-        TickPair { start: v, end: v }
-    }
-
-    /// `Mth.lerp(partial, start, end)` at `partial` (0..1) through the tick.
-    pub fn at(self, partial: f32) -> f32 {
-        self.start + (self.end - self.start) * partial
-    }
-}
-
 /// What the first-person view holds (vanilla `FirstPersonHandsAndItemsRenderState`): see
 /// [`first_person`](self::first_person).
 pub use first_person::FirstPerson;
+pub use item_activation::{item_activation_pose, ItemActivation};
 
 /// A name tag to draw: world anchor (above the head) and the text.
 #[derive(Clone, Debug)]
@@ -262,6 +262,9 @@ pub struct EntityRenderer {
     hand_buffer: wgpu::Buffer,
     hand_capacity: usize,
     hand: Vec<EntityVertex>,
+    /// The item a totem pop shows and its countdown (`set_item_activation`), drawn into the
+    /// hand pass by `prepare_hand` in every perspective.
+    item_activation: Option<ItemActivation>,
     item_names: Vec<Identifier>,
     item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
     /// The first-person arm models, by left, [`FirstPerson::slim`] and
@@ -321,7 +324,12 @@ pub struct EntityRenderer {
     map_decoration_rects: HashMap<u32, Option<[u32; 4]>>,
     /// `minecraft:map_decoration_type` entries in id order, like `item_names` for items.
     map_decoration_names: Vec<Identifier>,
+    /// This frame's stuck and shoulder state (by id) and the models they draw (`set_stuck`).
+    stuck: Vec<StuckInput>,
+    stuck_models: StuckModels,
     pub drawn: u32,
+    /// The leash ropes to draw this frame (set by the client through [`Self::set_leash_lines`]).
+    leash_lines: Vec<leash::LeashLine>,
 }
 
 impl EntityRenderer {
@@ -512,6 +520,7 @@ impl EntityRenderer {
             }
             self.emit_equipment(e, root, light, assets);
             self.emit_spin_attack(e, root, light, assets);
+            self.emit_stuck(e, root, light, assets);
             // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
             if e.display_fire {
                 self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
@@ -533,6 +542,14 @@ impl EntityRenderer {
                         below_name: e.below_name.clone(),
                     });
                 }
+            }
+        }
+        // `LeashFeatureRenderer`: the ropes after the entities, on the white texel so the
+        // colour is the rope's own.
+        if !self.leash_lines.is_empty() {
+            let white = self.texture_rect(&parse_tex("haste:white"), assets);
+            for line in &self.leash_lines {
+                leash::push_leash(&mut self.vertices, line, camera, white);
             }
         }
         // `DisplayRenderer.TextDisplayRenderer`: the text displays, back to front.

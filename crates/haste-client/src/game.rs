@@ -26,6 +26,8 @@ use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos};
 mod block_entities;
 mod block_entity_ticks;
 mod camera;
+pub(crate) mod camera_entity;
+mod cart_camera;
 mod hud;
 mod input;
 pub(crate) mod item_uses;
@@ -38,6 +40,7 @@ mod run;
 mod settle_diet;
 mod shared;
 mod sound;
+pub(crate) mod totem_emitter;
 mod tracked_world;
 mod view;
 mod weather;
@@ -49,6 +52,7 @@ use crate::net::WorldSink;
 pub mod skins;
 
 pub use camera::{third_person_camera, Perspective};
+pub use cart_camera::{camera_eye, CartCamera};
 pub use player_model::push_local_instance;
 pub use run::run;
 pub use shared::{PackReload, Shared};
@@ -157,9 +161,10 @@ fn tick_once(
     // publishes it (the same animation path a remote player's takes).
     player_model::tick(s, shared, (prev_yaw, prev_pitch), (yaw, pitch));
     // The sound output's tick: listener from the camera (vanilla's
-    // `SoundEngine.updateSource(Camera)` — the third-person perspectives move it off the
-    // eye), music situation, then 20 Hz tick.
-    sound::tick_listener(driver, shared, &input, eye, yaw, pitch);
+    // `SoundEngine.updateSource(Camera)` — the spectated entity's eyes while spectating, and
+    // the third-person perspectives move it off the eye), music situation, then 20 Hz tick.
+    let (camera_eye, camera_yaw, camera_pitch) = s.camera_pose(1.0);
+    sound::tick_listener(driver, shared, &input, camera_eye, camera_yaw, camera_pitch);
     // The view update, the tick's last step: everything the render thread needs per frame is
     // copied into the view state here, bracketed around the tick.
     let feet = view::publish(

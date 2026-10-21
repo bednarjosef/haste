@@ -257,6 +257,7 @@ impl Particles {
             alpha: 1.0,
             portal_start: pos,
             block_sprite: Some(sub),
+            firework: None,
         };
         self.pool.push(state);
     }
