@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/occlusion_graph.rs, reused under GPL-3.0
 // (vanilla-style section visibility for cave culling: the occlusion walk's
 // worker thread). See docs/THIRD_PARTY.md.

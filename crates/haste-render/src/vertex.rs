@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/mesher.rs (vertex packing and constants) and
 // packing_consts.rs, reused under GPL-3.0 and reworked for Haste: light is
 // carried as sky/block nibbles with the lightmap applied in the shader (so
