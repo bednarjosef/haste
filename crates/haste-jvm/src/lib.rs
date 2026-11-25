@@ -1,6 +1,6 @@
 //! Embedded JVM host, tier-3 vanilla class loading, tier-2 proxies, batched GUI pipeline. Owner: jvm-host.
 //!
-//! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
+//! See docs/INTERFACES.md for the contract this crate implements and docs/AGENTS.md for the rules.
 //!
 //! * [`JvmHost`] starts the one JVM of the process (invocation API, libjvm from the configured JDK),
 //!   compiles Haste's Java side if needed (`build-java.sh`), generates the tier-2 proxies

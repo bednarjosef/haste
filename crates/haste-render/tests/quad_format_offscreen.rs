@@ -2,7 +2,7 @@
 // world rendered in the vertex format and the quad format must produce the
 // same pixels — the record keeps the vertex path's quantization grids, light
 // packing and AO-flip triangulation, so nothing the player can see changes
-// (AGENTS.md "faithful wherever the player can feel it"). Runs as its own
+// (docs/AGENTS.md "faithful wherever the player can feel it"). Runs as its own
 // integration test binary because the format is a process-wide switch.
 
 use haste_core::view::BlockView;

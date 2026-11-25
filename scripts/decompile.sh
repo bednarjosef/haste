@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Decompile the player's 26.3 client jar into the gitignored cache for reading
-# (AGENTS.md rule 5: read it for exact numbers, orders and logic; write Haste's
+# (docs/AGENTS.md rule 5: read it for exact numbers, orders and logic; write Haste's
 # code yourself; never commit it or paste it into the tree).
 #
 #   scripts/decompile.sh            # -> $HASTE_CACHE/source/26.3/client/net/minecraft/...

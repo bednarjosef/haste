@@ -1,6 +1,6 @@
 //! wgpu render backend: chunk meshing (off-thread), atlas, sky/fog, culling, entity models, GUI batch drawing. Owner: renderer.
 //!
-//! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
+//! See docs/INTERFACES.md for the contract this crate implements and docs/AGENTS.md for the rules.
 //!
 //! Mesher/vertex packing derived from Pomme (GPL-3.0); see THIRD_PARTY.md.
 

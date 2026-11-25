@@ -1,7 +1,7 @@
 //! Shared types and the interfaces between Haste's crates.
 //!
 //! This crate is owned by the lead. Workstreams consume it; they do not edit it. If you need a new
-//! shared type or a change here, ask (see AGENTS.md). Keep this crate free of logic beyond small
+//! shared type or a change here, ask (see docs/AGENTS.md). Keep this crate free of logic beyond small
 //! conversions: no I/O, no game rules.
 //!
 //! Tiers (from the spikes): tier 1 state lives in Rust (`haste-world`, `haste-entity`,

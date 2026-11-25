@@ -56,7 +56,7 @@ to follow (another renderer, packet handler, screen); write the code; `hx check`
 check on screen when the task asks; report. Put independent tool calls in one turn. Never
 re-read a file you just edited.
 
-## Project rules (from AGENTS.md; they all apply)
+## Project rules (from docs/AGENTS.md; they all apply)
 - **Port vanilla, never guess.** Anything the player sees, hears or feels and anything the
   server can observe follows the decompiled 26.3 client exactly: constants, math, order of steps,
   timings, every packet. When the task and vanilla disagree, follow vanilla and say so.
@@ -70,7 +70,7 @@ re-read a file you just edited.
   `tests/`). Files in `scripts/large-files.txt` may shrink but never grow; a split is a pure
   move in its own commit.
 - **Ownership.** Do not edit `crates/haste-core`, `docs/INTERFACES.md`,
-  `crates/haste-client/src/main.rs`, `TASKS.md`, `NOTES.md` or crate dependencies
+  `crates/haste-client/src/main.rs`, `docs/TASKS.md`, `docs/NOTES.md` or crate dependencies
   (`Cargo.toml`). If you need such a change, write the request (what, why, exact signature) in
   your report and work around it.
 - **Built for mods.** Keep vanilla's seams (one function per vanilla step, render layer, packet

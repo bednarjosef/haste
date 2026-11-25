@@ -1,6 +1,6 @@
 # Handoff: state of Haste Phase 1 after session 2 (2026-10-13)
 
-For the next lead session. Read `AGENTS.md`, then this, then `TASKS.md` and `NOTES.md`.
+For the next lead session. Read `docs/AGENTS.md`, then this, then `docs/TASKS.md` and `docs/NOTES.md`.
 
 ## How to run it
 
@@ -116,7 +116,7 @@ session 2: 62.5k lines of Rust, Java and WGSL (43.8k at its start).
   reads and a rate-limit-aware gate, and merged about twenty of their branches: see
   docs/GLM-WORKERS.md.
 - **The real server is the test.** Every component checked against a real server had a bug unit
-  tests missed (NOTES.md 2026-10-13). Give every brief a server-side oracle: the vanilla
+  tests missed (docs/NOTES.md 2026-10-13). Give every brief a server-side oracle: the vanilla
   server's movement checks and logs, a second headless client as observer, region files, a local
   probe mod on a private server copy (never committed), the vanilla client via
   `scripts/vanilla-client.sh`.
@@ -132,4 +132,4 @@ session 2: 62.5k lines of Rust, Java and WGSL (43.8k at its start).
 ## Before going public
 
 Unchanged from session 1: history is already clean (`scripts/check-no-personal.sh` runs in CI);
-push `haste-spike` to GitHub too (README and AGENTS.md link to it).
+push `haste-spike` to GitHub too (README and docs/AGENTS.md link to it).

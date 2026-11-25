@@ -1,4 +1,4 @@
-//! `haste`: the client binary. Thin: each module belongs to one workstream (see AGENTS.md).
+//! `haste`: the client binary. Thin: each module belongs to one workstream (see docs/AGENTS.md).
 //!
 //! - `net`     (protocol): connection task, packet -> world/entity/player calls, outgoing packets.
 //! - `app`     (renderer): window, render loop, frame timing.

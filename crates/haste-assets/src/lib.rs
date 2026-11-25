@@ -1,6 +1,6 @@
 //! Textures, block/item models, blockstate definitions, fonts and GUI sprites read from the player's client jar and the assets index. Owner: renderer.
 //!
-//! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
+//! See docs/INTERFACES.md for the contract this crate implements and docs/AGENTS.md for the rules.
 //!
 //! Pieces derived from Pomme (GPL-3.0) carry a header and a THIRD_PARTY.md entry:
 //! `assets.rs` (asset index over jar + objects dir), `model.rs` (model JSON parsing

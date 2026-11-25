@@ -239,7 +239,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Tests that need the game files are skipped until `haste setup` has run. In-game checks live in
-`scripts/checks/`. Read [AGENTS.md](AGENTS.md) before contributing: vanilla behaviour is looked
+`scripts/checks/`. Read [AGENTS.md](docs/AGENTS.md) before contributing: vanilla behaviour is looked
 up in the game's code, never guessed.
 
 ## License

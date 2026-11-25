@@ -52,6 +52,6 @@ on CI (no `cache/`, no display) must stay green in well under a minute.
   fixed camera; bench comparisons for performance PRs.
 
 File formats for everything under `cache/oracle/26.3/` are documented in
-`crates/haste-testkit/FORMATS.md`. The decompiled client (`scripts/decompile.sh`, AGENTS.md
+`crates/haste-testkit/FORMATS.md`. The decompiled client (`scripts/decompile.sh`, docs/AGENTS.md
 rule 5) says what vanilla does; the oracle data recorded from the running game is the ground
 truth the tests compare against.
