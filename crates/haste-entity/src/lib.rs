@@ -1,6 +1,6 @@
 //! Entity tracking from packet-derived events, interpolation, entity and player models. Owner: entities.
 //!
-//! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
+//! See docs/INTERFACES.md for the contract this crate implements and docs/AGENTS.md for the rules.
 
 pub mod animation;
 pub mod armor_stand;

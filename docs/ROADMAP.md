@@ -91,7 +91,7 @@ Order: top to bottom by how many boxes a task unlocks.
 
 ## F. Performance and footprint
 
-From the 2026-10-20 measurements (`NOTES.md`: the JVM's cost, slow frames). Each task reports
+From the 2026-10-20 measurements (`docs/NOTES.md`: the JVM's cost, slow frames). Each task reports
 numbers before and after (RSS, boot time, frame p50/p99/worst at rd 12 and 32).
 
 | # | Task | Done means | Worker | Status |
@@ -106,7 +106,7 @@ numbers before and after (RSS, boot time, frame p50/p99/worst at rd 12 and 32).
 | F8 | GPU occlusion test with tighter boxes per facing group instead of the section's | opaque draws and GPU time at the ground and high spots before/after | lead | queued |
 | F9 | GPU occlusion test once per section instead of once per draw, and no pyramid rebuild while the camera and the depth are unchanged | GPU time of the cull passes before/after | lead | queued |
 | F10 | `SectionDraw` without per-draw bounds (the section's, looked up by slot) | draw-list CPU time at rd 32 before/after (0.58 ms) | lead | queued |
-| F11 | A Rust UI (HUD, chat, screens) for a no-mods mode without a JVM | blocked: architecture decision (tier 3 stays vanilla Java, `AGENTS.md`); see NOTES 2026-10-20 | lead | blocked: decision |
+| F11 | A Rust UI (HUD, chat, screens) for a no-mods mode without a JVM | blocked: architecture decision (tier 3 stays vanilla Java, `docs/AGENTS.md`); see NOTES 2026-10-20 | lead | blocked: decision |
 
 ## R. Reviews against vanilla (decompiled source)
 

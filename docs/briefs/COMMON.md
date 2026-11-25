@@ -2,9 +2,9 @@
 
 You are one of eight workstreams building Haste, a Minecraft: Java Edition 26.3 client in Rust that
 will later run Fabric mods through a compatibility layer. The lead designs interfaces, reviews and
-merges. Read these first, in your worktree: `AGENTS.md` (rules, architecture, legal),
+merges. Read these first, in your worktree: `docs/AGENTS.md` (rules, architecture, legal),
 `docs/INTERFACES.md` (the contract your crate implements and the ones you consume),
-`crates/haste-core/src/*.rs` (shared types; do not edit), `NOTES.md` (decisions so far).
+`crates/haste-core/src/*.rs` (shared types; do not edit), `docs/NOTES.md` (decisions so far).
 
 ## The goal of this session
 A client you can play: join a real 26.3 server, see the world in a window, walk, see the HUD,
@@ -37,7 +37,7 @@ per-packet allocations in hot paths, measure before claiming.
   fast and stay faithful: packet codecs, NBT, text components, item stack and data component
   encodings, registry handling, chat signing, block/fluid/item data handling, anything server-side
   that mirrors what the client must send or understand. Keep the GPL header and the Pumpkin
-  attribution at the top of each copied or adapted file and add a line to `THIRD_PARTY.md`.
+  attribution at the top of each copied or adapted file and add a line to `docs/THIRD_PARTY.md`.
   Adapt it to our types (`haste_core`, our crates); do not import Pumpkin's crate structure,
   `pumpkin-data` generated tables or its build-time downloads. Pumpkin is a server and is not
   always vanilla-exact: when it and the vanilla server disagree, the vanilla server wins.
@@ -51,7 +51,7 @@ per-packet allocations in hot paths, measure before claiming.
   `crates/haste-client/src/main.rs`, the root `Cargo.toml` or other workstreams' crates.
   Interface or dependency changes: write the exact Rust signature or crate+version and why in your
   report, and continue on something that does not need it. The lead answers quickly.
-- Architecture (AGENTS.md): game state lives in Rust; tier-3 vanilla Java runs real classes loaded
+- Architecture (docs/AGENTS.md): game state lives in Rust; tier-3 vanilla Java runs real classes loaded
   from the player's jar; one canonical Java proxy per Rust object; GUI is one batched `GuiFrame`
   per frame. Do not add designs that would make Phase 2 (Fabric mods, Mixin) harder: keep game
   state in plain Rust structs with clear ownership, no global singletons that Java proxies cannot
@@ -73,4 +73,4 @@ per-packet allocations in hot paths, measure before claiming.
 2. Commits on your branch (`git log --oneline main..HEAD`).
 3. Interface change requests (exact signatures) and new dependency requests.
 4. What is approximate, blocked, or not determined. Never fill gaps with guesses.
-5. Two or three lines for `NOTES.md` (decisions and dead ends worth keeping).
+5. Two or three lines for `docs/NOTES.md` (decisions and dead ends worth keeping).

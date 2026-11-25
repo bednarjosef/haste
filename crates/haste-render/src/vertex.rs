@@ -1,9 +1,9 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/mesher.rs (vertex packing and constants) and
 // packing_consts.rs, reused under GPL-3.0 and reworked for Haste: light is
 // carried as sky/block nibbles with the lightmap applied in the shader (so
 // time of day needs no remesh), AO and face shade per vertex, tint as a palette
-// index. See THIRD_PARTY.md.
+// index. See docs/THIRD_PARTY.md.
 
 /// Section-local position quantization: local coords (block 0..16 plus model
 /// overhang) map into `[-POS_BIAS, POS_RANGE - POS_BIAS]` across a u16. Chosen

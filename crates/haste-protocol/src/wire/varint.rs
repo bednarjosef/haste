@@ -1,7 +1,7 @@
 //! VarInt/VarLong (and unsigned forms) wire primitives for the Java protocol.
 //!
 //! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0), `src/codec/{var_int,
-//! var_long,var_uint,var_ulong}.rs`; see THIRD_PARTY.md. Adapted for Haste:
+//! var_long,var_uint,var_ulong}.rs`; see docs/THIRD_PARTY.md. Adapted for Haste:
 //! the Bedrock zig-zag `PacketRead`/`PacketWrite` impls are removed, leaving the
 //! Java Edition LEB128 forms only, and the `NetworkReadExt`/`NetworkWriteExt`
 //! dependency is inlined so these are self-contained.

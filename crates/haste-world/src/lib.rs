@@ -1,6 +1,6 @@
 //! Chunk storage, paletted containers, lighting data, block updates. Owner: world-and-data.
 //!
-//! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
+//! See docs/INTERFACES.md for the contract this crate implements and docs/AGENTS.md for the rules.
 
 pub mod chunk;
 pub mod light;

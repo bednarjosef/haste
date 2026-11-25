@@ -1,6 +1,6 @@
 //! Fetching 26.3 jars/assets/libraries from Mojang's manifest, running the data generator, config, launching the embedded vanilla server, launcher flow. Owner: setup.
 //!
-//! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
+//! See docs/INTERFACES.md for the contract this crate implements and docs/AGENTS.md for the rules.
 
 pub mod config;
 pub mod download;

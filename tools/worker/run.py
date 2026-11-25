@@ -1,7 +1,7 @@
 """Launch a headless Claude Code worker on a Haste brief, set up for small contexts:
 
 - only the six tools a worker needs (Bash, Read, Edit, Write, Grep, Glob) and no settings or
-  CLAUDE.md from disk: tools/worker/RULES.md (the worker's condensed AGENTS.md and the `hx`
+  CLAUDE.md from disk: tools/worker/RULES.md (the worker's condensed docs/AGENTS.md and the `hx`
   cheat sheet) is appended to the system prompt instead, which halves the fixed prompt;
 - the `hx` tools on PATH, and the orientation pack (`hx context BRIEF`) after the brief;
 - hooks (tools/worker/settings.json): wasteful commands are refused with the cheaper one named,

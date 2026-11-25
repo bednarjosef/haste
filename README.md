@@ -239,13 +239,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Tests that need the game files are skipped until `haste setup` has run. In-game checks live in
-`scripts/checks/`. Read [AGENTS.md](AGENTS.md) before contributing: vanilla behaviour is looked
+`scripts/checks/`. Read [AGENTS.md](docs/AGENTS.md) before contributing: vanilla behaviour is looked
 up in the game's code, never guessed.
 
 ## License
 
 Haste is free software under the [GNU General Public License v3.0 or later](LICENSE). Code it
-reuses from other projects is listed in [THIRD_PARTY.md](THIRD_PARTY.md).
+reuses from other projects is listed in [THIRD_PARTY.md](docs/THIRD_PARTY.md).
 
 Haste is not an official Minecraft product and is not approved by or associated with Mojang or
 Microsoft. You need your own copy of Minecraft: Java Edition to play.

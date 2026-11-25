@@ -1,7 +1,7 @@
 //! Length framing, zlib compression and AES-128-CFB8 encryption for the
 //! Minecraft Java protocol, over tokio TCP streams.
 //!
-//! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0; see THIRD_PARTY.md):
+//! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0; see docs/THIRD_PARTY.md):
 //! `src/java/packet_decoder.rs`, `src/java/packet_encoder.rs` and the
 //! `StreamDecryptor`/`StreamEncryptor` from `src/lib.rs`. Adapted for Haste:
 //! single version (26.3), no `ClientPacket`/`ServerPacket` traits (raw id +

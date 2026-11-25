@@ -1,6 +1,6 @@
 // The GUI item lighting (`items_3d_lights`, `items_flat_lights`, `lambert_shade`,
 // `transform_gui_normal`) is derived from Pomme (https://github.com/PommeMC/Client),
-// pomme-client/src/world/block/model.rs, reused under GPL-3.0; see THIRD_PARTY.md.
+// pomme-client/src/world/block/model.rs, reused under GPL-3.0; see docs/THIRD_PARTY.md.
 
 //! GUI items: slot geometry prepared from item models (vanilla `GuiItemRenderState` and the
 //! item renderer's GUI path) and the GUI item lighting.

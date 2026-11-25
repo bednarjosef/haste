@@ -1,6 +1,6 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/mesher.rs, reused under GPL-3.0 and reworked
-// for Haste (the greedy merge itself is new). See THIRD_PARTY.md.
+// for Haste (the greedy merge itself is new). See docs/THIRD_PARTY.md.
 
 use super::lighting::face_axes;
 use super::sink::{layer_from_index, MeshSink};

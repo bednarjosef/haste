@@ -1,6 +1,6 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/mesher.rs (snapshot capture), reused under
-// GPL-3.0 and reworked for Haste. See THIRD_PARTY.md.
+// GPL-3.0 and reworked for Haste. See docs/THIRD_PARTY.md.
 
 use haste_core::view::BlockView;
 use haste_core::{BlockPos, BlockStateId, SectionPos};

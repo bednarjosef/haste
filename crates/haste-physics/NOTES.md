@@ -25,7 +25,7 @@ copied from Pomme's `physics/`/`player/`.
 - Reuse check: Pomme `physics/`/`player/` excluded by the rules. Pumpkin's entity movement
   (`pumpkin-core/src/entity/{mod,living}.rs`) is organised after vanilla methods and cites yarn
   names ("Part of LivingEntity.tickMovement() in yarn"), so its provenance is unclear: not
-  reused, not read beyond a grep. No third-party code in this crate, so no `THIRD_PARTY.md` entry.
+  reused, not read beyond a grep. No third-party code in this crate, so no `docs/THIRD_PARTY.md` entry.
   The AABB sweep is our own (standard voxel clipping).
 
 ## Constants

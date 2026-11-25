@@ -8,7 +8,7 @@ You own `crates/haste-world` and `crates/haste-data`.
 ## Where it stands
 `haste-world` decodes chunk packets into paletted sections, stores light, tracks dirty sections
 and makes snapshots for the mesher. It has unit tests but has never been checked against real
-chunks from a real server (TASKS.md: "unverified against a real chunk capture"). The client is
+chunks from a real server (docs/TASKS.md: "unverified against a real chunk capture"). The client is
 being switched from a stand-in world to `haste_world::World` right now (client-app workstream).
 
 ## Tasks, in order (commit after each)

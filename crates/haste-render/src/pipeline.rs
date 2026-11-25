@@ -1,5 +1,5 @@
 // wgpu device/surface management and the chunk render pipeline (WGSL port of
-// Pomme's chunk.vert/chunk.frag design, rewritten for wgpu; see THIRD_PARTY.md
+// Pomme's chunk.vert/chunk.frag design, rewritten for wgpu; see docs/THIRD_PARTY.md
 // for the Pomme attribution of the shading approach).
 //
 // Backend-neutral: requests all backends, prefers Vulkan, logs the choice.

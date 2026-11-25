@@ -1,6 +1,6 @@
 //! Oracle data formats, trace replay, screenshot diffing and benchmark harness. Owner: oracles.
 //!
-//! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
+//! See docs/INTERFACES.md for the contract this crate implements and docs/AGENTS.md for the rules.
 //! The on-disk formats are documented in [FORMATS.md](../FORMATS.md); everything here loads,
 //! replays or compares that data. Tests that need `cache/` are `#[ignore]`d with a message.
 

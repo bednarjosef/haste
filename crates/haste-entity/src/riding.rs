@@ -170,7 +170,7 @@ impl VehicleSeat {
 ///
 /// The numbers are vanilla's own, read off its registry definitions (the same values a
 /// recorder-mod dump of the live game would produce). When oracles extends the entity dump
-/// with attachment points, this table is replaced by that file (AGENTS.md rule 7); the table
+/// with attachment points, this table is replaced by that file (docs/AGENTS.md rule 7); the table
 /// above keeps the box as a constant rather than a lookup so a vehicle we do carry sits at the
 /// vanilla height even before the dimensions oracle maps names to indexes (`dims.rs`).
 const VEHICLES: &[(&str, VehicleSeat)] = &[

@@ -1,7 +1,7 @@
 // The Renderer (docs/INTERFACES.md): wgpu device, atlas upload, section
 // submission, camera/frustum, per-frame render with sky colour and fog.
 // Offscreen construction + readback for oracles's screenshot tests.
-// Shading design from Pomme (chunk shaders); see THIRD_PARTY.md.
+// Shading design from Pomme (chunk shaders); see docs/THIRD_PARTY.md.
 //
 // Split by responsibility like vanilla's LevelRenderer/GameRenderer (the
 // per-frame hot path in `render_world.rs`, construction in `init.rs`, the

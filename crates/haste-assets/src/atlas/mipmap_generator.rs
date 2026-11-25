@@ -1,7 +1,7 @@
 // This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/atlas.rs, reused under GPL-3.0 and reworked
 // for Haste: CPU-side RGBA buffers instead of Vulkan images (the wgpu renderer
-// uploads them). See THIRD_PARTY.md.
+// uploads them). See docs/THIRD_PARTY.md.
 //! The per-sprite mip chain (vanilla `MipmapGenerator`).
 use super::border::extend_border;
 use super::srgb::{linear_10_to_srgb, linear_to_srgb_f32, srgb_to_linear_10, srgb_to_linear_f32};

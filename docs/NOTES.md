@@ -379,7 +379,7 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   without them Haiku cost 8.5x more (its price rises 5x above a 100K-token prompt). A run's cost
   is requests x prompt size, re-read from cache each request, and half of every prompt was fixed
   overhead: 28.5K tokens before the first read (unused tool definitions 9.5K, CLAUDE.md and
-  AGENTS.md 6K, Claude Code's system prompt 3K). `tools/worker/run.py` starts a worker at 13-15K
+  docs/AGENTS.md 6K, Claude Code's system prompt 3K). `tools/worker/run.py` starts a worker at 13-15K
   (six tools, no settings from disk, `tools/worker/RULES.md` appended, the `hx context`
   orientation pack). Shell searches filled 70-86 % of Haiku's context and whole-file reads
   52-79 % of Sonnet's, hence `scripts/hx`. Found on the way: in `dontAsk` mode every read through

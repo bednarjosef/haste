@@ -1,7 +1,7 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/mesher.rs (MeshDispatcher), reused under
 // GPL-3.0 and reworked for Haste (on rayon instead of raw threads). See
-// THIRD_PARTY.md.
+// docs/THIRD_PARTY.md.
 
 use std::sync::Arc;
 

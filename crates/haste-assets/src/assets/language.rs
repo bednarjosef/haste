@@ -1,4 +1,4 @@
-// Derived from Pomme (GPL-3.0); see THIRD_PARTY.md.
+// Derived from Pomme (GPL-3.0); see docs/THIRD_PARTY.md.
 
 use std::collections::HashMap;
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# File size guard (AGENTS.md "Structured like vanilla"): keeps Haste's files small and focused.
+# File size guard (docs/AGENTS.md "Structured like vanilla"): keeps Haste's files small and focused.
 #
 # Every tracked Rust, Java and WGSL file under crates/ and tools/ must stay within its limit:
 #   600 lines for source files, 1000 lines for test files (tests.rs, tests/*.rs, *_tests.rs, and

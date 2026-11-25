@@ -35,11 +35,11 @@ vanilla client with the mod architecture designed in and no mod support yet.
    fine and encouraged). Every agent and person on the project may read it; it stays only in
    `cache/`. Do not copy code from projects whose licence forbids it (Sodium: ideas only).
    GPL-compatible projects are fair game to reuse, Pumpkin (`cache/pumpkin`, GPL-3.0) first:
-   reused code keeps its header and is listed in `THIRD_PARTY.md` with its licence.
+   reused code keeps its header and is listed in `docs/THIRD_PARTY.md` with its licence.
 6. **Toolchain.** Pinned stable Rust (`rust-toolchain.toml`). No nightly features. No azalea crates.
    Before writing a large subsystem from scratch, spend ten minutes checking for an existing crate
    or GPL-compatible project (Pomme, Pumpkin, Fabric Loader for Phase 2); write the result in
-   `NOTES.md`.
+   `docs/NOTES.md`.
 7. **Data comes from the game, not from hand-written tables.** Block states, registries and packet
    ids come from Minecraft's data generator (`haste setup` runs the server jar with `--reports`
    into `cache/datagen/26.3/reports`). Collision shapes, entity dimensions and the like come from
@@ -96,7 +96,7 @@ these seams.
   vanilla class it follows (`blockentity/chest.rs` for `ChestRenderer`, and so on). Shared
   plumbing goes into its own module, not into the file that first needed it.
 - **Small files.** Source files stay within 600 lines and test files within 1000; tests live
-  in their own files (`tests.rs` or `tests/`), never inline in a big source file. CI enforces
+  in their own files (`tests.rs` or `tests/`), never inline in a big source file. `scripts/ci-local.sh` enforces
   this (`scripts/check-file-sizes.sh`): the files that were already larger are listed in
   `scripts/large-files.txt` and may shrink but never grow. When a change would push a file over
   its limit, put the new code into a new module named after the vanilla concept it follows
@@ -130,7 +130,7 @@ it is the top priority.
 ## How the team works
 
 - The **lead** owns `haste-core`, `docs/INTERFACES.md`, `crates/haste-client/src/main.rs`,
-  `TASKS.md`, `NOTES.md`, and merges. Workstreams own their crates (header of each `lib.rs`).
+  `docs/TASKS.md`, `docs/NOTES.md`, and merges. Workstreams own their crates (header of each `lib.rs`).
 - **A workstream never edits another workstream's crate.** If you need an interface change, write
   the request (what, why, the exact signature) in your report to the lead and continue on
   something else. The lead edits `haste-core`/`docs/INTERFACES.md` and tells everyone.
@@ -140,7 +140,7 @@ it is the top priority.
   <your crate>` and `cargo clippy -p <your crate>` must be clean. Fast tests (milliseconds) live
   next to the code; anything needing the cache (jars, reports) is `#[ignore]`d unless the cache
   exists, and says so.
-- Write `NOTES.md`-worthy decisions and dead ends in your report; the lead copies them in.
+- Write `docs/NOTES.md`-worthy decisions and dead ends in your report; the lead copies them in.
 - Faithfulness, performance and mod-readiness rules are in the sections above; they apply to every task.
 - Absolute paths in reports. Cite `file:line` for anything you want the lead to look at.
 
@@ -163,7 +163,7 @@ is their condensed copy of this file and must follow it when this file changes.
   branches (`ws<N>-<name>` for workstreams, `<topic>` for anything else) with small, clear commits.
 - A branch reaches `main` only through a pull request on the GitHub remote. The lead agent pushes
   the branch, opens the PR (`gh pr create`), reviews it (tests and clippy clean, no lead-owned
-  files touched without agreement, no derived Mojang data, attributions in `THIRD_PARTY.md` for
+  files touched without agreement, no derived Mojang data, attributions in `docs/THIRD_PARTY.md` for
   any reused code) and merges it (`gh pr merge --merge`, a merge commit so each workstream's
   history stays visible). There is no human in the loop: the lead agent does all of this itself.
 - Worker agents never push; the lead pushes their branches when opening the PR.
@@ -177,7 +177,7 @@ is their condensed copy of this file and must follow it when this file changes.
   `$HASTE_CACHE`, `$HASTE_WT`, `../haste-spike` or `~` (see `scripts/env.sh`).
 - No email addresses in committed files except `*@users.noreply.github.com`; commits are authored
   with the GitHub noreply identity (the repo config sets it).
-- CI fails on either. Secrets, tokens and Mojang-derived data never enter the tree (`cache/`).
+- `scripts/check-no-personal.sh` (run by `scripts/ci-local.sh`) fails on either. Secrets, tokens and Mojang-derived data never enter the tree (`cache/`).
 
 ## Layout
 

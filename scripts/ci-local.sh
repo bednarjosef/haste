@@ -32,10 +32,10 @@ if grep -qE '\.rs$' <<<"$changed"; then
   cargo fmt --all --check >/dev/null 2>&1 || { cargo fmt --all --check | head -40; fail "cargo fmt"; }
 fi
 
-# Structure (AGENTS.md "Structured like vanilla"): source files within 600 lines, tests within
+# Structure (docs/AGENTS.md "Structured like vanilla"): source files within 600 lines, tests within
 # 1000, and the files listed in scripts/large-files.txt never grow.
 step "file sizes"
-scripts/check-file-sizes.sh || fail "file sizes (see AGENTS.md, Structured like vanilla)"
+scripts/check-file-sizes.sh || fail "file sizes (see docs/AGENTS.md, Structured like vanilla)"
 
 if grep -q '^tools/hx/' <<<"$changed"; then
   step "agent tools"

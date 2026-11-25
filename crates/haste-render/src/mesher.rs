@@ -1,10 +1,10 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/mesher.rs (mesh_section / emit_baked_model /
 // compute_face_ao / MeshSink), reused under GPL-3.0 and reworked for Haste:
 // meshes per SectionPos against haste-assets' BakedBlockModels over a captured
 // BlockView snapshot; light is packed as sky/block nibbles instead of baked
 // brightness; the worker pool design follows Pomme's MeshDispatcher (bounded
-// result channel, buffer pool, nearest-first camera queue). See THIRD_PARTY.md.
+// result channel, buffer pool, nearest-first camera queue). See docs/THIRD_PARTY.md.
 
 mod culling;
 mod dispatch;

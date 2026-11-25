@@ -1,6 +1,6 @@
 # haste-render notes
 
-## Design (from Pomme, GPL-3.0 — see THIRD_PARTY.md)
+## Design (from Pomme, GPL-3.0 — see docs/THIRD_PARTY.md)
 
 - **Vertex packing** (`vertex.rs`): 20-byte packed vertex. u16 section-local
   positions quantized over `[-4, 20]` (POS_RANGE 24 / POS_BIAS 4): a 16-block
