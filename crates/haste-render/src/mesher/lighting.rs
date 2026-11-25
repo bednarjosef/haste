@@ -1,6 +1,6 @@
 // This file is derived from Pomme (https://github.com/josefbednar/pomme),
 // pomme-client/src/renderer/chunk/mesher.rs (compute_face_ao), reused under
-// GPL-3.0 and reworked for Haste. See THIRD_PARTY.md.
+// GPL-3.0 and reworked for Haste. See docs/THIRD_PARTY.md.
 
 use super::MeshContext;
 

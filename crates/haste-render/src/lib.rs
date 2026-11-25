@@ -2,7 +2,7 @@
 //!
 //! See docs/INTERFACES.md for the contract this crate implements and docs/AGENTS.md for the rules.
 //!
-//! Mesher/vertex packing derived from Pomme (GPL-3.0); see THIRD_PARTY.md.
+//! Mesher/vertex packing derived from Pomme (GPL-3.0); see docs/THIRD_PARTY.md.
 
 pub mod animation;
 pub mod arena;

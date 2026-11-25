@@ -5,7 +5,7 @@
 //! Changes for Haste: the gzip and codec-ops modules are not vendored, a
 //! missing `TAG_End` is an error, and it lives as a module of
 //! `haste-protocol` instead of a standalone crate (edition 2021).
-//! See THIRD_PARTY.md.
+//! See docs/THIRD_PARTY.md.
 //!
 //! Reading, writing, and manipulating Minecraft's Named Binary Tag (NBT) data.
 //!

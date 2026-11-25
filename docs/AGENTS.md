@@ -35,7 +35,7 @@ vanilla client with the mod architecture designed in and no mod support yet.
    fine and encouraged). Every agent and person on the project may read it; it stays only in
    `cache/`. Do not copy code from projects whose licence forbids it (Sodium: ideas only).
    GPL-compatible projects are fair game to reuse, Pumpkin (`cache/pumpkin`, GPL-3.0) first:
-   reused code keeps its header and is listed in `THIRD_PARTY.md` with its licence.
+   reused code keeps its header and is listed in `docs/THIRD_PARTY.md` with its licence.
 6. **Toolchain.** Pinned stable Rust (`rust-toolchain.toml`). No nightly features. No azalea crates.
    Before writing a large subsystem from scratch, spend ten minutes checking for an existing crate
    or GPL-compatible project (Pomme, Pumpkin, Fabric Loader for Phase 2); write the result in
@@ -163,7 +163,7 @@ is their condensed copy of this file and must follow it when this file changes.
   branches (`ws<N>-<name>` for workstreams, `<topic>` for anything else) with small, clear commits.
 - A branch reaches `main` only through a pull request on the GitHub remote. The lead agent pushes
   the branch, opens the PR (`gh pr create`), reviews it (tests and clippy clean, no lead-owned
-  files touched without agreement, no derived Mojang data, attributions in `THIRD_PARTY.md` for
+  files touched without agreement, no derived Mojang data, attributions in `docs/THIRD_PARTY.md` for
   any reused code) and merges it (`gh pr merge --merge`, a merge commit so each workstream's
   history stays visible). There is no human in the loop: the lead agent does all of this itself.
 - Worker agents never push; the lead pushes their branches when opening the PR.

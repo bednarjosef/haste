@@ -1,7 +1,7 @@
 // This file is derived from Pomme (https://github.com/josefbednar/pomme),
 // pomme-client/src/renderer/chunk/occlusion_graph.rs, reused under GPL-3.0
 // (vanilla-style section visibility for cave culling: VisGraph flood fill +
-// SectionOcclusionGraph walk). See THIRD_PARTY.md.
+// SectionOcclusionGraph walk). See docs/THIRD_PARTY.md.
 
 use std::collections::VecDeque;
 

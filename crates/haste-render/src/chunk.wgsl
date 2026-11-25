@@ -1,5 +1,5 @@
 // Chunk terrain shader (WGSL port of Pomme's chunk.vert/chunk.frag design;
-// sprite-rect atlas wrapping from its atlas_sprite.glsl — see THIRD_PARTY.md).
+// sprite-rect atlas wrapping from its atlas_sprite.glsl — see docs/THIRD_PARTY.md).
 // Light is sky/block nibbles resolved through the vanilla light texture
 // (group 2, see lightmap.rs), so time-of-day darkening never triggers a remesh.
 

@@ -1,7 +1,7 @@
 // This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/atlas.rs, reused under GPL-3.0 and reworked
 // for Haste: CPU-side RGBA buffers instead of Vulkan images (the wgpu renderer
-// uploads them). See THIRD_PARTY.md.
+// uploads them). See docs/THIRD_PARTY.md.
 
 //! The block and item texture atlas: sprites loaded from the packs, stitched into one
 //! power-of-two RGBA image with a per-sprite mip chain (vanilla's `SpriteLoader`,

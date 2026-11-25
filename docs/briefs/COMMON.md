@@ -37,7 +37,7 @@ per-packet allocations in hot paths, measure before claiming.
   fast and stay faithful: packet codecs, NBT, text components, item stack and data component
   encodings, registry handling, chat signing, block/fluid/item data handling, anything server-side
   that mirrors what the client must send or understand. Keep the GPL header and the Pumpkin
-  attribution at the top of each copied or adapted file and add a line to `THIRD_PARTY.md`.
+  attribution at the top of each copied or adapted file and add a line to `docs/THIRD_PARTY.md`.
   Adapt it to our types (`haste_core`, our crates); do not import Pumpkin's crate structure,
   `pumpkin-data` generated tables or its build-time downloads. Pumpkin is a server and is not
   always vanilla-exact: when it and the vanilla server disagree, the vanilla server wins.

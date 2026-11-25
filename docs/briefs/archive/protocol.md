@@ -12,7 +12,7 @@ with a Microsoft account (tokens come from setup's auth; coordinate the `Account
 Decided by the lead from the Pumpkin evaluation (Pumpkin at `cache/pumpkin`, GPL-3.0, stable
 Rust, targets exactly 26.3 / protocol 777):
 - **Vendor** (copy into `crates/haste-protocol/src/vendored/` keeping the GPL headers and adding a
-  `THIRD_PARTY.md` entry): the transport layer `crates/pumpkin-protocol/src/java/packet_decoder.rs`
+  `docs/THIRD_PARTY.md` entry): the transport layer `crates/pumpkin-protocol/src/java/packet_decoder.rs`
   and `packet_encoder.rs` (length framing, zlib via async-compression, AES-128-CFB8), the stream
   ciphers from `pumpkin-protocol/src/lib.rs` (`StreamDecryptor`/`StreamEncryptor`), the wire
   primitives in `pumpkin-protocol/src/ser/mod.rs` and `codec/var_int.rs` (+ var_long, bitset),

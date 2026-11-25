@@ -1,6 +1,6 @@
 //! AES-128-CFB8 stream encryption and decryption.
 //!
-//! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0; see THIRD_PARTY.md), moved here out of
+//! Vendored from Pumpkin `pumpkin-protocol` (GPL-3.0; see docs/THIRD_PARTY.md), moved here out of
 //! `transport/mod.rs`.
 
 // decrypt -> decompress -> raw

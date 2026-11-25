@@ -2,7 +2,7 @@
 // pomme-client/src/assets.rs and parts of world/block/model.rs, reused under
 // GPL-3.0. Reworked for Haste: reads the client jar directly through `zip`
 // (no extracted assets dir), resolves texture variables, and exposes the
-// haste-core `Identifier` API from docs/INTERFACES.md. See THIRD_PARTY.md.
+// haste-core `Identifier` API from docs/INTERFACES.md. See docs/THIRD_PARTY.md.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

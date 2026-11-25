@@ -3,7 +3,7 @@
 // GPL-3.0 and reworked for Haste: bakes per BlockStateId against a block-state
 // source (haste-data's BlockStates implements BlockStateTable), atlas UV
 // assignment, and a render-layer heuristic (26.3 has no render_type field in
-// block models; see NOTES.md). See THIRD_PARTY.md.
+// block models; see NOTES.md). See docs/THIRD_PARTY.md.
 
 use std::collections::{HashMap, HashSet};
 

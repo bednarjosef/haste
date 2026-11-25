@@ -10,7 +10,7 @@ render thread, no per-frame allocations in the hot path, frustum culling, measur
 Decided by the lead from the Pomme evaluation (Pomme at `cache/pomme`, GPL-3.0, stable Rust,
 raw Vulkan through `pyronyx` + `shaderc`-compiled GLSL). We stay on **wgpu** (portable, GL
 fallback, simpler to own) and reuse Pomme's azalea-free, clean-provenance pieces with the GPL
-headers kept and `THIRD_PARTY.md` entries:
+headers kept and `docs/THIRD_PARTY.md` entries:
 - **Reuse as-is / light rework into `haste-assets`**: `pomme-client/src/assets.rs` (asset index
   over jar + assets dir), `pomme-client/src/world/block/model.rs` (blockstate/model JSON parsing and
   baking, 2.9k lines) and `pomme-client/src/renderer/chunk/atlas.rs` (atlas stitching + mip chain).

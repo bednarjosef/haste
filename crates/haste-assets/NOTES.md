@@ -8,7 +8,7 @@
   vanilla asset tree, so the cache has no extracted assets dir and `Assets::open` works without
   one (the index read soft-fails with a warning). `haste_core::paths::cache_dir()/assets` is the
   expected `assets_dir`.
-- **Pomme reuse** (see THIRD_PARTY.md): asset index/resolve_ref from `assets.rs`, the model
+- **Pomme reuse** (see docs/THIRD_PARTY.md): asset index/resolve_ref from `assets.rs`, the model
   baking geometry (`model.rs`), blockstate variants/multipart (`multipart.rs`), the shelf packer +
   sRGB-correct mips (`atlas.rs`). Pomme's Vulkan-specific code, light engine and item-model
   machinery were not reused.

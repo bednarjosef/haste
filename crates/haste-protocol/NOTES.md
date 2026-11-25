@@ -2,7 +2,7 @@
 
 ## Decisions
 - **Reuse (lead's decision):** NBT, transport (framing, zlib, AES-CFB8) and VarInt codecs are vendored
-  from Pumpkin (GPL-3.0, commit b0c48b2) and listed in THIRD_PARTY.md. NBT is a module (`src/nbt`), not a
+  from Pumpkin (GPL-3.0, commit b0c48b2) and listed in docs/THIRD_PARTY.md. NBT is a module (`src/nbt`), not a
   separate crate. Changes: edition-2021 fixes, a missing `TAG_End` is an error (Pumpkin treated EOF as the
   end of a compound, which hides truncated payloads), and the CFB8 writer was rewritten (Pumpkin's wrote
   one byte per inner `poll_write`).

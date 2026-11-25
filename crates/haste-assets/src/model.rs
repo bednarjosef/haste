@@ -1,7 +1,7 @@
 // This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/world/block/model.rs, reused under GPL-3.0 and reworked for
 // Haste (haste-core Identifier, atlas UVs, haste-data BlockStates). See
-// THIRD_PARTY.md.
+// docs/THIRD_PARTY.md.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

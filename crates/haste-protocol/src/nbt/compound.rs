@@ -1,6 +1,6 @@
 //! This file is vendored from the Pumpkin project (https://github.com/Pumpkin-MC/Pumpkin (commit b0c48b2)),
 //! crates/pumpkin-nbt/src/compound.rs, and adapted for Haste (GPL-3.0). Licence: see the
-//! original Pumpkin licence; an entry exists in THIRD_PARTY.md. Adaptations are
+//! original Pumpkin licence; an entry exists in docs/THIRD_PARTY.md. Adaptations are
 //! marked with `HASTE:` comments.
 
 use std::collections::HashMap;

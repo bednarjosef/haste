@@ -4,7 +4,7 @@
 // meshes per SectionPos against haste-assets' BakedBlockModels over a captured
 // BlockView snapshot; light is packed as sky/block nibbles instead of baked
 // brightness; the worker pool design follows Pomme's MeshDispatcher (bounded
-// result channel, buffer pool, nearest-first camera queue). See THIRD_PARTY.md.
+// result channel, buffer pool, nearest-first camera queue). See docs/THIRD_PARTY.md.
 
 mod culling;
 mod dispatch;

@@ -26,7 +26,7 @@ Today water and lava are not meshed. Vanilla's visible behaviour (minecraft.wiki
   gradient of the corner heights); sides use the flow texture.
 - Water is translucent (tinted by the biome water color), lava is opaque and emits light 15.
 - Pomme's fluid meshing (`cache/pomme`, look for fluid/water in its renderer) may be reused
-  under COMMON.md's rules (GPL header, THIRD_PARTY.md entry).
+  under COMMON.md's rules (GPL header, docs/THIRD_PARTY.md entry).
 
 ## Biome tint (`tint.rs`)
 Today the tint palette index in the vertex format is not filled from biomes. Implement:
