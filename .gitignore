@@ -1,6 +1,6 @@
 # Everything downloaded from Mojang/Fabric or derived from it, plus build output. Never commit.
 /cache
-/target/
+**/target/
 **/build/
 *.log
 /.worktrees/
