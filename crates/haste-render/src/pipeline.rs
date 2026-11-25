@@ -17,6 +17,9 @@ pub struct Gpu {
     pub adapter: Arc<wgpu::Adapter>,
     /// Terrain is drawn with one multi-draw-indirect call per layer and arena.
     pub multi_draw: bool,
+    /// Multi-draws can take their draw count from a GPU buffer
+    /// (`MULTI_DRAW_INDIRECT_COUNT`), which the GPU occlusion culling needs.
+    pub draw_count: bool,
     /// `DownlevelFlags::VIEW_FORMATS` and `SURFACE_VIEW_FORMATS`.
     pub view_formats: bool,
     /// Kept alive for surface creation (windowed mode).
@@ -37,46 +40,73 @@ impl<T: winit::raw_window_handle::HasDisplayHandle + core::fmt::Debug + Send + S
 }
 
 impl Gpu {
-    /// Enumerate adapters (all backends), prefer Vulkan, log the choice.
+    /// Find an adapter (Vulkan and the other primary backends first, GL as the fallback)
+    /// and log the choice.
     /// `display`: the window's display handle when a surface will be created
     /// (wgpu 30 requires it in the instance for `create_surface`).
     pub fn new(display: Option<Box<dyn ShareableDisplayHandle>>) -> Result<Gpu> {
         // wgpu's WgpuHasDisplayHandle blanket-implements for any
-        // HasDisplayHandle + Debug + Send + Sync; our wrapper satisfies it.
-        let mut descriptor = match display {
-            Some(display) => {
-                // Erase to wgpu's own trait object via the blanket impl.
-                struct WgpuHandle(Box<dyn ShareableDisplayHandle>);
-                impl core::fmt::Debug for WgpuHandle {
-                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                        self.0.fmt(f)
-                    }
-                }
-                impl winit::raw_window_handle::HasDisplayHandle for WgpuHandle {
-                    fn display_handle(
-                        &self,
-                    ) -> Result<
-                        winit::raw_window_handle::DisplayHandle<'_>,
-                        winit::raw_window_handle::HandleError,
-                    > {
-                        self.0.display_handle()
-                    }
-                }
-                wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WgpuHandle(display)))
+        // HasDisplayHandle + Debug + Send + Sync; our wrapper satisfies it (shared, so
+        // each instance attempt below gets its own descriptor).
+        struct WgpuHandle(std::sync::Arc<dyn ShareableDisplayHandle>);
+        impl core::fmt::Debug for WgpuHandle {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                self.0.fmt(f)
             }
-            None => wgpu::InstanceDescriptor::new_without_display_handle(),
+        }
+        impl winit::raw_window_handle::HasDisplayHandle for WgpuHandle {
+            fn display_handle(
+                &self,
+            ) -> Result<
+                winit::raw_window_handle::DisplayHandle<'_>,
+                winit::raw_window_handle::HandleError,
+            > {
+                self.0.display_handle()
+            }
+        }
+        let display: Option<std::sync::Arc<dyn ShareableDisplayHandle>> = display.map(Into::into);
+        let descriptor = |backends: wgpu::Backends| {
+            // Erase to wgpu's own trait object via the blanket impl.
+            let mut d = match &display {
+                Some(display) => wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
+                    WgpuHandle(display.clone()),
+                )),
+                None => wgpu::InstanceDescriptor::new_without_display_handle(),
+            };
+            d.backends = backends;
+            d
         };
         // `WGPU_BACKEND=gl|vulkan|...` picks a backend (tests the GL fallback on a Vulkan box).
-        descriptor.backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
-        let instance = wgpu::Instance::new(descriptor);
+        // Otherwise Vulkan (and the other primary APIs) first, GL only when none has an
+        // adapter: starting wgpu's GL backend loads the system's whole OpenGL driver (Mesa's
+        // gallium and LLVM, about 60 MiB resident) even when Vulkan is then chosen.
+        let attempts = match wgpu::Backends::from_env() {
+            Some(backends) => vec![backends],
+            None => vec![wgpu::Backends::PRIMARY, wgpu::Backends::GL],
+        };
+        let mut found = None;
+        let mut failure = None;
+        for backends in attempts {
+            let instance = wgpu::Instance::new(descriptor(backends));
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            })) {
+                Ok(adapter) => {
+                    found = Some((instance, adapter));
+                    break;
+                }
+                Err(e) => failure = Some(e),
+            }
+        }
+        let (instance, adapter) = match (found, failure) {
+            (Some(found), _) => found,
+            (None, Some(e)) => return Err(e).context("requesting a wgpu adapter"),
+            (None, None) => anyhow::bail!("requesting a wgpu adapter: no backend to try"),
+        };
         let instance = std::sync::Arc::new(instance);
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .context("requesting a wgpu adapter")?;
         let info = adapter.get_info();
         tracing::info!(
             "wgpu adapter: {} ({}) backend {:?}",
@@ -92,21 +122,31 @@ impl Gpu {
         }
         // Multi-draw-indirect terrain needs a non-zero first instance per draw (the section
         // origin); without it the renderer issues direct draws. TIMESTAMP_QUERY gives the
-        // per-pass GPU times, TIMESTAMP_QUERY_INSIDE_PASSES the main-pass sub-pass split.
+        // per-pass GPU times, TIMESTAMP_QUERY_INSIDE_PASSES the main-pass sub-pass split,
+        // MULTI_DRAW_INDIRECT_COUNT the GPU occlusion culling's compacted draws.
         let optional = wgpu::Features::INDIRECT_FIRST_INSTANCE
             | wgpu::Features::TIMESTAMP_QUERY
-            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
+            | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
         let required_features = adapter.features() & optional;
         let multi_draw = required_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
             && adapter
                 .get_downlevel_capabilities()
                 .flags
                 .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION);
-        tracing::info!("terrain multi-draw-indirect: {multi_draw}");
+        let draw_count =
+            multi_draw && required_features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
+        tracing::info!(
+            "terrain multi-draw-indirect: {multi_draw}, with GPU draw count: {draw_count}"
+        );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("haste-render"),
             required_features,
             required_limits: wgpu::Limits::default(),
+            // Small allocator blocks (8-64 MiB device, 4-32 MiB host) instead of 128-256 MiB:
+            // the large ones left ~200 MiB reserved and unused at render distance 32, and
+            // Haste allocates its big buffers (arenas, atlases) once, not per frame.
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .context("requesting a wgpu device")?;
@@ -129,6 +169,7 @@ impl Gpu {
         Ok(Gpu {
             view_formats,
             multi_draw,
+            draw_count,
             device: Arc::new(device),
             queue: Arc::new(queue),
             adapter: Arc::new(adapter),
@@ -164,7 +205,12 @@ pub fn upload_atlas(
         mip_level_count: mip_levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        // Vanilla's atlas is RGBA8_UNORM (`TextureAtlas.createTexture`): the GPU's
+        // bilinear and trilinear filtering blends the encoded sRGB values, and
+        // the terrain shader multiplies the raw encoded sample by the vertex
+        // colour (see `shade` in chunk.wgsl). An sRGB texture would filter in
+        // linear light and darken every blend between unlike texels.
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::COPY_SRC,
@@ -252,16 +298,16 @@ pub fn upload_section(
     let (min, max) = (world(mesh.aabb.0), world(mesh.aabb.1));
     mesh.layers
         .iter()
-        .map(|(layer, indices)| SectionGpuMesh {
+        .map(|l| SectionGpuMesh {
             pos: mesh.pos,
             vertex_buffer: vertex_buffer.clone(),
             index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("section-indices"),
-                contents: bytemuck::cast_slice(indices),
+                contents: bytemuck::cast_slice(&l.indices),
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             }),
-            index_count: indices.len() as u32,
-            layer: *layer,
+            index_count: l.indices.len() as u32,
+            layer: l.layer,
             aabb: (min, max),
         })
         .collect()

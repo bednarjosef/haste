@@ -3,7 +3,7 @@
 // Haste (haste-core Identifier, atlas UVs, haste-data BlockStates). See
 // THIRD_PARTY.md.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -13,7 +13,7 @@ use serde::Deserialize;
 pub struct ModelFile {
     pub(crate) parent: Option<String>,
     #[serde(default, deserialize_with = "deserialize_texture_map")]
-    pub(crate) textures: HashMap<String, String>,
+    pub(crate) textures: TextureMap,
     #[serde(default)]
     pub(crate) elements: Vec<ElementDef>,
     /// vanilla `ambientocclusion` (absent = true).
@@ -25,21 +25,59 @@ pub struct ModelFile {
     pub(crate) display: HashMap<String, serde_json::Value>,
 }
 
-/// `textures` values may be `{"sprite": "..."}` objects (26.3).
-fn deserialize_texture_map<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
+/// A model's `textures` map: sprite id per variable, plus the variables the model
+/// declares `force_translucent` (26.3) - the model overrides the sprite's texel
+/// scan for those (glass panes, redstone dust).
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct TextureMap {
+    #[serde(flatten)]
+    pub(crate) map: HashMap<String, String>,
+    #[serde(skip)]
+    pub(crate) force_translucent: HashSet<String>,
+}
+
+impl std::ops::Deref for TextureMap {
+    type Target = HashMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl<'a> IntoIterator for &'a TextureMap {
+    type Item = (&'a String, &'a String);
+    type IntoIter = std::collections::hash_map::Iter<'a, String, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.iter()
+    }
+}
+
+impl TextureMap {}
+
+/// `textures` values may be `{"sprite": "...", "force_translucent": true}` objects (26.3).
+fn deserialize_texture_map<'de, D>(de: D) -> Result<TextureMap, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let raw: HashMap<String, serde_json::Value> = HashMap::deserialize(de)?;
-    let mut out = HashMap::new();
+    let mut map = HashMap::new();
+    let mut force_translucent = HashSet::new();
     for (k, v) in raw {
         if let Some(s) = v.as_str() {
-            out.insert(k, s.to_string());
+            map.insert(k, s.to_string());
         } else if let Some(sprite) = v.get("sprite").and_then(serde_json::Value::as_str) {
-            out.insert(k, sprite.to_string());
+            if v.get("force_translucent")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                force_translucent.insert(sprite.to_string());
+            }
+            map.insert(k, sprite.to_string());
         }
     }
-    Ok(out)
+    Ok(TextureMap {
+        map,
+        force_translucent,
+    })
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -56,6 +94,27 @@ pub struct ElementDef {
     pub(crate) faces: BTreeMap<Direction, FaceDef>,
     #[serde(default = "default_true")]
     pub(crate) shade: bool,
+    /// Vanilla 26.3 `shade_direction_override`: when set, every face of the
+    /// element takes this direction's `CardinalLighting` brightness instead of
+    /// its own facing (cross plants declare "up" so they light like the ground).
+    #[serde(default, deserialize_with = "deserialize_shade_direction")]
+    pub(crate) shade_direction_override: Option<Direction>,
+}
+
+/// `shade_direction_override` is a direction name; an unknown name fails the
+/// model like vanilla's `JsonParseException` (the whole model falls back to
+/// the missing model).
+fn deserialize_shade_direction<'de, D>(de: D) -> Result<Option<Direction>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name: Option<String> = Option::deserialize(de)?;
+    match name {
+        None => Ok(None),
+        Some(name) => Direction::parse(&name)
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown shade direction: {name}"))),
+    }
 }
 
 fn default_true() -> bool {
@@ -105,6 +164,8 @@ pub struct FaceDef {
 /// Parent chain resolved model (internal to baking).
 pub struct ResolvedModel {
     pub(crate) textures: HashMap<String, String>,
+    /// Sprite ids some model in the chain declares `force_translucent` (26.3).
+    pub(crate) force_translucent: std::collections::HashSet<String>,
     pub(crate) elements: Vec<ElementDef>,
     pub(crate) ambientocclusion: bool,
     pub(crate) gui_light: bool,
@@ -114,12 +175,19 @@ pub struct ResolvedModel {
     pub(crate) firstperson_display: Option<DisplayTransform>,
     /// `display.thirdperson_righthand`, likewise (held items on mobs and players).
     pub(crate) thirdperson_display: Option<DisplayTransform>,
+    /// `display.thirdperson_lefthand`, likewise, with the per-file fallback to the same
+    /// file's right entry (`ItemTransforms.getTransform(THIRD_PERSON_LEFT_HAND)`); the
+    /// left-hand fix applies on top at draw time.
+    pub(crate) thirdperson_left_display: Option<DisplayTransform>,
     /// `display.head`, likewise (heads and hats worn on the head).
     pub(crate) head_display: Option<DisplayTransform>,
     /// `display.ground`, likewise (dropped item entities).
     pub(crate) ground_display: Option<DisplayTransform>,
     /// `display.fixed` (item frames and other fixed mounts), likewise.
     pub(crate) fixed_display: Option<DisplayTransform>,
+    /// `display.on_shelf` (items on a shelf block, vanilla `ItemDisplayContext.ON_SHELF`),
+    /// likewise.
+    pub(crate) on_shelf_display: Option<DisplayTransform>,
 }
 
 /// A model `display` entry: rotation (degrees, applied X then Y then Z), translation (in
@@ -503,102 +571,4 @@ pub struct ModelRef {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const DIRS: [Direction; 6] = [
-        Direction::Down,
-        Direction::Up,
-        Direction::North,
-        Direction::South,
-        Direction::West,
-        Direction::East,
-    ];
-
-    /// Quads must stay CCW viewed from outside for backface culling (Pomme test).
-    #[test]
-    fn face_winding_is_ccw_from_outside() {
-        for dir in DIRS {
-            let p = face_positions(dir, [0.0; 3], [1.0; 3]);
-            let sub = |a: [f32; 3], b: [f32; 3]| [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let cross = |a: [f32; 3], b: [f32; 3]| {
-                [
-                    a[1] * b[2] - a[2] * b[1],
-                    a[2] * b[0] - a[0] * b[2],
-                    a[0] * b[1] - a[1] * b[0],
-                ]
-            };
-            let normal = cross(sub(p[0], p[1]), sub(p[0], p[2]));
-            let outward = dir.offset().map(|c| c as f32);
-            let dot = normal[0] * outward[0] + normal[1] * outward[1] + normal[2] * outward[2];
-            assert!(dot > 0.0, "{dir:?} winds the wrong way");
-            assert_eq!(direction_from_positions(&p), Some(dir));
-        }
-    }
-
-    /// Full-tile explicit UVs must map the full texture upright at rotation 0 and
-    /// rotate clockwise per 90 degrees (Pomme test).
-    #[test]
-    fn face_uvs_show_upright_clockwise_rotated_texture() {
-        for dir in DIRS {
-            for (rot, steps) in [
-                (None, 0usize),
-                (Some(90), 1),
-                (Some(180), 2),
-                (Some(270), 3),
-            ] {
-                let uvs = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), rot);
-                // vertex 0 must have u=u1, v=v1 of the rotated window
-                let _ = steps;
-                assert_eq!(uvs.len(), 4);
-            }
-            // rotation shifts the corner cycle
-            let base = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), None);
-            let rot90 = face_uvs(
-                dir,
-                [0.0; 3],
-                [1.0; 3],
-                Some(&[0.0, 0.0, 16.0, 16.0]),
-                Some(90),
-            );
-            for i in 0..4 {
-                assert_eq!(base[(i + 1) % 4], rot90[i]);
-            }
-        }
-    }
-
-    #[test]
-    fn element_rescale_preserves_rotation_axis() {
-        let positions = [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 1.0],
-            [0.0, 1.0, 1.0],
-        ];
-        for (axis, axis_index) in [("x", 0usize), ("y", 1), ("z", 2)] {
-            let rotation = Some(ElementRotation {
-                origin: [8.0, 8.0, 8.0],
-                axis: axis.to_string(),
-                angle: 45.0,
-                rescale: true,
-            });
-            let rotated = apply_element_rotation(positions, &rotation);
-            for (before, after) in positions.iter().zip(rotated) {
-                assert_eq!(
-                    before[axis_index], after[axis_index],
-                    "{axis}-axis rescale changed the rotation-axis coordinate"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn model_rotation_follows_direction_cycle() {
-        // Pomme's cycle: North -> East -> South -> West -> North (a model `y`
-        // rotation by 90 turns a north face toward east); 270 maps west to south.
-        assert_eq!(Direction::West.rotate_y(270), Direction::South);
-        assert_eq!(Direction::North.rotate_y(90), Direction::East);
-        assert_eq!(Direction::North.rotate_x(90), Direction::Down);
-        assert_eq!(Direction::Up.rotate_x(90), Direction::North);
-    }
-}
+mod tests;

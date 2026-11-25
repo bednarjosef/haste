@@ -6,10 +6,13 @@
 //! namespace may be given as `"foo:bar"`) or an object with `name` and overrides, where
 //! `type: "event"` makes `name` another event to resolve recursively.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::bail;
 use haste_core::Identifier;
 use serde::Deserialize;
+
+use crate::random::LegacyRandom;
 
 /// One playable sound file with all of its per-entry settings from `sounds.json`.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,23 +40,17 @@ pub enum SoundEntry {
         volume: f32,
         pitch: f32,
         weight: u32,
+        stream: bool,
     },
-}
-
-impl SoundEntry {
-    fn weight(&self) -> u32 {
-        match self {
-            SoundEntry::File(v) => v.weight,
-            SoundEntry::Event { weight, .. } => *weight,
-        }
-    }
 }
 
 /// One event of `sounds.json`: its entry list and subtitle.
 #[derive(Clone, Debug)]
 pub struct SoundEvent {
     pub sounds: Vec<SoundEntry>,
-    pub subtitle: Option<String>,
+    /// The subtitle's translation key (`subtitles.block.generic.break`), shared so a
+    /// played sound can hand it on without copying the text.
+    pub subtitle: Option<Arc<str>>,
 }
 
 /// All events parsed from `assets/minecraft/sounds.json`.
@@ -114,9 +111,10 @@ fn default_attenuation() -> u32 {
     16
 }
 
-/// The Ogg path of a sound name: `dig/stone1` -> `sounds/dig/stone1.ogg`.
+/// The Ogg asset key of a sound name: `dig/stone1` -> `minecraft/sounds/dig/stone1.ogg`,
+/// `foo:bar` -> `foo/sounds/bar.ogg` (the namespace is where in the assets the file lives).
 fn sound_path(id: &Identifier) -> String {
-    format!("sounds/{}.ogg", id.path())
+    format!("{}/sounds/{}.ogg", id.namespace(), id.path())
 }
 
 impl SoundEvents {
@@ -171,6 +169,7 @@ impl SoundEvents {
                             volume,
                             pitch,
                             weight,
+                            stream,
                         },
                         Some(other) => bail!("unknown sound type {other:?} for {name:?}"),
                     },
@@ -180,7 +179,7 @@ impl SoundEvents {
                 namespaced(&name),
                 SoundEvent {
                     sounds,
-                    subtitle: ev.subtitle,
+                    subtitle: ev.subtitle.map(Arc::from),
                 },
             );
         }
@@ -190,6 +189,35 @@ impl SoundEvents {
     /// The event with this name, `minecraft:block.stone.break` or `block.stone.break`.
     pub fn get(&self, event: &str) -> Option<&SoundEvent> {
         self.events.get(&namespaced(event))
+    }
+
+    /// Drop every file entry whose file does not exist, vanilla's
+    /// `SoundManager.Preparations.handleRegistration` skipping entries that fail
+    /// `validateSoundResource` (logged there as "File {} does not exist"): a missing file
+    /// is skipped at load instead of failing to play later. `exists` answers whether an
+    /// asset key (`<namespace>/sounds/<path>.ogg`) is present. An event left with no
+    /// (or only weightless) entries simply never plays, as vanilla's does. Returns the
+    /// number of dropped entries.
+    pub fn retain_files(&mut self, mut exists: impl FnMut(&str) -> bool) -> usize {
+        let mut dropped = 0;
+        for event in self.events.values_mut() {
+            let before = event.sounds.len();
+            event.sounds.retain(|entry| match entry {
+                SoundEntry::File(variant) => {
+                    let present = exists(&variant.path);
+                    if !present {
+                        tracing::warn!(
+                            "File {} does not exist, cannot add it to event",
+                            variant.path
+                        );
+                    }
+                    present
+                }
+                SoundEntry::Event { .. } => true,
+            });
+            dropped += before - event.sounds.len();
+        }
+        dropped
     }
 
     /// The event's subtitle key, if it has one.
@@ -205,36 +233,58 @@ impl SoundEvents {
         self.events.is_empty()
     }
 
-    /// Picks one variant of the event, weighted by each entry's `weight` and driven by
-    /// the seed: the same seed always picks the same variant. `type: "event"` entries
-    /// are followed (up to 8 levels; deeper references and cycles give `None`), with
-    /// the reference's `volume`/`pitch` multiplying into the picked variant.
-    ///
-    /// Vanilla's exact random sequence is not reproduced: this is our own deterministic
-    /// RNG, so the chosen variant for a given seed need not match the vanilla client.
+    /// Picks one variant of the event the way vanilla's `WeighedSoundEvents.getSound` does
+    /// with the sound instance's `RandomSource.create(seed)`: one `nextInt(total weight)`
+    /// over the entries in file order, so a packet's seed picks the same file as in the
+    /// vanilla client. A `type: "event"` entry weighs as much as the whole event it names
+    /// (its own `weight` is not used for the choice, as in `SoundManager.Preparations`),
+    /// and choosing it draws again from the same generator inside that event; its
+    /// `volume`/`pitch` multiply into the picked file's and its `stream` is or-ed in.
+    /// References deeper than 8 levels (and cycles) give `None`, as does an event with no
+    /// weight (vanilla's empty sound, which never plays).
     pub fn pick(&self, event: &str, seed: i64) -> Option<SoundVariant> {
-        let mut rng = Rng::new(seed);
-        self.pick_at(event, &mut rng, 0)
+        self.pick_with(event, &mut LegacyRandom::new(seed))
     }
 
-    fn pick_at(&self, event: &str, rng: &mut Rng, depth: u32) -> Option<SoundVariant> {
+    /// [`Self::pick`] with a caller-owned generator (a sound instance's own random).
+    pub fn pick_with(&self, event: &str, rng: &mut LegacyRandom) -> Option<SoundVariant> {
+        self.pick_at(event, rng, 0)
+    }
+
+    /// `WeighedSoundEvents.getWeight`: the sum of the entries' weights, a reference
+    /// counting the total weight of the event it names (0 when that event is unknown).
+    fn weight_of(&self, event: &str, depth: u32) -> u32 {
+        if depth > 8 {
+            return 0;
+        }
+        self.get(event).map_or(0, |ev| {
+            ev.sounds
+                .iter()
+                .map(|s| self.entry_weight(s, depth))
+                .fold(0u32, u32::saturating_add)
+        })
+    }
+
+    fn entry_weight(&self, entry: &SoundEntry, depth: u32) -> u32 {
+        match entry {
+            SoundEntry::File(v) => v.weight,
+            SoundEntry::Event { name, .. } => self.weight_of(name, depth + 1),
+        }
+    }
+
+    fn pick_at(&self, event: &str, rng: &mut LegacyRandom, depth: u32) -> Option<SoundVariant> {
         if depth > 8 {
             return None;
         }
         let ev = self.get(event)?;
-        let total: u32 = ev.sounds.iter().map(SoundEntry::weight).sum();
-        if total == 0 {
+        let total = self.weight_of(event, depth);
+        if ev.sounds.is_empty() || total == 0 {
             return None;
         }
-        let mut ticket = (rng.next() % total as u64) as u32;
+        let mut index = rng.next_int(total.min(i32::MAX as u32) as i32) as i64;
         let entry = ev.sounds.iter().find(|s| {
-            let w = s.weight();
-            if ticket < w {
-                true
-            } else {
-                ticket -= w;
-                false
-            }
+            index -= i64::from(self.entry_weight(s, depth));
+            index < 0
         })?;
         match entry {
             SoundEntry::File(v) => Some(v.clone()),
@@ -242,11 +292,13 @@ impl SoundEvents {
                 name,
                 volume,
                 pitch,
+                stream,
                 ..
             } => {
                 let mut v = self.pick_at(name, rng, depth + 1)?;
                 v.volume *= volume;
                 v.pitch *= pitch;
+                v.stream |= stream;
                 Some(v)
             }
         }
@@ -256,29 +308,6 @@ impl SoundEvents {
 /// `foo:bar/baz` or `bar/baz` (namespace `minecraft`) as an [`Identifier`].
 fn parse_sound_name(name: &str) -> anyhow::Result<Identifier> {
     Identifier::parse(name).map_err(|e| anyhow::anyhow!("sound name {name:?}: {e}"))
-}
-
-/// A tiny deterministic xorshift64* RNG: same seed, same sequence, always.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: i64) -> Self {
-        // 0 would lock xorshift at 0.
-        Rng(if seed as u64 == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed as u64
-        })
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
 }
 
 #[cfg(test)]
@@ -305,7 +334,7 @@ mod tests {
             panic!("expected file entry");
         };
         assert_eq!(v.id.to_string(), "minecraft:dig/stone1");
-        assert_eq!(v.path, "sounds/dig/stone1.ogg");
+        assert_eq!(v.path, "minecraft/sounds/dig/stone1.ogg");
         assert_eq!((v.volume, v.pitch, v.weight), (1.0, 1.0, 1));
         assert_eq!(
             (v.stream, v.attenuation_distance, v.preload),
@@ -334,7 +363,7 @@ mod tests {
             panic!("expected file entry");
         };
         assert_eq!(v.id.to_string(), "foo:bar/baz");
-        assert_eq!(v.path, "sounds/bar/baz.ogg");
+        assert_eq!(v.path, "foo/sounds/bar/baz.ogg");
     }
 
     #[test]
@@ -384,6 +413,74 @@ mod tests {
         assert_eq!(v.pitch, 2.0 * 0.5);
     }
 
+    // The expected indices come from `java.util.Random(seed)` (vanilla's
+    // `LegacyRandomSource`): a fresh generator's first nextInt(4) is 2 for seed 0, 1 for
+    // seed -7 and 0 for seed 1234567; its first nextInt(5) is 0 for seed 0, 3 for seed 2,
+    // 4 for seed 3 and 2 for seed -7.
+    #[test]
+    fn seed_picks_vanillas_variant() {
+        let json = br#"{"block.stone.break": {"sounds":
+            ["dig/stone1", "dig/stone2", "dig/stone3", "dig/stone4"]}}"#;
+        let events = SoundEvents::parse(json).unwrap();
+        let path = |seed| {
+            events
+                .pick("block.stone.break", seed)
+                .unwrap()
+                .id
+                .to_string()
+        };
+        assert_eq!(path(0), "minecraft:dig/stone3");
+        assert_eq!(path(-7), "minecraft:dig/stone2");
+        assert_eq!(path(1_234_567), "minecraft:dig/stone1");
+    }
+
+    #[test]
+    fn seed_walks_the_weights_in_file_order() {
+        // Weights 3, 1, 1: index 0..=2 is a, 3 is b, 4 is c.
+        let json = br#"{"e": {"sounds": [
+            {"name": "a", "weight": 3}, "b", "c"
+        ]}}"#;
+        let events = SoundEvents::parse(json).unwrap();
+        let path = |seed| events.pick("e", seed).unwrap().id.path().to_owned();
+        assert_eq!(path(0), "a");
+        assert_eq!(path(-7), "a");
+        assert_eq!(path(2), "b");
+        assert_eq!(path(3), "c");
+    }
+
+    #[test]
+    fn an_event_reference_weighs_its_whole_event() {
+        // `SoundManager.Preparations`: the reference's weight is the referenced event's
+        // total (3 here), not its own `weight` field, so the outer total is 4. Seed 0
+        // draws nextInt(4) = 2 (the reference) and then nextInt(3) = 1 inside it; seed 3
+        // draws 2 and then 2; seed 1234567 draws 0 (the plain file).
+        let json = br#"{
+            "outer": {"sounds": ["x", {"name": "inner", "type": "event", "weight": 1,
+                                       "volume": 0.5, "stream": true}]},
+            "inner": {"sounds": ["p", "q", {"name": "r", "volume": 0.8}]}
+        }"#;
+        let events = SoundEvents::parse(json).unwrap();
+        let q = events.pick("outer", 0).unwrap();
+        assert_eq!(q.id.path(), "q");
+        assert_eq!(q.volume, 0.5);
+        assert!(q.stream, "the reference's stream flag is or-ed in");
+        let r = events.pick("outer", 3).unwrap();
+        assert_eq!(r.id.path(), "r");
+        assert_eq!(r.volume, 0.5 * 0.8);
+        let x = events.pick("outer", 1_234_567).unwrap();
+        assert_eq!(x.id.path(), "x");
+        assert!(!x.stream);
+    }
+
+    #[test]
+    fn a_reference_to_an_unknown_event_weighs_nothing() {
+        let json = br#"{"e": {"sounds": [{"name": "missing", "type": "event"}, "a"]}}"#;
+        let events = SoundEvents::parse(json).unwrap();
+        for seed in [0, 1, 2, 3, -7] {
+            assert_eq!(events.pick("e", seed).unwrap().id.path(), "a");
+        }
+    }
+
     #[test]
     fn reference_cycle_returns_none() {
         let json = br#"{
@@ -392,6 +489,35 @@ mod tests {
         }"#;
         let events = SoundEvents::parse(json).unwrap();
         assert_eq!(events.pick("a", 1), None);
+    }
+
+    #[test]
+    fn missing_files_are_dropped_at_load() {
+        // SoundManager.Preparations.handleRegistration / validateSoundResource: an entry
+        // whose file does not exist is skipped while loading, so it can never be picked
+        // (rather than failing to play later); an event left without entries never plays.
+        let json = br#"{
+            "broken": {"sounds": ["gone", {"name": "there"}]},
+            "all_gone": {"sounds": ["missing1", "missing2"]},
+            "by_reference": {"sounds": [{"name": "all_gone", "type": "event"}, "there"]}
+        }"#;
+        let mut events = SoundEvents::parse(json).unwrap();
+        let dropped = events.retain_files(|path| path.contains("/there.ogg"));
+        assert_eq!(dropped, 3, "gone, missing1 and missing2 are dropped");
+        let broken = events.get("broken").unwrap();
+        assert_eq!(broken.sounds.len(), 1, "the existing file stays");
+        let SoundEntry::File(v) = &broken.sounds[0] else {
+            panic!("expected file entry");
+        };
+        assert_eq!(v.id.path(), "there");
+        // The emptied event can never be picked...
+        assert_eq!(events.pick("all_gone", 1), None);
+        // ...and neither can it be reached through a reference (its weight is 0).
+        assert_eq!(events.pick("by_reference", 1).unwrap().id.path(), "there");
+        // An entry with weight 0 counts as no entry at all: nothing changes for it.
+        let json = br#"{"z": {"sounds": [{"name": "there", "weight": 0}]}}"#;
+        let mut events = SoundEvents::parse(json).unwrap();
+        assert_eq!(events.retain_files(|_| true), 0);
     }
 
     #[test]
@@ -420,5 +546,11 @@ mod tests {
         assert!(events.len() > 1000, "only {} events", events.len());
         assert!(events.get("block.stone.break").is_some());
         assert!(events.pick("block.stone.break", 42).is_some());
+        // `music.creative` starts with a reference to all of `music.game`, so in vanilla
+        // most creative tracks are game tracks: the reference outweighs the six creative
+        // files many times over.
+        let creative = events.get("music.creative").unwrap();
+        let reference = events.entry_weight(&creative.sounds[0], 0);
+        assert!(reference > 6, "music.game weighs {reference}");
     }
 }

@@ -87,7 +87,7 @@ pub struct BlockStates {
 }
 
 impl BlockStates {
-    pub(crate) fn parse(json: &str, registries: Option<&Registries>) -> anyhow::Result<Self> {
+    pub fn parse(json: &str, registries: Option<&Registries>) -> anyhow::Result<Self> {
         let raw: BTreeMap<&str, RawBlock> =
             serde_json::from_str(json).map_err(|e| anyhow::anyhow!("blocks.json: {e}"))?;
 
@@ -366,6 +366,12 @@ impl BlockStates {
     pub fn block_index(&self, block: &Identifier) -> Option<RegistryIndex> {
         let &b = self.by_name.get(block.to_string().as_str())?;
         self.blocks[b as usize].registry_index
+    }
+
+    /// Index of the block owning `state` in the `minecraft:block` registry (tag lookups take
+    /// registry indices). Ids outside the table resolve to the placeholder block's index.
+    pub fn block_registry_index_of_state(&self, s: BlockStateId) -> Option<RegistryIndex> {
+        self.blocks[self.block_index_of_state(s) as usize].registry_index
     }
 }
 

@@ -39,11 +39,32 @@ exists (`server.overworld()` is used for the per-pose player dimensions).
 - **`opaque`** is `BlockStateBase.isSolidRender()` (no-arg in 26.3; the two-arg
   `isSolidRender(BlockGetter, BlockPos)` overload no longer exists on the state, only on
   BlockBehaviour with different arity semantics).
+- **`render_shape`** is `state.getRenderShape()` lowercased ("invisible" | "model"; RenderShape
+  has only those two constants in 26.3). Used by EntityRenderer.extractShadowPiece, which skips
+  INVISIBLE shapes. In 26.3 the INVISIBLE blocks are air, the liquid/bubble-column family,
+  barrier, light, structure void, end portal/gateway and the moving piston.
+- **`suffocating`** is `state.isSuffocating(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)` — the
+  predicate vanilla's `Level.collidesWithSuffocatingBlock` calls. The default predicate is
+  `causes_suffocation` tag + `isCollisionShapeFullBlock(level, pos)`, which with the empty level
+  is the no-neighbour shape (same caveat as `collision`). Two vanilla overrides read more than
+  the state: shulker boxes (`NOT_CLOSED_SHULKER` asks the level for a block entity — the empty
+  level has none, so a closed shulker box still dumps `suffocating: true` even though in-world it
+  would not suffocate) and the piston (`NOT_EXTENDED_PISTON` reads the EXTENDED property, which
+  the state carries, so it is exact). `Blocks::always`/`never` ignore the level.
 - **Player dimensions per pose**: constructs a real `ServerPlayer` in the overworld with a random
   UUID (never added to the world, just used for `getDimensions(Pose)`/`getEyeHeight(Pose)`) —
   this is the same path the game itself uses when it refreshes dimensions after a pose change.
 - **`fluid`** is emitted only when the state has one (13389 states): `"fluid": "<id>"` plus
   `"fluid_empty": true|false` (fluid states of non-liquid blocks are usually empty).
+- **`occlusion`** is `state.getOcclusionShape()`: the shape fluid faces and neighbour face
+  culling test against (`BlockBehaviour.initCache`: `getShape` by default, `Shapes.empty()`
+  for the `noOcclusion` family — glass, leaves, panes, ... — and smaller shapes for the four
+  overrides: fences, fence gates, lecterns, sculk shriekers). Absent in dumps from before
+  the field was added; consumers fall back to the `outline` shape plus the solid-render
+  flag, which is exact except for those two classes.
+- **`light_dampening`** and **`propagates_skylight_down`** are `state.getLightDampening()` and
+  `state.propagatesSkylightDown()`, the per-state inputs of the light engines (absent in older
+  dumps).
 - Deprecated-API warning at compile: `Block.stateById`/`Block.getId` are marked deprecated
   (they want you on the registry) but are exactly the BLOCK_STATE_REGISTRY view we need.
 

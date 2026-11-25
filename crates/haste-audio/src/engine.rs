@@ -8,7 +8,7 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use crate::sounds::SoundVariant;
-use crate::spatial::{attenuation, clamp_pitch, pan, stereo_gains};
+use crate::spatial::{attenuation, clamp_pitch, pan, stereo_gains, ListenerTransform};
 
 /// The vanilla sound categories a sound can belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -75,9 +75,21 @@ impl SourceVolumes {
         }
     }
 
-    /// Effective gain multiplier of a source: `master * source`.
+    /// The source's index in the per-source arrays (`Master` has none: it scales the
+    /// others and carries no gain of its own).
+    pub(crate) fn index_for(source: SoundSource) -> Option<usize> {
+        Self::index(source)
+    }
+
+    /// Effective gain multiplier of a source, as vanilla's `SoundEngine.calculateVolume`
+    /// takes `Options.getFinalSoundSourceVolume` clamped to 0..=1: `master * source`, and
+    /// the master volume alone for the master source (not master squared).
     pub fn effective(&self, source: SoundSource) -> f32 {
-        self.master * self.get(source)
+        let final_volume = match source {
+            SoundSource::Master => self.master,
+            _ => self.master * self.get(source),
+        };
+        final_volume.clamp(0.0, 1.0)
     }
 }
 
@@ -99,6 +111,16 @@ pub(crate) fn event_eq(stored: &str, queried: &str) -> bool {
     stored_ns == queried_ns && stored_path == queried_path
 }
 
+/// What playing a sound did, vanilla's `SoundEngine.PlayResult`: not started at all, or
+/// started (possibly silently — a volume-0 music track that keeps its channel so a later
+/// volume change can fade it in).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayResult {
+    Started,
+    StartedSilently,
+    NotStarted,
+}
+
 /// One sound currently tracked by the engine.
 #[derive(Clone, Debug)]
 struct PlayingSound {
@@ -111,10 +133,18 @@ struct PlayingSound {
     pos: Option<DVec3>,
     /// Overall volume of the sound: the play volume times the variant's volume.
     volume: f32,
+    /// The variant's own volume from `sounds.json`, so a ticking instance's new volume
+    /// ([`SilentEngine::set_sound_volume`]) multiplies with it as the play volume did.
+    variant_volume: f32,
     /// Final pitch multiplier: the play pitch times the variant's pitch, clamped to
     /// 0.5..=2.0.
     pitch: f32,
     attenuation_distance: u32,
+    /// Whether the sound's file has more than one channel, as the decoder found. OpenAL
+    /// plays a multi-channel buffer as-is, unpositioned (no distance, no panning), so a
+    /// stereo file (music, records) is global even when the server sent a position; the
+    /// output stage reports the channel count once the worker has decoded the file.
+    stereo: bool,
     /// (left, right) gains as of the last `tick()`.
     gains: (f32, f32),
 }
@@ -128,8 +158,11 @@ struct PlayingSound {
 pub struct SilentEngine {
     sounds: Vec<PlayingSound>,
     volumes: SourceVolumes,
-    listener_pos: DVec3,
-    listener_yaw: f32,
+    /// Extra per-source gains on top of the option volumes, vanilla's `gainBySource` map
+    /// (default 1.0 for a missing source): what `SoundEngine.updateCategoryVolume` sets
+    /// and what the music fade drives; `stopAll` clears it.
+    category_gains: [f32; 10],
+    listener: ListenerTransform,
 }
 
 impl Default for SilentEngine {
@@ -143,9 +176,35 @@ impl SilentEngine {
         Self {
             sounds: Vec::new(),
             volumes: SourceVolumes::default(),
-            listener_pos: DVec3::ZERO,
-            listener_yaw: 0.0,
+            category_gains: [1.0; 10],
+            listener: ListenerTransform::from_look(DVec3::ZERO, 0.0, 0.0),
         }
+    }
+
+    /// The whole gain multiplier of a sound's volume in `source` (the instance volume
+    /// times this is the channel volume): the option volumes times the category gain.
+    fn channel_gain(&self, source: SoundSource) -> f32 {
+        let gain = match SourceVolumes::index_for(source) {
+            Some(i) => self.category_gains[i],
+            None => return 1.0,
+        };
+        self.volumes.effective(source) * gain
+    }
+
+    /// Set one source's extra category gain, vanilla's
+    /// `SoundEngine.updateCategoryVolume(source, gain)`: the gain is clamped to 0..=1
+    /// and multiplies with the option volumes (the music fade drives this; at 1.0, the
+    /// default, it changes nothing).
+    pub fn update_category_volume(&mut self, source: SoundSource, gain: f32) {
+        if let Some(i) = SourceVolumes::index_for(source) {
+            self.category_gains[i] = gain.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Reset every category gain to its default of 1.0, vanilla's `SoundEngine.stopAll`
+    /// (which clears `gainBySource`), so a later fade starts from the full gain.
+    pub fn reset_category_gains(&mut self) {
+        self.category_gains = [1.0; 10];
     }
 
     /// Start tracking a sound. The variant's `volume`/`pitch` from sounds.json multiply
@@ -154,6 +213,10 @@ impl SilentEngine {
     /// without one play at full gain, centred. `event` is the sound event the sound was
     /// started with, kept for `stop`'s event filter and [`Self::is_event_playing`]; it is
     /// shared, so tracking it costs no allocation.
+    ///
+    /// Vanilla's volume-0 rule (`SoundEngine.play`): a sound whose whole volume works out
+    /// to 0 is not started — except music, which starts silently and keeps playing, so a
+    /// later volume change (or the music fade) can raise it without restarting the track.
     pub fn play(
         &mut self,
         variant: &SoundVariant,
@@ -162,23 +225,50 @@ impl SilentEngine {
         volume: f32,
         pitch: f32,
         event: Arc<str>,
-    ) {
+    ) -> PlayResult {
+        let instance_volume = (volume * variant.volume).clamp(0.0, 1.0);
+        let channel_volume = instance_volume * self.channel_gain(source);
+        if channel_volume == 0.0 && source != SoundSource::Music {
+            return PlayResult::NotStarted;
+        }
+        let started_silently = channel_volume == 0.0;
         self.sounds.push(PlayingSound {
             event,
             source,
             pos,
             volume: volume * variant.volume,
+            variant_volume: variant.volume,
             pitch: clamp_pitch(pitch * variant.pitch),
             attenuation_distance: variant.attenuation_distance,
+            stereo: false,
             gains: (0.0, 0.0),
         });
+        if started_silently {
+            PlayResult::StartedSilently
+        } else {
+            PlayResult::Started
+        }
+    }
+
+    /// Drop the most recently started sound, after a channel could not be acquired for it
+    /// (vanilla's `SoundEngine.play` gives up on the sound when `createHandle` fails, so
+    /// it is never tracked anywhere).
+    pub fn remove_last(&mut self) {
+        self.sounds.pop();
     }
 
     /// Set the listener (camera) position and yaw for attenuation and panning.
     /// Minecraft yaw: 0 = facing +Z (south), increasing clockwise seen from above.
-    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32) {
-        self.listener_pos = pos;
-        self.listener_yaw = yaw_deg;
+    /// Set the listener (the camera) for attenuation and panning: position and look
+    /// (yaw/pitch), as vanilla's `SoundEngine.updateSource(Camera)` feeds the camera's
+    /// position, forward and up into `Listener.setTransform`.
+    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32, pitch_deg: f32) {
+        self.listener = ListenerTransform::from_look(pos, yaw_deg, pitch_deg);
+    }
+
+    /// The listener's transform as the last [`Self::set_listener`] set it.
+    pub fn listener(&self) -> ListenerTransform {
+        self.listener
     }
 
     /// Set the volume of one sound source (or the master volume).
@@ -189,8 +279,13 @@ impl SilentEngine {
     /// Stop playing sounds. `None` on an axis matches everything; a sound is stopped
     /// when both the source filter and the event filter match it, as vanilla's
     /// `SoundManager.stop(Identifier, SoundSource)` does: both `None` stops everything,
-    /// one `None` stops that whole axis.
+    /// one `None` stops that whole axis. Stopping everything also resets the category
+    /// gains (vanilla's `SoundEngine.stopAll` clears `gainBySource`, so a faded music
+    /// source comes back at full gain for the next track).
     pub fn stop(&mut self, source: Option<SoundSource>, event: Option<&str>) {
+        if source.is_none() && event.is_none() {
+            self.reset_category_gains();
+        }
         self.sounds.retain(|s| {
             let source_matches = source.is_none_or(|src| s.source == src);
             let event_matches = event.is_none_or(|e| event_eq(&s.event, e));
@@ -204,21 +299,54 @@ impl SilentEngine {
         self.sounds.remove(index);
     }
 
+    /// Set the instance volume of the sound at `index` (play order): a ticking sound
+    /// instance's new volume, which vanilla's `SoundEngine.tickInGameSound` pushes to the
+    /// channel every tick (`calculateVolume(instance)`). It multiplies with the variant's
+    /// volume like the play volume; the gains follow on the next `tick()`.
+    pub fn set_sound_volume(&mut self, index: usize, volume: f32) {
+        if let Some(sound) = self.sounds.get_mut(index) {
+            sound.volume = volume * sound.variant_volume;
+        }
+    }
+
+    /// Mark the sound at `index` (play order) as stereo (its file has more than one
+    /// channel). The output stage calls this when the worker has decoded the file and
+    /// found several channels; from then on the sound ignores its position, as OpenAL
+    /// plays multi-channel buffers unpositioned.
+    pub fn set_stereo(&mut self, index: usize) {
+        if let Some(sound) = self.sounds.get_mut(index) {
+            sound.stereo = true;
+        }
+    }
+
     /// Recompute the (left, right) gains of every playing sound from the current
     /// listener and source volumes.
     pub fn tick(&mut self) {
+        // Stack copies of the read-only state, so the loop can hold `&mut` sounds.
+        let volumes = self.volumes.clone();
+        let category_gains = self.category_gains;
+        let listener = self.listener;
         for sound in &mut self.sounds {
-            let effective = self.volumes.effective(sound.source);
-            let (gain, pan) = match sound.pos {
-                Some(pos) => (
-                    attenuation(
-                        (pos - self.listener_pos).length(),
-                        sound.volume,
-                        sound.attenuation_distance,
-                    ) * effective,
-                    pan(self.listener_pos, self.listener_yaw, pos),
-                ),
-                None => (sound.volume.min(1.0) * effective, 0.0),
+            let effective = match SourceVolumes::index_for(sound.source) {
+                Some(i) => volumes.effective(sound.source) * category_gains[i],
+                None => 1.0,
+            };
+            // A stereo file plays unpositioned, as OpenAL plays multi-channel buffers:
+            // full gain, centred, wherever it was asked to play.
+            let (gain, pan) = if sound.stereo {
+                (sound.volume.min(1.0) * effective, 0.0)
+            } else {
+                match sound.pos {
+                    Some(pos) => (
+                        attenuation(
+                            (pos - listener.position).length(),
+                            sound.volume,
+                            sound.attenuation_distance,
+                        ) * effective,
+                        pan(&listener, pos),
+                    ),
+                    None => (sound.volume.min(1.0) * effective, 0.0),
+                }
             };
             sound.gains = stereo_gains(gain, pan);
         }
@@ -253,436 +381,4 @@ impl SilentEngine {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sounds::SoundVariant;
-    use haste_core::Identifier;
-
-    fn variant(path: &str, attenuation_distance: u32) -> SoundVariant {
-        variant_with(path, attenuation_distance, 1.0, 1.0)
-    }
-
-    fn variant_with(
-        path: &str,
-        attenuation_distance: u32,
-        volume: f32,
-        pitch: f32,
-    ) -> SoundVariant {
-        SoundVariant {
-            id: Identifier::new("minecraft", path.trim_end_matches(".ogg")),
-            path: path.to_string(),
-            volume,
-            pitch,
-            weight: 1,
-            stream: false,
-            attenuation_distance,
-            preload: false,
-        }
-    }
-
-    /// Plays one sound of `event`, in play order, like the output stage does.
-    fn play_event(
-        engine: &mut SilentEngine,
-        variant: &SoundVariant,
-        source: SoundSource,
-        event: &str,
-    ) {
-        engine.play(variant, source, None, 1.0, 1.0, Arc::from(event));
-    }
-
-    /// Sum of all gains, as a cheap "everything is silent" check.
-    fn total_gains(engine: &SilentEngine) -> (f32, f32) {
-        engine
-            .gains()
-            .fold((0.0, 0.0), |(l, r), (gl, gr)| (l + gl, r + gr))
-    }
-
-    #[test]
-    fn non_positional_sound_is_full_gain_and_centred() {
-        let mut engine = SilentEngine::new();
-        let sound = variant("sounds/dig/stone1.ogg", 16);
-        play_event(
-            &mut engine,
-            &sound,
-            SoundSource::Block,
-            "minecraft:block.stone.break",
-        );
-        engine.tick();
-        assert_eq!(engine.playing(), 1);
-        // Full gain, centred: each channel gets gain / sqrt(2).
-        let (l, r) = engine.gains().next().unwrap();
-        assert!((l - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
-        assert_eq!(l, r);
-    }
-
-    #[test]
-    fn master_volume_zero_silences_everything() {
-        let mut engine = SilentEngine::new();
-        engine.set_listener(DVec3::new(0.0, 0.0, 0.0), 0.0);
-        engine.play(
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            Some(DVec3::new(2.0, 0.0, 0.0)),
-            1.0,
-            1.0,
-            Arc::from("minecraft:a"),
-        );
-        engine.play(
-            &variant("sounds/b.ogg", 16),
-            SoundSource::Ui,
-            None,
-            1.0,
-            1.0,
-            Arc::from("minecraft:b"),
-        );
-        engine.set_volume(SoundSource::Master, 0.0);
-        engine.tick();
-        assert_eq!(engine.playing(), 2);
-        let (l, r) = total_gains(&engine);
-        assert_eq!((l, r), (0.0, 0.0));
-    }
-
-    #[test]
-    fn per_source_volume_scales_only_that_source() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            "minecraft:a",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/b.ogg", 16),
-            SoundSource::Ui,
-            "minecraft:b",
-        );
-        engine.set_volume(SoundSource::Block, 0.25);
-        engine.tick();
-        let gains: Vec<(f32, f32)> = engine.gains().collect();
-        let norm = |(l, r): (f32, f32)| (l * l + r * r).sqrt();
-        assert!((norm(gains[0]) - 0.25).abs() < 1e-5);
-        assert!((norm(gains[1]) - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn playing_in_counts_per_source() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            "minecraft:a",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/b.ogg", 16),
-            SoundSource::Block,
-            "minecraft:b",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/c.ogg", 16),
-            SoundSource::Music,
-            "minecraft:c",
-        );
-        assert_eq!(engine.playing(), 3);
-        assert_eq!(engine.playing_in(SoundSource::Block), 2);
-        assert_eq!(engine.playing_in(SoundSource::Music), 1);
-        assert_eq!(engine.playing_in(SoundSource::Ui), 0);
-        // Master is not a source of its own: it scales the others.
-        assert_eq!(engine.playing_in(SoundSource::Master), 0);
-    }
-
-    #[test]
-    fn is_event_playing_follows_the_event_not_the_source() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/dig/stone1.ogg", 16),
-            SoundSource::Block,
-            "minecraft:block.stone.break",
-        );
-        assert!(engine.is_event_playing("minecraft:block.stone.break"));
-        // The same event without the namespace, the way `sounds.json` keys it.
-        assert!(engine.is_event_playing("block.stone.break"));
-        assert!(!engine.is_event_playing("minecraft:block.stone.place"));
-        // A sound in another source does not answer for this event.
-        play_event(
-            &mut engine,
-            &variant("sounds/music/game.ogg", 16),
-            SoundSource::Music,
-            "minecraft:music.game",
-        );
-        assert!(engine.is_event_playing("minecraft:block.stone.break"));
-        assert!(engine.is_event_playing("minecraft:music.game"));
-    }
-
-    #[test]
-    fn stop_by_source() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            "minecraft:a",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/b.ogg", 16),
-            SoundSource::Ui,
-            "minecraft:b",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/c.ogg", 16),
-            SoundSource::Block,
-            "minecraft:c",
-        );
-        engine.stop(Some(SoundSource::Block), None);
-        assert_eq!(engine.playing(), 1);
-        engine.tick();
-        // Only the Ui sound survives.
-        assert!((total_gains(&engine).0).abs() > 0.0);
-    }
-
-    #[test]
-    fn stop_by_event_only() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            "minecraft:a",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/b.ogg", 16),
-            SoundSource::Block,
-            "minecraft:b",
-        );
-        engine.stop(None, Some("minecraft:a"));
-        assert_eq!(engine.playing(), 1);
-        // The surviving sound is b's, not a's.
-        assert!(engine.is_event_playing("minecraft:b"));
-        assert!(!engine.is_event_playing("minecraft:a"));
-    }
-
-    #[test]
-    fn stop_by_event_matches_the_namespaced_name() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/dig/stone1.ogg", 16),
-            SoundSource::Block,
-            "minecraft:block.stone.break",
-        );
-        // The event name without the namespace, the way a stop packet's identifier or
-        // sounds.json key spells it, stops the same sound.
-        engine.stop(None, Some("block.stone.break"));
-        assert_eq!(engine.playing(), 0);
-    }
-
-    #[test]
-    fn stop_by_source_and_event() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            "minecraft:a",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/b.ogg", 16),
-            SoundSource::Ui,
-            "minecraft:a",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/c.ogg", 16),
-            SoundSource::Block,
-            "minecraft:b",
-        );
-        // Both filters must match: the Block sound of event a goes, the Ui one of the same
-        // event stays, as does the Block sound of the other event.
-        engine.stop(Some(SoundSource::Block), Some("minecraft:a"));
-        assert_eq!(engine.playing(), 2);
-        assert_eq!(engine.playing_in(SoundSource::Ui), 1);
-        assert_eq!(engine.playing_in(SoundSource::Block), 1);
-        assert!(engine.is_event_playing("minecraft:a"), "the Ui a survives");
-        assert!(engine.is_event_playing("minecraft:b"));
-    }
-
-    #[test]
-    fn stop_by_neither_stops_everything() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            "minecraft:a",
-        );
-        play_event(
-            &mut engine,
-            &variant("sounds/b.ogg", 16),
-            SoundSource::Music,
-            "minecraft:music.game",
-        );
-        engine.stop(None, None);
-        assert_eq!(engine.playing(), 0);
-    }
-
-    #[test]
-    fn stop_by_unknown_event_stops_nothing() {
-        let mut engine = SilentEngine::new();
-        play_event(
-            &mut engine,
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            "minecraft:a",
-        );
-        engine.stop(None, Some("minecraft:not.a.real.event"));
-        assert_eq!(engine.playing(), 1);
-    }
-
-    #[test]
-    fn positional_sound_out_of_range_after_listener_moves_is_silent() {
-        let mut engine = SilentEngine::new();
-        let sound = variant("sounds/dig/stone1.ogg", 16);
-        engine.set_listener(DVec3::new(0.0, 0.0, 0.0), 0.0);
-        engine.play(
-            &sound,
-            SoundSource::Block,
-            Some(DVec3::new(4.0, 0.0, 0.0)),
-            1.0,
-            1.0,
-            Arc::from("minecraft:block.stone.break"),
-        );
-        engine.tick();
-        let (l, r) = engine.gains().next().unwrap();
-        assert!((l * l + r * r).sqrt() > 0.7, "in range should be loud");
-
-        // Walk away: the same sound is now out of range.
-        engine.set_listener(DVec3::new(1000.0, 0.0, 0.0), 0.0);
-        engine.tick();
-        assert_eq!(engine.playing(), 1);
-        let (l, r) = engine.gains().next().unwrap();
-        assert_eq!((l, r), (0.0, 0.0));
-    }
-
-    #[test]
-    fn listener_move_scales_gain_without_replay() {
-        let mut engine = SilentEngine::new();
-        let sound = variant("sounds/a.ogg", 16);
-        engine.set_listener(DVec3::ZERO, 0.0);
-        engine.play(
-            &sound,
-            SoundSource::Block,
-            Some(DVec3::new(8.0, 0.0, 0.0)),
-            1.0,
-            1.0,
-            Arc::from("minecraft:a"),
-        );
-        engine.tick();
-        let (l, r) = engine.gains().next().unwrap();
-        assert!(
-            (l * l + r * r).sqrt() - 0.5 < 1e-5,
-            "half range = half gain"
-        );
-    }
-
-    #[test]
-    fn volume_two_sound_is_audible_at_distance_24() {
-        // volume 2.0 doubles the audible range to 32, so 24 blocks is still in range.
-        let mut engine = SilentEngine::new();
-        engine.set_listener(DVec3::ZERO, 0.0);
-        engine.play(
-            &variant("sounds/a.ogg", 16),
-            SoundSource::Block,
-            Some(DVec3::new(24.0, 0.0, 0.0)),
-            2.0,
-            1.0,
-            Arc::from("minecraft:a"),
-        );
-        engine.tick();
-        let (l, r) = engine.gains().next().unwrap();
-        // gain = min(2, 1) * (1 - 24/32) = 0.25, split over both channels.
-        let norm = (l * l + r * r).sqrt();
-        assert!((norm - 0.25).abs() < 1e-5, "norm {norm}");
-        assert!(l <= 1.0 && r <= 1.0);
-    }
-
-    #[test]
-    fn variant_volume_scales_the_gain() {
-        // A variant with volume 0.5 played at volume 1.0 has half the gain of a
-        // volume-1.0 variant at the same spot.
-        let mut loud = SilentEngine::new();
-        loud.set_listener(DVec3::ZERO, 0.0);
-        loud.play(
-            &variant_with("sounds/a.ogg", 16, 1.0, 1.0),
-            SoundSource::Block,
-            Some(DVec3::new(4.0, 0.0, 0.0)),
-            1.0,
-            1.0,
-            Arc::from("minecraft:a"),
-        );
-        loud.tick();
-        let mut quiet = SilentEngine::new();
-        quiet.set_listener(DVec3::ZERO, 0.0);
-        quiet.play(
-            &variant_with("sounds/a.ogg", 16, 0.5, 1.0),
-            SoundSource::Block,
-            Some(DVec3::new(4.0, 0.0, 0.0)),
-            1.0,
-            1.0,
-            Arc::from("minecraft:a"),
-        );
-        quiet.tick();
-        let norm = |e: &SilentEngine| {
-            let (l, r) = e.gains().next().unwrap();
-            (l * l + r * r).sqrt()
-        };
-        assert!((norm(&loud) - 0.75).abs() < 1e-5);
-        assert!((norm(&quiet) - 0.375).abs() < 1e-5);
-    }
-
-    #[test]
-    fn variant_pitch_multiplies_and_clamps() {
-        // Variant pitch 1.5 played at pitch 1.5: 2.25 clamps to 2.0.
-        let mut engine = SilentEngine::new();
-        engine.play(
-            &variant_with("sounds/a.ogg", 16, 1.0, 1.5),
-            SoundSource::Block,
-            None,
-            1.0,
-            1.5,
-            Arc::from("minecraft:a"),
-        );
-        assert_eq!(engine.pitches().next().unwrap(), 2.0);
-    }
-
-    #[test]
-    fn remove_drops_the_sound_at_the_index() {
-        let mut engine = SilentEngine::new();
-        for (index, path) in ["sounds/a.ogg", "sounds/b.ogg", "sounds/c.ogg"]
-            .iter()
-            .enumerate()
-        {
-            let event: Arc<str> = format!("minecraft:s{index}").into();
-            engine.play(
-                &variant(path, 16),
-                SoundSource::Block,
-                None,
-                1.0,
-                1.0,
-                event,
-            );
-        }
-        engine.remove(1);
-        assert_eq!(engine.playing(), 2);
-        // The first and third sounds survive with their gains.
-        engine.tick();
-        assert!(total_gains(&engine).0 > 0.0);
-    }
-}
+mod tests;

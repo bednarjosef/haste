@@ -1,4 +1,5 @@
 //! Java -> Rust natives of `haste.rt.Native`, registered once at startup.
+mod sound;
 mod state;
 mod text;
 
@@ -49,6 +50,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::permission_level as *mut _,
             ),
             NativeMethod::from_raw_parts(
+                jni_str!("blockState"),
+                jni_str!("(III)I"),
+                state::block_state as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
                 jni_str!("playerName"),
                 jni_str!("()Ljava/lang/String;"),
                 state::player_name as *mut _,
@@ -62,6 +68,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 jni_str!("mirror"),
                 jni_str!("([I[D)V"),
                 state::mirror as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("itemCooldown"),
+                jni_str!("(Ljava/lang/String;F)F"),
+                state::item_cooldown as *mut _,
             ),
             NativeMethod::from_raw_parts(
                 jni_str!("debugText"),
@@ -127,6 +138,21 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 jni_str!("resourcePacksChanged"),
                 jni_str!("([Ljava/lang/String;)V"),
                 state::resource_packs_changed as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("soundListening"),
+                jni_str!("(Z)V"),
+                sound::sound_listening as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("takePlayedSounds"),
+                jni_str!("([D)[Ljava/lang/Object;"),
+                sound::take_played_sounds as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("packPromptAnswered"),
+                jni_str!("(Z)V"),
+                state::pack_prompt_answered as *mut _,
             ),
         ]
     };

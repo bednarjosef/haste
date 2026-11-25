@@ -40,6 +40,9 @@ pub struct PlayerVitals {
     pub xp_total: i32,
     /// The player's eyes are in water (air bubbles shown).
     pub eye_in_water: bool,
+    /// Vanilla `LivingEntity.damageCooldownTime` (20 per hit, 10 on a heal, ticked down
+    /// by the client): the HUD's heart blink gates on it (`Hud.extractPlayerHealth`).
+    pub damage_cooldown_ticks: i32,
     /// Hardcore world (hardcore hearts).
     pub hardcore: bool,
     /// Abilities: invulnerable.
@@ -66,6 +69,7 @@ impl Default for PlayerVitals {
             xp_level: 0,
             xp_total: 0,
             eye_in_water: false,
+            damage_cooldown_ticks: 0,
             hardcore: false,
             invulnerable: false,
             flying: false,
@@ -73,6 +77,35 @@ impl Default for PlayerVitals {
             instabuild: false,
             fly_speed: 0.05,
             walk_speed: 0.1,
+        }
+    }
+}
+
+/// The mount HUD while riding (vanilla `Hud`'s vehicle hearts and jump bar): see
+/// [`mount_hud::MountHud`] (moved to its own module).
+pub use mount_hud::MountHud;
+
+mod mount_hud;
+
+/// The attack indicator's charge (vanilla `Hud.extractCrosshair` and its hotbar variant): the
+/// local player's attack strength ticker and the held item's attack delay, ticked by the client
+/// once per tick (`Player.tick` / `Player.getCurrentItemAttackStrengthDelay`) and read by the
+/// player proxy's `getAttackStrengthScale`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AttackStrengthHud {
+    /// `Player.attackStrengthTicker`: ticks since the last attack or held-item change.
+    pub ticker: f32,
+    /// `Player.getCurrentItemAttackStrengthDelay`: 20 / attack speed, in ticks.
+    pub delay: f32,
+}
+
+impl Default for AttackStrengthHud {
+    fn default() -> Self {
+        // A fist fully charged (attack speed 4.0): the HUD draws no bar before the client
+        // publishes its own value.
+        AttackStrengthHud {
+            ticker: 5.0,
+            delay: 5.0,
         }
     }
 }
@@ -169,7 +202,9 @@ pub(crate) mod mirror {
     pub const I_GUI_SCALE: usize = 19;
     pub const I_LIGHT_SKY: usize = 20;
     pub const I_LIGHT_BLOCK: usize = 21;
-    pub const INTS: usize = 22;
+    /// Vanilla `LivingEntity.damageCooldownTime` (the HUD heart blink's gate).
+    pub const I_HURT_COOLDOWN: usize = 22;
+    pub const INTS: usize = 23;
     pub const D_HEALTH: usize = 0;
     pub const D_SATURATION: usize = 1;
     pub const D_XP_PROGRESS: usize = 2;
@@ -184,7 +219,14 @@ pub(crate) mod mirror {
     pub const D_DAY_TIME: usize = 11;
     pub const D_TX_PER_S: usize = 12;
     pub const D_RX_PER_S: usize = 13;
-    pub const DOUBLES: usize = 14;
+    /// The mount's health and max health, and the charged jump scale (see `MountHud`).
+    pub const D_MOUNT_HEALTH: usize = 14;
+    pub const D_MOUNT_MAX_HEALTH: usize = 15;
+    pub const D_MOUNT_JUMP_SCALE: usize = 16;
+    /// The attack indicator's charge (see `AttackStrengthHud`).
+    pub const D_ATTACK_STRENGTH_TICKER: usize = 17;
+    pub const D_ATTACK_STRENGTH_DELAY: usize = 18;
+    pub const DOUBLES: usize = 19;
     pub const F_HARDCORE: i32 = 1;
     pub const F_EYE_IN_WATER: i32 = 2;
     pub const F_INVULNERABLE: i32 = 4;
@@ -194,6 +236,12 @@ pub(crate) mod mirror {
     pub const F_IN_WORLD: i32 = 64;
     pub const F_IMMEDIATE_RESPAWN: i32 = 128;
     pub const F_DEBUG_SHOWN: i32 = 256;
+    /// Riding a living vehicle (the mount HUD's hearts show; see `MountHud`).
+    pub const F_MOUNT_LIVING: i32 = 512;
+    /// Steering a vehicle that can jump (the jump bar replaces the experience bar).
+    pub const F_MOUNT_JUMPABLE: i32 = 1024;
+    /// The crosshair picks a living, alive entity (the attack indicator's full icon).
+    pub const F_CROSSHAIR_PICK: i32 = 2048;
 }
 
 impl GameState {
@@ -218,7 +266,10 @@ impl GameState {
             | flag(v.instabuild, F_INSTABUILD)
             | flag(self.in_world, F_IN_WORLD)
             | flag(self.immediate_respawn, F_IMMEDIATE_RESPAWN)
-            | flag(self.debug_shown, F_DEBUG_SHOWN);
+            | flag(self.debug_shown, F_DEBUG_SHOWN)
+            | flag(self.mount.is_some(), F_MOUNT_LIVING)
+            | flag(self.mount.is_some_and(|m| m.jumpable), F_MOUNT_JUMPABLE)
+            | flag(self.crosshair_pick_living, F_CROSSHAIR_PICK);
         let dbg = &self.debug;
         i[I_FPS] = dbg.fps;
         i[I_CHUNKS] = dbg.chunks;
@@ -235,6 +286,7 @@ impl GameState {
         i[I_GUI_SCALE] = dbg.gui_scale;
         i[I_LIGHT_SKY] = dbg.light[0];
         i[I_LIGHT_BLOCK] = dbg.light[1];
+        i[I_HURT_COOLDOWN] = v.damage_cooldown_ticks;
         d[D_HEALTH] = f64::from(v.health);
         d[D_SATURATION] = f64::from(v.saturation);
         d[D_XP_PROGRESS] = f64::from(v.xp_progress);
@@ -249,6 +301,13 @@ impl GameState {
         d[D_DAY_TIME] = self.day_time as f64;
         d[D_TX_PER_S] = dbg.tx_per_s;
         d[D_RX_PER_S] = dbg.rx_per_s;
+        if let Some(m) = &self.mount {
+            d[D_MOUNT_HEALTH] = f64::from(m.health);
+            d[D_MOUNT_MAX_HEALTH] = f64::from(m.max_health);
+            d[D_MOUNT_JUMP_SCALE] = f64::from(m.jump_scale);
+        }
+        d[D_ATTACK_STRENGTH_TICKER] = f64::from(self.attack_strength.ticker);
+        d[D_ATTACK_STRENGTH_DELAY] = f64::from(self.attack_strength.delay);
         (i, d)
     }
 }
@@ -289,13 +348,17 @@ pub struct CreateWorldRequest {
 /// The game state the proxies read. Owned by Rust; the client updates it (e.g. from packets) and
 /// screens see it immediately through the natives. Java writes back what vanilla code produced
 /// (inventory changes, chat, serverbound packets).
-#[derive(Debug)]
 pub struct GameState {
     /// Mirror of the player's inventory in vanilla `Inventory` numbering (0-8 hotbar, 9-35 main,
     /// 36-39 armour feet..head, 40 offhand, then any further equipment slots). Written by Java.
     pub inventory: Vec<ItemStackData>,
     /// Mirror of the stack carried by the cursor in an open container. Written by Java.
     pub carried: ItemStackData,
+    /// Inventory slots Java changed since the last [`GameState::take_inventory_changes`]
+    /// (vanilla numbering), oldest first. Java predicts inventory edits itself (creative
+    /// slot sets, menu clicks); the server never echoes those back, so the client must take
+    /// them from here.
+    pub inventory_changes: Vec<(i32, ItemStackData)>,
     /// Selected hotbar slot (0-8).
     pub selected_slot: i32,
     /// Messages the chat screen sent since the last [`GameState::take_sent`].
@@ -308,6 +371,13 @@ pub struct GameState {
     pub permission_level: u8,
     /// The local player's health, food, experience, abilities, ...
     pub vitals: PlayerVitals,
+    /// The mount HUD while riding a living vehicle (None on foot), see [`MountHud`].
+    pub mount: Option<MountHud>,
+    /// The attack indicator's charge (crosshair bar and hotbar icon), see [`AttackStrengthHud`].
+    pub attack_strength: AttackStrengthHud,
+    /// The crosshair picks a living, alive entity in reach (vanilla
+    /// `Minecraft.crosshairPickEntity`): the attack indicator's full icon.
+    pub crosshair_pick_living: bool,
     /// What the F3 overlay shows.
     pub debug: DebugInfo,
     /// Whether the F3 overlay is on (vanilla's `DebugScreenEntryList.isOverlayVisible`; the
@@ -344,10 +414,21 @@ pub struct GameState {
     /// Option changes vanilla screens made, as options.txt key/value pairs, oldest first. The
     /// client drains them once per tick and applies them live (render distance, sound volumes, ...).
     pub option_changes: Vec<(String, String)>,
+    /// Block states of the positions whose block entities the screens edit, `[x, y, z] -> global
+    /// block state id` (`Block.BLOCK_STATE_REGISTRY`, which the data generator's blocks.json
+    /// numbers the same). The client records them from its world before forwarding the packets
+    /// that make Java build an entity (`block_entity_data`, `open_sign_editor`, a use of a
+    /// game-master block); Java builds the entity's real state from it (`Block.stateById`), like
+    /// vanilla's chunks build entities from the block state (`LevelChunk.setBlockState`).
+    pub block_states: std::collections::HashMap<[i32; 3], i32>,
     /// The resource pack selection the pack screen committed (vanilla
     /// `Minecraft.reloadResourcePacks`), repository ids bottom first; the client rebuilds its
     /// asset stack from them. `None` = no change pending.
     pub resource_pack_ids: Option<Vec<String>>,
+    /// The player's answer to the server resource pack prompt (vanilla's
+    /// `PackConfirmScreen` callback), until the client takes it. `None` while
+    /// the screen is open (or none was shown).
+    pub pack_prompt_answer: Option<bool>,
 }
 
 impl Default for GameState {
@@ -355,12 +436,16 @@ impl Default for GameState {
         GameState {
             inventory: vec![empty_stack(); INVENTORY_SIZE],
             carried: empty_stack(),
+            inventory_changes: Vec::new(),
             selected_slot: 0,
             sent: Vec::new(),
             player_name: "Player".to_owned(),
             game_mode: GameMode::Survival,
             permission_level: 0,
             vitals: PlayerVitals::default(),
+            mount: None,
+            attack_strength: AttackStrengthHud::default(),
+            crosshair_pick_living: false,
             debug: DebugInfo::default(),
             debug_shown: false,
             in_world: false,
@@ -376,7 +461,9 @@ impl Default for GameState {
             create_world_requested: None,
             local_world_running: false,
             option_changes: Vec::new(),
+            block_states: std::collections::HashMap::new(),
             resource_pack_ids: None,
+            pack_prompt_answer: None,
         }
     }
 }
@@ -411,7 +498,13 @@ impl GameState {
         if self.inventory.len() <= i {
             self.inventory.resize(i + 1, empty_stack());
         }
-        self.inventory[i] = stack;
+        self.inventory[i] = stack.clone();
+        self.inventory_changes.push((slot, stack));
+    }
+
+    /// Drains the inventory slots Java changed since the last call, oldest first.
+    pub fn take_inventory_changes(&mut self) -> Vec<(i32, ItemStackData)> {
+        std::mem::take(&mut self.inventory_changes)
     }
     /// Drains the messages sent by screens.
     pub fn take_sent(&mut self) -> Vec<ChatMessage> {
@@ -534,53 +627,4 @@ pub(crate) fn with_state<T>(f: impl FnOnce(&mut GameState) -> T) -> T {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stack_encoding_round_trips() {
-        let s = ItemStackData {
-            count: 64,
-            item: Some(RegistryIndex(300)),
-            components_raw: bytes::Bytes::from_static(&[1, 0, 5, 9]),
-        };
-        let b = encode_stack(&s);
-        assert_eq!(b[..3], [64, 0xAC, 0x02]);
-        assert_eq!(decode_stack(&b), Some(s));
-        assert_eq!(decode_stack(&[0]), Some(empty_stack()));
-        assert_eq!(encode_stack(&empty_stack()), vec![0]);
-        assert_eq!(decode_stack(&[0x80]), None, "truncated VarInt");
-        let plain = ItemStackData {
-            count: 1,
-            item: Some(RegistryIndex(1)),
-            components_raw: bytes::Bytes::new(),
-        };
-        assert_eq!(encode_stack(&plain), vec![1, 1, 0, 0]);
-    }
-
-    #[test]
-    fn mirror_slots() {
-        let mut s = GameState::default();
-        s.set_mirror(
-            3,
-            ItemStackData {
-                count: 5,
-                item: Some(RegistryIndex(1)),
-                components_raw: bytes::Bytes::new(),
-            },
-        );
-        assert_eq!(s.slot(3).map(|x| x.count), Some(5));
-        assert!(s.slot(4).is_none());
-        assert!(s.slot(999).is_none());
-        s.set_mirror(50, empty_stack());
-        assert_eq!(s.inventory.len(), 51);
-        s.selected_slot = 3;
-        assert_eq!(s.selected().map(|x| x.count), Some(5));
-        s.sent.push(ChatMessage {
-            text: "hi".into(),
-            command: false,
-        });
-        assert_eq!(s.take_sent().len(), 1);
-        assert!(s.sent.is_empty());
-    }
-}
+mod tests;

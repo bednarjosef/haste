@@ -56,6 +56,10 @@ public final class ServerDumps {
             HasteRecorderMod.LOGGER.info("entity_dimensions.json: {} entity types", entities);
             int blocks = dumpBlockProperties(outDir);
             HasteRecorderMod.LOGGER.info("block_properties.json: {} blocks", blocks);
+            int beBlocks = BlockEntityTypeDump.dump(outDir);
+            HasteRecorderMod.LOGGER.info("block_entity_types.json: {} blocks", beBlocks);
+            int classes = BlockClassDump.dump(outDir);
+            HasteRecorderMod.LOGGER.info("block_classes.json: {} blocks", classes);
             HasteRecorderMod.LOGGER.info("oracle dumps complete in {} ms", (System.nanoTime() - t0) / 1_000_000);
         } catch (Throwable t) {
             HasteRecorderMod.LOGGER.error("oracle dump failed", t);
@@ -108,10 +112,31 @@ public final class ServerDumps {
         o.add("collision", shapeBoxes(collision));
         VoxelShape outline = state.getShape(EmptyBlockGetter.INSTANCE, ORIGIN, EMPTY_CONTEXT);
         o.add("outline", shapeBoxes(outline));
+        // BlockState.getOcclusionShape: what neighbour/fluid face culling tests against
+        // (getShape by default, empty for the noOcclusion family, smaller for fences and
+        // the other overrides). Absent in dumps from before this field.
+        VoxelShape occlusion = state.getOcclusionShape();
+        o.add("occlusion", shapeBoxes(occlusion));
 
         o.addProperty("light", state.getLightEmission());
+        // BlockState.getLightDampening / propagatesSkylightDown: what the client light engine
+        // (LightEngine, SkyLightEngine) reads for every block it propagates through.
+        o.addProperty("light_dampening", state.getLightDampening());
+        o.addProperty("propagates_skylight_down", state.propagatesSkylightDown());
+        // BlockState.canOcclude / useShapeForLightOcclusion: LightEngine's gates for
+        // shape-based light occlusion (isEmptyShape, shapeOccludes). Absent in dumps from
+        // before this field.
+        o.addProperty("can_occlude", state.canOcclude());
+        o.addProperty("use_shape_for_light_occlusion", state.useShapeForLightOcclusion());
         o.addProperty("air", state.isAir());
         o.addProperty("opaque", state.isSolidRender());
+        // EntityRenderer.extractShadowPiece skips INVISIBLE render shapes; RenderShape has only
+        // INVISIBLE and MODEL in 26.3, so the lowercase enum name is the whole domain.
+        o.addProperty("render_shape", state.getRenderShape().name().toLowerCase(Locale.ROOT));
+        // Level.collidesWithSuffocatingBlock -> BlockState.isSuffocating with an empty level: the
+        // default predicate is tag + isCollisionShapeFullBlock (no-neighbour shape here); see
+        // NOTES.md for the two predicates that read more than the state.
+        o.addProperty("suffocating", state.isSuffocating(EmptyBlockGetter.INSTANCE, ORIGIN));
         if (state.liquid() || !state.getFluidState().isEmpty()) {
             Identifier fluid = BuiltInRegistries.FLUID.getKey(state.getFluidState().getType());
             o.addProperty("fluid", fluid.toString());
@@ -181,6 +206,7 @@ public final class ServerDumps {
             o.addProperty("height", dims.height());
             o.addProperty("eye_height", dims.eyeHeight());
             o.addProperty("fixed", dims.fixed());
+            o.addProperty("fire_immune", type.fireImmune());
             types.add(o);
         }
         root.add("types", types);

@@ -23,6 +23,7 @@ use haste_core::Identifier;
 fn part(name: &str, pivot: [f32; 3], cubes: Vec<Cube>, children: Vec<ModelPart>) -> ModelPart {
     ModelPart {
         name: name.to_owned(),
+        id: haste_core::parts::intern(name),
         pivot: pivot.into(),
         rotation: glam::Vec3::ZERO,
         visible: true,
@@ -171,4 +172,125 @@ pub fn box_for(width: f32, height: f32) -> Arc<CubeModel> {
             })
         })
         .clone()
+}
+
+/// Whether a model has a part with this id (humanoid models carry `right_arm`, which only the
+/// armed/armoured layers need).
+pub(crate) fn model_has_part(
+    part: &haste_core::model::ModelPart,
+    id: haste_core::parts::PartId,
+) -> bool {
+    part.id == id || part.children.iter().any(|c| model_has_part(c, id))
+}
+
+/// The model an entity draws with, whether it has a head part (the head aim), and its overlay
+/// layers (vanilla's per-type renderer choice): players the humanoid, the armour stand its
+/// code-built pair, boats their dumped layer, minecarts the minecart model, variant and
+/// table-covered mobs their registry row, everything else a generic box from its dimensions.
+///
+/// Players get the humanoid model (classic layout; skins arrive with renderer's texture work),
+/// known mob types the model the recorder dumped for their vanilla layer, everything else a
+/// generic box. Babies use the table row's baby layer, like vanilla's `AgeableMobRenderer`.
+pub(crate) fn model_for_entity(
+    e: &crate::store::Entity,
+    minecart: bool,
+    variants: &crate::variants::MobVariants,
+    world_age: i64,
+) -> (
+    std::sync::Arc<CubeModel>,
+    bool,
+    [Option<haste_core::model::EntityOverlay>; 2],
+) {
+    if e.is_player_type {
+        return (humanoid(false), true, Default::default());
+    }
+    let type_name = crate::registry::entity_type_name(e.kind);
+    // The armour stand's own code-built pair, small per the synced flag
+    // (`ArmorStandRenderer.submit` picks `smallModel` over `bigModel`).
+    if type_name == Some("minecraft:armor_stand") {
+        return (
+            crate::armor_stand::body_model(crate::armor_stand::is_small(&e.metadata)),
+            true,
+            Default::default(),
+        );
+    }
+    // The fence knot's one cube (`LeashKnotRenderer` draws `LeashKnotModel`).
+    if crate::leash::is_knot(e.kind) {
+        return (crate::leash_knot::model(), false, Default::default());
+    }
+    // Registry table first (shared per type, head flag precomputed), then the box. Babies use
+    // the row's baby layer, like vanilla's AgeableMobRenderer.submit. Variant mobs
+    // (cat/wolf/frog/pig/cow/chicken) instead resolve their look from the synced variant
+    // registry through the entity's metadata, falling back to the table's default row when
+    // the variant is unknown or absent.
+    let baby = crate::registry::is_baby(&e.metadata);
+    let variant = crate::variants::model_for(e.kind, variants, &e.metadata, baby).or_else(|| {
+        // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/parrot/fox/bee/strider/
+        // mooshroom): the same layer, the variant's texture.
+        crate::variants::metadata_model_for(
+            e.kind,
+            &e.metadata,
+            baby,
+            e.metadata.custom_name_plain(),
+            world_age,
+        )
+    });
+    // The tropical fish's shape follows its packed pattern; the shulker's base texture follows
+    // its colour byte. Both are plain model swaps, and both must be gated on the entity's own
+    // type: their metadata slots (17, 18) collide with other mobs' fields (e.g. a sheep's
+    // wool byte sits where a shulker's colour byte would).
+    let variant = variant.or_else(|| {
+        if type_name == Some("minecraft:tropical_fish") {
+            crate::variants::tropical_fish_model(&e.metadata)
+        } else {
+            None
+        }
+    });
+    let variant = match type_name {
+        Some("minecraft:shulker") => {
+            match crate::variants::shulker_texture(&e.metadata) {
+                // The colour texture swap is cached per texture (the model is cloned once
+                // per colour, never per frame).
+                Some(texture) => crate::variants::shulker_model_for(&texture),
+                None => variant,
+            }
+        }
+        _ => variant,
+    };
+    // Boats (`AbstractBoatRenderer`): the dumped boat layer with the trailing yaw baked
+    // into its root, the water patch overlay when it floats (a raft has none), no head part
+    // (the whole hull follows the entity yaw). The spawn-time family flag keeps the table
+    // lookup off every other entity's path; a boat type the table does not name (a mod's)
+    // falls through to the generic path.
+    let boat = e
+        .is_boat
+        .then(|| type_name.and_then(crate::boat::entry_for_name))
+        .flatten();
+    if let Some(boat) = boat {
+        let model =
+            crate::boat::model(boat).unwrap_or_else(|| box_for(e.dimensions.0, e.dimensions.1));
+        let overlays = match crate::boat::water_patch_overlay(boat, &e.boat) {
+            Some(patch) => [Some(patch), None],
+            None => [None, None],
+        };
+        return (model, false, overlays);
+    }
+    let entry = crate::registry::model_entry(e.kind);
+    let overlays = crate::variants::overlays_for(e.kind, &e.metadata, baby);
+    match (variant, entry) {
+        // Minecarts draw through `AbstractMinecartRenderer` with the one `MinecartModel`
+        // layer every minecart type bakes (`MinecartModel.createBodyLayer`); cargo and
+        // track pose come from the decoration.
+        _ if minecart => (crate::minecart::model(), false, Default::default()),
+        // A variant model (already the baby's when `baby`); all six variant mobs have a
+        // head part, so the head aim stays on.
+        (Some(v), _) => (v, true, overlays),
+        (None, Some((head, m))) => {
+            let baby_model = type_name
+                .filter(|_| baby)
+                .and_then(crate::registry::baby_model_for_name);
+            (baby_model.unwrap_or(m), head, overlays)
+        }
+        (None, None) => (box_for(e.dimensions.0, e.dimensions.1), false, overlays),
+    }
 }

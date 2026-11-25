@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{Aabb, BlockPos, BlockStateId, ChunkPos, DVec3};
 
-use crate::{BlockPhysics, FluidInfo, FluidKind};
+use crate::{BlockPhysics, ClimbableBlocks, FluidInfo, FluidKind};
 
 /// Hand-made block kinds with fixed state ids.
 pub mod states {
@@ -42,7 +42,26 @@ pub mod states {
     /// Block whose top is exactly 0.6 below a player standing at y = 0: the sneak edge probe
     /// (`Player.canFallAtLeast`, depth step + 1e-7) reaches it.
     pub const LEDGE_0_6: BlockStateId = BlockStateId(19);
-    pub const COUNT: usize = 20;
+    /// Ladder on the south wall of its cell (vanilla `LadderBlock` facing north: a 3/16 slab
+    /// at z 0.8125..1), in `#climbable`.
+    pub const LADDER: BlockStateId = BlockStateId(20);
+    /// Scaffolding (climbable, no collision in these tests): sneaking slides down it.
+    pub const SCAFFOLDING: BlockStateId = BlockStateId(21);
+    /// Open trapdoor facing north: climbable only over a north-facing ladder.
+    pub const OPEN_TRAPDOOR: BlockStateId = BlockStateId(22);
+    /// Bubble column dragging down (magma): default block state, `drag` = true.
+    pub const BUBBLE_COLUMN: BlockStateId = BlockStateId(23);
+    pub const BUBBLE_COLUMN_DOWN: BlockStateId = BlockStateId(23);
+    pub const BUBBLE_COLUMN_DRAG_DOWN: BlockStateId = BlockStateId(23);
+    pub const BUBBLE_COLUMN_DRAG: BlockStateId = BlockStateId(23);
+    pub const BUBBLE_COLUMN_MAGMA: BlockStateId = BlockStateId(23);
+    /// Bubble column pushing up (soul sand): `drag` = false.
+    pub const BUBBLE_COLUMN_UP: BlockStateId = BlockStateId(24);
+    pub const BUBBLE_COLUMN_PUSH_UP: BlockStateId = BlockStateId(24);
+    pub const BUBBLE_COLUMN_SOUL_SAND: BlockStateId = BlockStateId(24);
+    /// Full cube that suffocates (`BlockState.isSuffocating`), like sand.
+    pub const SAND: BlockStateId = BlockStateId(25);
+    pub const COUNT: usize = 26;
 }
 
 /// Shapes and per-block physics properties for the ids in [`states`].
@@ -76,6 +95,8 @@ impl Default for TestShapes {
         // Cobweb, powder snow, sweet berry bush and honey have no collision in these tests.
         boxes[states::STEP_03.0 as usize] = vec![bx(0.0, -0.7, 0.0, 1.0, 0.3, 1.0)];
         boxes[states::LEDGE_0_6.0 as usize] = vec![bx(0.0, -1.6, 0.0, 1.0, -0.6, 1.0)];
+        boxes[states::LADDER.0 as usize] = vec![bx(0.0, 0.0, 0.8125, 1.0, 1.0, 1.0)];
+        boxes[states::SAND.0 as usize] = full;
         Self { boxes }
     }
 }
@@ -115,6 +136,9 @@ impl BlockPhysics for TestShapes {
     fn is_opaque_full(&self, s: BlockStateId) -> bool {
         matches!(s, states::STONE | states::ICE | states::BLUE_ICE)
     }
+    fn is_suffocating(&self, s: BlockStateId) -> bool {
+        s == states::SAND
+    }
     fn speed_factor(&self, s: BlockStateId) -> f32 {
         match s {
             states::SOUL_SAND => 0.4,
@@ -139,6 +163,10 @@ impl BlockPhysics for TestShapes {
                 kind: FluidKind::Water,
                 height: 8.0 / 9.0,
             }),
+            s if s.0 == 23 || s.0 == 24 => Some(FluidInfo {
+                kind: FluidKind::Water,
+                height: 8.0 / 9.0,
+            }),
             states::LAVA_SOURCE => Some(FluidInfo {
                 kind: FluidKind::Lava,
                 height: 8.0 / 9.0,
@@ -160,6 +188,12 @@ impl BlockPhysics for TestShapes {
     }
     fn is_honey(&self, s: BlockStateId) -> bool {
         s == states::HONEY
+    }
+    fn is_bubble_column(&self, s: BlockStateId) -> bool {
+        s.0 == 23 || s.0 == 24
+    }
+    fn bubble_column_drag_down(&self, s: BlockStateId) -> bool {
+        s.0 == 23
     }
     fn bounce_restitution(&self, s: BlockStateId) -> f32 {
         if s == states::SLIME {
@@ -241,5 +275,18 @@ impl BlockView for TestWorld {
     }
     fn height(&self) -> i32 {
         384
+    }
+}
+
+/// The climbable tag and trapdoor rule for the ids in [`states`].
+impl ClimbableBlocks for TestShapes {
+    fn is_climbable(&self, s: BlockStateId) -> bool {
+        matches!(s, states::LADDER | states::SCAFFOLDING)
+    }
+    fn is_scaffolding(&self, s: BlockStateId) -> bool {
+        s == states::SCAFFOLDING
+    }
+    fn trapdoor_usable_as_ladder(&self, s: BlockStateId, below: BlockStateId) -> bool {
+        s == states::OPEN_TRAPDOOR && below == states::LADDER
     }
 }

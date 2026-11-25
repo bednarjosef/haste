@@ -85,6 +85,29 @@ be added without rewriting it:
   GUI code keep working.
 - If a design choice might block mods later, say so in your report.
 
+## Structured like vanilla (read this whatever your task is)
+
+Minecraft's own code is well structured: one class per concept, small focused files. Haste aims
+for the same, both for readability and because the Phase 2 mod layer maps Mixin targets onto
+these seams.
+
+- **One module per vanilla concept.** Each block entity renderer, entity renderer, particle
+  type, screen bridge and group of packet handlers lives in its own file, named after the
+  vanilla class it follows (`blockentity/chest.rs` for `ChestRenderer`, and so on). Shared
+  plumbing goes into its own module, not into the file that first needed it.
+- **Small files.** Source files stay within 600 lines and test files within 1000; tests live
+  in their own files (`tests.rs` or `tests/`), never inline in a big source file. CI enforces
+  this (`scripts/check-file-sizes.sh`): the files that were already larger are listed in
+  `scripts/large-files.txt` and may shrink but never grow. When a change would push a file over
+  its limit, put the new code into a new module named after the vanilla concept it follows
+  instead, and move the code you touch out of a listed file when you can. After a split, run
+  `scripts/check-file-sizes.sh --update` to lower the recorded sizes.
+- **Plan the module before writing the code.** A new feature starts as its own file (or a
+  directory of files) named after the vanilla class it ports, with shared plumbing in its own
+  module; never append a new feature to whichever file happened to be open.
+- **Split along responsibilities, never by size alone.** A split is a pure move: no behaviour
+  change in the same commit, so the move can be reviewed as a move.
+
 ## Performance is the product
 
 Haste exists to be faster than vanilla and than vanilla with Sodium; client performance comes
@@ -120,6 +143,19 @@ it is the top priority.
 - Write `NOTES.md`-worthy decisions and dead ends in your report; the lead copies them in.
 - Faithfulness, performance and mod-readiness rules are in the sections above; they apply to every task.
 - Absolute paths in reports. Cite `file:line` for anything you want the lead to look at.
+
+## Finding your way: `hx` (agents, read this)
+
+`scripts/hx` answers the questions agents otherwise spend most of their tokens on, in a few
+capped lines instead of raw `grep`/`cat` output (`hx help` lists everything):
+`hx vanilla LocalPlayer.tick` prints a vanilla method (following superclasses), `hx vanilla
+LocalPlayer --grep tick` outlines a class, `hx vgrep PATTERN [dir]` searches vanilla with each
+hit labelled `Class.method:line`, `hx ported Class.method` finds the Haste code that ports it,
+`hx map [dir]` and `hx outline FILE` show the tree and a file's items with line ranges, and
+`hx check` runs fmt, file sizes, clippy and the tests of the crates you changed, errors only.
+Headless workers are launched with `tools/worker/run.py` (lean prompt, `hx` on PATH, hooks that
+refuse wasteful commands and hold the session until `hx done` passes); `tools/worker/RULES.md`
+is their condensed copy of this file and must follow it when this file changes.
 
 ## Branches and merging
 
@@ -159,6 +195,8 @@ crates/haste-setup      Mojang downloads, datagen, config, singleplayer server, 
 crates/haste-testkit    oracle formats, replay, screenshot diff, bench harness (oracles)
 crates/haste-client     the `haste` binary; one module per workstream (lead + all)
 tools/recorder-mod      Fabric mod for the real game that records golden data (oracles)
+tools/hx                agent codebase tools (`scripts/hx`): vanilla lookup, outlines, checks (lead)
+tools/worker            headless worker launcher, its rules, hooks and cost accounting (lead)
 phase2/                 spike code for Phase 2: Mixin bridge, surface scanner, oracle mod
 cache/                  gitignored: jars, assets, reports, oracle dumps, JDK
 ```

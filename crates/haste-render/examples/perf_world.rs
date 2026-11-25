@@ -102,7 +102,18 @@ fn main() -> anyhow::Result<()> {
         started.elapsed().as_secs_f32()
     );
 
-    let dirty: Vec<SectionPos> = world.take_dirty_sections();
+    let dirty: Vec<SectionPos> = world
+        .take_dirty_sections()
+        .into_iter()
+        // the client's feed never submits an empty section it has not meshed before
+        // (nothing to draw, nothing to clear); the bench measures the same pipeline
+        .filter(|p| {
+            world
+                .chunk(p.chunk())
+                .and_then(|c| c.section(p.y))
+                .is_some_and(|s| !s.is_empty())
+        })
+        .collect();
     measure(
         &world,
         dirty,
@@ -163,6 +174,7 @@ fn measure(
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     // Mesh everything (drain uploads frame by frame) until the resident section count has not
     // changed for a second.

@@ -5,11 +5,29 @@ use std::sync::Arc;
 use haste_core::chunk::{BlockEntityData, ChunkData};
 use haste_core::game::DimensionInfo;
 use haste_core::view::{BlockView, DirtyTracker};
-use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
+use haste_core::{BlockPos, BlockStateId, ChunkPos, SectionPos};
 use haste_data::GameData;
 
-use crate::chunk::{Chunk, Section};
+use crate::chunk::{Chunk, Heightmap, Section};
+use crate::snapshot::{BorderCells, SectionSnapshot, SnapshotSection};
 use crate::world_error::WorldError;
+
+/// Heap bytes of the loaded world, by storage (see [`World::memory_stats`]).
+#[derive(Default, Debug, Clone, Copy)]
+pub struct WorldMemoryStats {
+    /// The chunk map and its `Chunk` structs.
+    pub chunks: u64,
+    /// Block + biome containers of all sections.
+    pub sections: u64,
+    /// Decoded heightmaps.
+    pub heightmaps: u64,
+    /// Sky/block light nibble arrays.
+    pub light: u64,
+    /// Block entities (NBT payloads plus map entries).
+    pub block_entities: u64,
+    /// Sections with at least one non-air block.
+    pub non_empty_sections: u64,
+}
 
 /// The loaded world of one dimension.
 pub struct World {
@@ -28,6 +46,9 @@ pub struct World {
     direct_bits: u8,
     /// Bits for direct-encoded biome containers: ceil(log2(synced biome registry size)).
     biome_bits: u8,
+    /// Vanilla `BiomeManager.biomeZoomSeed`: the hashed seed of the login/respawn spawn
+    /// info, which picks each block's biome cell (`BiomeManager.getBiome`).
+    biome_zoom_seed: i64,
 }
 
 impl World {
@@ -58,6 +79,7 @@ impl World {
             dirty_unloaded: Vec::new(),
             direct_bits,
             biome_bits,
+            biome_zoom_seed: 0,
         }
     }
 
@@ -68,6 +90,16 @@ impl World {
 
     pub fn dimension(&self) -> &DimensionInfo {
         &self.dim
+    }
+
+    /// The biome zoom seed (vanilla `BiomeManager.biomeZoomSeed`), 0 until the spawn info sets it.
+    pub fn biome_zoom_seed(&self) -> i64 {
+        self.biome_zoom_seed
+    }
+
+    /// Sets the biome zoom seed from the login or respawn spawn info's hashed seed.
+    pub fn set_biome_zoom_seed(&mut self, seed: i64) {
+        self.biome_zoom_seed = seed;
     }
 
     pub fn game_data(&self) -> &Arc<GameData> {
@@ -137,6 +169,7 @@ impl World {
         let chunk_pos = pos.chunk();
         let sec_y = pos.y >> 4;
         let direct_bits = self.direct_bits;
+        let blocks = &self.data.blocks;
         let Some(chunk) = self.chunks.get_mut(&chunk_pos.to_packed()) else {
             return;
         };
@@ -146,10 +179,45 @@ impl World {
         let lx = (pos.x & 15) as u8;
         let ly = (pos.y & 15) as u8;
         let lz = (pos.z & 15) as u8;
+        let old = section.get(lx, ly, lz);
+        let was_empty = section.block_count == 0;
         section.set(lx, ly, lz, state, direct_bits);
-        // a replaced block drops its block entity (the server resends one if the new
-        // block has one)
-        chunk.block_entities.remove(&pos);
+        let now_empty = section.block_count == 0;
+        // A replaced block drops its block entity (the server resends one if the new block
+        // has one); a state change of the same block keeps it (vanilla
+        // `LevelChunk.setBlockState`: removed only when `!oldState.is(newBlock)`).
+        if blocks.block_of(old) != blocks.block_of(state) {
+            chunk.block_entities.remove(&pos);
+        }
+        // vanilla `LevelChunk.setBlockState`: a section that flipped between empty and
+        // non-empty gains or loses its light layers (`updateSectionStatus`). Gaining them
+        // needs no work here (the engine materializes on write, and the absent stand-ins
+        // read the same values); losing them drops the arrays so reads flatten through to
+        // the sections above, and re-meshes the neighbourhood
+        // (`markSectionAndNeighborsAsAffected`).
+        if !was_empty && now_empty {
+            let idx = (sec_y - chunk.min_section) as usize;
+            chunk.light.sky[idx] = crate::light::SkyLight::Absent;
+            chunk.light.block[idx] = crate::light::NibbleArray::default();
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    for dz in -1..=1i32 {
+                        self.mark_dirty(SectionPos::new(
+                            chunk_pos.x + dx,
+                            sec_y + dy,
+                            chunk_pos.z + dz,
+                        ));
+                    }
+                }
+            }
+        }
+        // vanilla recomputes light for the changed block in the same frame
+        // (`LevelChunk.setBlockState` -> `checkBlock`, `ClientLevel.update` ->
+        // `runLightUpdates`); the server only sends border-chunk `light_update`s, so the
+        // client must do this itself
+        if crate::light::light_properties_differ(&self.data, old, state) {
+            crate::light::run_for_block(self, pos);
+        }
         // per axis, the section offsets of the block's 3x3x3 neighbourhood: {0} plus {-1}
         // when on the low border, {+1} when on the high border (at most 2 per axis)
         let offs = |l: u8| -> &[i32] {
@@ -213,6 +281,15 @@ impl World {
     /// mesher's smooth light samples the 3x3x3 block neighbourhood of each block, so a
     /// section's border blocks read light from the adjacent sections (diagonal ones too, in
     /// neighbouring chunks).
+    ///
+    /// The server only sends these for chunks on the *border* of a player's tracked area
+    /// (vanilla `ChunkHolder.broadcastChanges` sends `ClientboundLightUpdatePacket` to
+    /// `getPlayers(pos, true)` — `isChunkOnTrackedBorder`): block changes in interior chunks
+    /// arrive with no light update at all, because the vanilla client recomputes light
+    /// itself on every block change (`LevelChunk.setBlockState` -> `LevelLightEngine
+    /// .checkBlock`, run from `ClientLevel.update`). Haste does the same from `set_block`
+    /// (see `crate::light`); this path only matters for border chunks, where the packet's
+    /// values overwrite the locally computed (identical) ones.
     pub fn apply_light(&mut self, pos: ChunkPos, light: &haste_core::chunk::LightData) {
         if let Some(chunk) = self.chunks.get_mut(&pos.to_packed()) {
             chunk.apply_light(light);
@@ -251,12 +328,77 @@ impl World {
         }
     }
 
+    /// Replaces every section's biome container of the loaded chunk at `pos` with the
+    /// containers decoded from `data` (the `chunks_biomes` payload), the way vanilla's
+    /// `LevelChunk.replaceBiomes` does. Marks the 3x3 chunk columns dirty (biome tint).
+    /// No-op for an unloaded chunk.
+    pub fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
+        use crate::palette::{BiomeContainer, WireReader, BIOMES_PER_SECTION};
+        let key = pos.to_packed();
+        let Some(chunk) = self.chunks.get_mut(&key) else {
+            return;
+        };
+        let biome_bits = self.biome_bits;
+        let section_count = chunk.sections.len();
+        let mut r = WireReader::new(data);
+        for section in chunk.sections.iter_mut().take(section_count) {
+            match BiomeContainer::decode(&mut r, BIOMES_PER_SECTION, biome_bits) {
+                Ok(b) => section.biomes = b,
+                Err(_) => break,
+            }
+        }
+        for dx in -1..=1i32 {
+            for dz in -1..=1i32 {
+                self.mark_chunk_all_dirty(ChunkPos::new(pos.x + dx, pos.z + dz));
+            }
+        }
+    }
+
     pub fn chunk(&self, pos: ChunkPos) -> Option<&Chunk> {
         self.chunks.get(&pos.to_packed())
     }
 
+    /// The chunk containing `pos`, mutably. Unloaded -> None.
+    pub(crate) fn chunk_mut(&mut self, pos: ChunkPos) -> Option<&mut Chunk> {
+        self.chunks.get_mut(&pos.to_packed())
+    }
+
     pub fn loaded_chunks(&self) -> impl Iterator<Item = ChunkPos> + '_ {
         self.chunks.values().map(|c| c.pos)
+    }
+
+    /// Resident-world memory diagnostics (bytes): the chunk map's heap footprint split
+    /// into sections (blocks+biomes containers), heightmaps, light and block entities,
+    /// plus the number of non-empty sections. Counts live allocations (capacity of the
+    /// backing vectors), not allocator slack.
+    pub fn memory_stats(&self) -> WorldMemoryStats {
+        let mut stats = WorldMemoryStats {
+            chunks: self.chunks.len() as u64 * (std::mem::size_of::<Chunk>() as u64 + 16),
+            ..Default::default()
+        };
+        for chunk in self.chunks.values() {
+            stats.heightmaps += chunk
+                .heightmaps
+                .iter()
+                .map(|(_, h)| {
+                    h.longs.capacity() as u64 * 8 + std::mem::size_of::<Heightmap>() as u64
+                })
+                .sum::<u64>();
+            stats.block_entities += chunk
+                .block_entities
+                .values()
+                .map(|be| be.nbt.len() as u64 + std::mem::size_of::<BlockEntityData>() as u64 + 24)
+                .sum::<u64>();
+            for s in &chunk.sections {
+                stats.sections += s.memory_bytes();
+                if !s.is_empty() {
+                    stats.non_empty_sections += 1;
+                }
+            }
+            // Light: the layout's own accounting (see `ChunkLight::heap_bytes`).
+            stats.light += chunk.light.heap_bytes();
+        }
+        stats
     }
 
     /// Immutable copy of a section (plus 1-block border from neighbours and its light) for
@@ -324,7 +466,13 @@ impl World {
             }
         }
 
-        let sky = chunk.light.sky.get(idx as usize).cloned().flatten();
+        // An absent section is not all 15: it reads the bottom row of the nearest section
+        // above with data (vanilla: SkyLightSectionStorage.getLightValue flattens y), so
+        // the snapshot gets a stand-in repeating that row (one value when it is uniform).
+        let sky = match chunk.light.sky.get(idx as usize) {
+            Some(sky) if sky.is_storing() => sky.clone(),
+            _ => crate::sky_light::absent_section_light(chunk, idx as usize),
+        };
         let block_light = chunk
             .light
             .block
@@ -361,6 +509,11 @@ impl World {
         }
     }
 
+    /// `mark_dirty` for the light engine (crate-internal).
+    pub(crate) fn mark_dirty_section(&mut self, pos: SectionPos) {
+        self.mark_dirty(pos)
+    }
+
     // -- BlockView helpers --
 
     /// The chunk containing `pos`. Unloaded -> None.
@@ -391,13 +544,14 @@ impl BlockView for World {
     fn sky_light(&self, pos: BlockPos) -> u8 {
         match self.chunk_and_section(pos) {
             Some((c, _)) => {
-                let idx = (pos.y >> 4) - c.min_section;
-                c.light
-                    .sky
-                    .get(idx as usize)
-                    .and_then(|n| n.as_ref())
-                    .map(|n| n.get((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8))
-                    .unwrap_or(15)
+                let idx = ((pos.y >> 4) - c.min_section) as usize;
+                let (lx, ly, lz) = ((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8);
+                match c.light.sky.get(idx).and_then(|s| s.value(lx, ly, lz)) {
+                    Some(v) => v,
+                    // vanilla: SkyLightSectionStorage.getLightValue — a section with no
+                    // data layer reads the bottom row of the nearest layer above
+                    None => crate::sky_light::absent_value(c, idx, lx, lz),
+                }
             }
             None => 15,
         }
@@ -441,97 +595,6 @@ impl DirtyTracker for World {
         }
         out
     }
-}
-
-/// A section plus its six one-block border faces (from the six neighbours), light included.
-/// Cloning the containers is a deep copy; the `PalettedContainer`'s palette and data are cloned.
-#[derive(Clone)]
-pub struct SnapshotSection {
-    pub block_count: i16,
-    /// Fluid count from the server's section header (0: no fluids to mesh).
-    pub fluid_count: i16,
-    pub blocks: crate::palette::BlockContainer,
-    pub biomes: crate::palette::BiomeContainer,
-}
-
-/// Border faces of a snapshot, each 16x16 (or 16x16 for top/bottom), row-major in the loop
-/// order used to gather them (see `snapshot_section`).
-#[derive(Default, Clone)]
-pub struct BorderCells {
-    pub neg_x: Vec<BlockStateId>,
-    pub pos_x: Vec<BlockStateId>,
-    pub neg_y: Vec<BlockStateId>,
-    pub pos_y: Vec<BlockStateId>,
-    pub neg_z: Vec<BlockStateId>,
-    pub pos_z: Vec<BlockStateId>,
-}
-
-/// What meshing threads get: a section, its border, its light.
-pub struct SectionSnapshot {
-    pub pos: SectionPos,
-    pub section: SnapshotSection,
-    pub border: BorderCells,
-    pub sky: Option<crate::light::NibbleArray>,
-    pub block: crate::light::NibbleArray,
-}
-
-impl SectionSnapshot {
-    /// Block at (x, y, z) with x/y/z in -1..=16 (the section plus one-block border).
-    pub fn get(&self, x: i8, y: i8, z: i8) -> BlockStateId {
-        if (0..16).contains(&x) && (0..16).contains(&y) && (0..16).contains(&z) {
-            return self.section.blocks.get_block(x as u8, y as u8, z as u8);
-        }
-        let (face, i) = self.border_face_index(x, y, z);
-        match face {
-            Some(f) => f[i],
-            None => BlockStateId::AIR,
-        }
-    }
-
-    /// Sky light at (x, y, z) in 0..16 coords; outside returns 15 (no data => full sky).
-    pub fn sky_light(&self, x: u8, y: u8, z: u8) -> u8 {
-        self.sky.as_ref().map(|n| n.get(x, y, z)).unwrap_or(15)
-    }
-
-    pub fn block_light(&self, x: u8, y: u8, z: u8) -> u8 {
-        self.block.get(x, y, z)
-    }
-
-    fn border_face_index(&self, x: i8, y: i8, z: i8) -> (Option<&Vec<BlockStateId>>, usize) {
-        // The gather loops in `snapshot_section` define the index order:
-        // neg_x: y*16+z ; pos_x: y*16+z ; neg_z: y*16+x ; pos_z: y*16+x ; neg_y: z*16+x ; pos_y: z*16+x
-        let b = &self.border;
-        if x == -1 {
-            let i = (y as usize) * 16 + z as usize;
-            return (Some(&b.neg_x), i);
-        }
-        if x == 16 {
-            let i = (y as usize) * 16 + z as usize;
-            return (Some(&b.pos_x), i);
-        }
-        if z == -1 {
-            let i = (y as usize) * 16 + x as usize;
-            return (Some(&b.neg_z), i);
-        }
-        if z == 16 {
-            let i = (y as usize) * 16 + x as usize;
-            return (Some(&b.pos_z), i);
-        }
-        if y == -1 {
-            let i = (z as usize) * 16 + x as usize;
-            return (Some(&b.neg_y), i);
-        }
-        if y == 16 {
-            let i = (z as usize) * 16 + x as usize;
-            return (Some(&b.pos_y), i);
-        }
-        (None, 0)
-    }
-}
-
-/// Biome of the snapshot's section at cell coords (0..4).
-pub fn snapshot_biome(s: &SectionSnapshot, x: u8, y: u8, z: u8) -> BiomeId {
-    s.section.biomes.get_biome(x, y, z)
 }
 
 /// ceil(log2(n)), at least 1 (bit width of an id in `0..n`).

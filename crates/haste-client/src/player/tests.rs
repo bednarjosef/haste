@@ -48,7 +48,9 @@ fn spawned() -> (LocalPlayer, Vec<ServerboundPlay>) {
     tick(&mut p, &InputState::default());
     assert_eq!(
         names(&tick(&mut p, &InputState::default())),
-        ["accept", "loaded", "input", "status", "tick_end"]
+        // The teleport's position is reported by the first sendPosition (xLast untouched
+        // by the teleport), one tick after the accept.
+        ["accept", "loaded", "input", "pos", "tick_end"]
     );
     (p, out)
 }
@@ -133,6 +135,8 @@ fn names(out: &[ServerboundPlay]) -> Vec<&'static str> {
             ServerboundPlay::MovePlayerRot(_) => "rot",
             ServerboundPlay::MovePlayerStatusOnly(_) => "status",
             ServerboundPlay::ClientTickEnd(_) => "tick_end",
+            ServerboundPlay::PaddleBoat(_) => "paddle",
+            ServerboundPlay::MoveVehicle(_) => "move_vehicle",
             ServerboundPlay::AcceptTeleportation(_) => "accept",
             ServerboundPlay::PlayerLoaded(_) => "loaded",
             _ => "other",
@@ -144,7 +148,8 @@ fn names(out: &[ServerboundPlay]) -> Vec<&'static str> {
 fn first_teleport_accepts_one_tick_later_then_reports_loaded() {
     let mut p = LocalPlayer::with_entity(ME, GameMode::Survival);
     let mut out = Vec::new();
-    // Nothing is sent before a position arrives.
+    // Before a position arrives only ClientTickEnd leaves (vanilla `Minecraft.tick` sends it
+    // every tick a level exists, whatever the player's state).
     p.tick_with(
         &InputState::default(),
         &world(),
@@ -153,20 +158,22 @@ fn first_teleport_accepts_one_tick_later_then_reports_loaded() {
         None,
         &mut out,
     );
-    assert!(out.is_empty());
+    assert_eq!(names(&out), ["tick_end"]);
+    out.clear();
     // The teleport is applied at once, but the accept is not sent from the packet
     // handler: answering within microseconds of the join teleport races the server's
     // join bookkeeping ("moved too quickly! <spawn position>"). It waits one full tick.
     p.handle(&teleport(5, DVec3::new(1.5, 2.0, -3.5), 90.0, 0), &mut out);
     assert!(out.is_empty());
     assert!(p.has_position && !p.loaded);
-    // The tick the teleport arrived in sends nothing (movement waits for player_loaded).
-    assert!(tick(&mut p, &InputState::default()).is_empty());
+    // The tick the teleport arrived in sends nothing but ClientTickEnd (vanilla
+    // `Minecraft.tick` ends with it before `player_loaded`).
+    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
     assert!(!p.loaded);
     let out = tick(&mut p, &InputState::default());
     assert_eq!(
         names(&out),
-        ["accept", "loaded", "input", "status", "tick_end"]
+        ["accept", "loaded", "input", "pos_rot", "tick_end"]
     );
     match &out[0] {
         ServerboundPlay::AcceptTeleportation(a) => {
@@ -191,9 +198,9 @@ fn later_teleport_is_confirmed_by_the_accept_alone() {
         ),
         &mut out,
     );
-    // Nothing inline; the accept carries the resulting position one full tick later.
+    // Nothing inline; the accept carries the resulting position in the arrival tick (an
+    // in-play teleport does not wait: the server drops interactions while unconfirmed).
     assert!(out.is_empty());
-    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
     assert_eq!(
         names(&tick(&mut p, &InputState::default()))[..1],
         ["accept"]
@@ -231,8 +238,9 @@ fn position_reminder_every_twenty_ticks() {
             sent_at.push(t);
         }
     }
-    // The spawn teleport counts as a sent position, and `spawned()` spent one tick of it.
-    assert_eq!(sent_at, [19, 39]);
+    // The spawn teleport's position was sent by `spawned()` itself (xLast was untouched,
+    // so it reported at once and reset the reminder), so the next report is 20 ticks on.
+    assert_eq!(sent_at, [20, 40]);
 }
 
 #[test]
@@ -308,7 +316,8 @@ fn first_move_after_join_carries_the_server_position() {
     assert!(p.handle(&teleport(1, spawn, 0.0, 0), &mut out));
     assert!(out.is_empty());
     let floor = TestWorld::flat(-60, states::STONE);
-    // The tick the teleport arrived in: the accept is held for one full tick.
+    // The tick the teleport arrived in: the accept is held for one full tick; only the
+    // ClientTickEnd leaves (Minecraft.tick sends it before player_loaded too).
     let mut out = Vec::new();
     p.tick_with(
         &InputState::default(),
@@ -318,7 +327,8 @@ fn first_move_after_join_carries_the_server_position() {
         None,
         &mut out,
     );
-    assert!(out.is_empty());
+    assert_eq!(names(&out), ["tick_end"]);
+    out.clear();
     p.tick_with(
         &InputState::default(),
         &floor,
@@ -464,55 +474,116 @@ fn flight_turning_on_on_the_ground_jumps() {
     assert!((p.state.pos.y - 0.42).abs() < 1e-12);
 }
 
-/// Vanilla `LivingEntity.travelInAir`: with the chunk below not loaded the client skips gravity
-/// and pins the vertical movement to -0.1 (the 0.98 vertical drag on top of it) while the player
-/// is above the world's minimum; at or below the minimum it is 0.0.
+/// Vanilla `LocalPlayer.aiStep`: the sprint double tap of forward. A fresh press of forward
+/// while the player may start sprinting arms `sprintTriggerTime` (`options.sprintWindow`, default
+/// 7); a second fresh press inside the window sets sprinting, which the `player_command`
+/// START_SPRINTING reports.
 #[test]
-fn unloaded_chunk_below_falls_at_vanillas_rate() {
-    assert!((UNLOADED_CHUNK_FALL_SPEED + 0.098).abs() < 1.0e-8);
+fn sprint_double_tap_of_forward_starts_sprinting() {
+    let run = InputState {
+        forward: true,
+        ..Default::default()
+    };
     let (mut p, _) = spawned();
-    // One tick to settle on the floor after the spawn teleport.
+    // First press: arms the window only, no sprint yet.
+    let out = tick(&mut p, &run);
+    assert!(!names(&out).contains(&"command"));
+    assert!(!p.state.sprinting);
+    // Release, then a second press 2 ticks later: sprinting starts this tick.
     tick(&mut p, &InputState::default());
-    assert!(p.state.on_ground);
-    let w = Unloaded::new(-64);
-    let mut out = Vec::new();
-    p.tick_with(
-        &InputState::default(),
-        &w,
-        &TestShapes::default(),
-        &TestShapes::default(),
-        None,
-        &mut out,
-    );
-    assert_eq!(p.state.velocity.y, UNLOADED_CHUNK_FALL_SPEED);
-    assert!(!p.state.on_ground);
-    // Gravity stays skipped: the same step every tick, until the chunk is loaded again.
-    for _ in 0..3 {
-        p.tick_with(
-            &InputState::default(),
-            &w,
-            &TestShapes::default(),
-            &TestShapes::default(),
-            None,
-            &mut out,
-        );
+    tick(&mut p, &InputState::default());
+    let out = tick(&mut p, &run);
+    assert!(p.state.sprinting, "double tap starts sprinting");
+    match out
+        .iter()
+        .find(|p| matches!(p, ServerboundPlay::PlayerCommand(_)))
+    {
+        Some(ServerboundPlay::PlayerCommand(c)) => {
+            assert_eq!((c.entity_id, c.action), (ME.0, command::START_SPRINTING))
+        }
+        _ => panic!("no sprint command in {:?}", names(&out)),
     }
-    assert!((p.state.pos.y - 4.0 * UNLOADED_CHUNK_FALL_SPEED).abs() < 1.0e-12);
-
-    // At or below the world's minimum the vertical movement is 0.0: the player stays put.
-    let (mut p, mut out) = spawned();
-    assert!(p.handle(&teleport(2, DVec3::new(0.5, -65.0, 0.5), 0.0, 0), &mut out));
-    p.tick_with(
-        &InputState::default(),
-        &w,
-        &TestShapes::default(),
-        &TestShapes::default(),
-        None,
-        &mut out,
+    // Holding forward across ticks does not re-arm or start anything on its own: the window
+    // only sees fresh presses (vanilla reads `hasForwardImpulse` before `input.tick()`).
+    let (mut q, _) = spawned();
+    tick(&mut q, &run);
+    tick(&mut q, &run);
+    assert!(!q.state.sprinting, "a held key is not a double tap");
+    // Backward cancels the window: a double tap around it does not sprint.
+    let (mut b, _) = spawned();
+    tick(&mut b, &run);
+    tick(
+        &mut b,
+        &InputState {
+            back: true,
+            ..Default::default()
+        },
     );
-    assert_eq!(p.state.velocity.y, 0.0);
-    assert_eq!(p.state.pos.y, -65.0);
+    let out = tick(&mut b, &run);
+    assert!(!b.state.sprinting && !names(&out).contains(&"command"));
 }
+
+/// The sprint double-tap window runs out: a second press 6 idle ticks after the first only arms
+/// it again (vanilla counts `sprintTriggerTime` down before the keys are looked at; the window
+/// is 7, so the sixth idle tick leaves it at zero and that press only re-arms it).
+#[test]
+fn sprint_double_tap_window_runs_out_after_seven_ticks() {
+    let run = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    // 5 idle ticks between the presses: still inside; 6: outside.
+    for (idle, sprints) in [(5u32, true), (6, false)] {
+        let (mut p, _) = spawned();
+        tick(&mut p, &run);
+        for _ in 0..idle {
+            tick(&mut p, &InputState::default());
+        }
+        tick(&mut p, &run);
+        assert_eq!(p.state.sprinting, sprints, "idle {idle} ticks");
+    }
+}
+
+/// Vanilla `LocalPlayer.aiStep`'s hunger gate (`isSprintingPossible` ->
+/// `hasEnoughFoodToDoExhaustiveManoeuvres`, food > 6 or may-fly): a hungry player's double tap
+/// does not start the sprint.
+#[test]
+fn no_sprint_double_tap_when_hungry() {
+    let (mut p, _) = spawned();
+    p.food = 6;
+    let run = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    tick(&mut p, &run);
+    tick(&mut p, &InputState::default());
+    let out = tick(&mut p, &run);
+    assert!(!p.state.sprinting && !names(&out).contains(&"command"));
+}
+
+/// Vanilla `LocalPlayer.aiStep`: sneaking cancels the sprint window (`wasShiftKeyDown`).
+#[test]
+fn sneak_cancels_the_sprint_window() {
+    let run = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    let (mut p, _) = spawned();
+    tick(&mut p, &run);
+    tick(
+        &mut p,
+        &InputState {
+            sneak: true,
+            ..Default::default()
+        },
+    );
+    let out = tick(&mut p, &run);
+    assert!(!p.state.sprinting && !names(&out).contains(&"command"));
+}
+
+/// The unloaded-chunk sink and the level-load gate after a respawn have their own file:
+/// `tests/level_load.rs` (they share its stream-in world).
+mod level_load;
 
 #[test]
 fn abilities_packet_sets_flying_and_speed() {
@@ -741,11 +812,11 @@ fn respawn_waits_for_a_new_position() {
     ));
     assert!(!p.loaded && !p.has_position);
     assert_eq!(p.game_mode, GameMode::Creative);
-    assert!(tick(&mut p, &InputState::default()).is_empty());
+    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
     p.handle(&teleport(9, DVec3::new(0.5, 0.0, 0.5), 0.0, 0), &mut out);
     // The respawn teleport's accept and the new player_loaded go out one full tick later.
     assert!(!p.loaded);
-    assert!(tick(&mut p, &InputState::default()).is_empty());
+    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
     assert_eq!(
         names(&tick(&mut p, &InputState::default()))[..2],
         ["accept", "loaded"]
@@ -772,6 +843,9 @@ fn riding() -> LocalPlayer {
             y: 0.1,
             z: 0.0,
         },
+        None,
+        None,
+        None,
     );
     p
 }
@@ -782,8 +856,9 @@ fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
     let pose = vehicle_at(DVec3::new(10.0, 64.0, 10.0));
     let out = tick_riding(&mut p, &InputState::default(), Some(pose));
     assert_eq!(p.state.pos, DVec3::new(10.0, 64.1, 10.0));
-    // Rotation only; never a position packet.
-    assert_eq!(names(&out), ["tick_end"]);
+    // Rotation only; never a position packet. A passenger sends it every tick, even unchanged
+    // (`LocalPlayer.sendChanges`).
+    assert_eq!(names(&out), ["rot", "tick_end"]);
     // The vehicle moves: the passenger moves with it, and the camera follows (prev_pos
     // brackets the tick like always).
     let out = tick_riding(
@@ -795,7 +870,7 @@ fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
     assert_eq!(p.prev_pos, DVec3::new(10.0, 64.1, 10.0));
     let (eye, _, _) = p.camera(0.5);
     assert!((eye.x - 10.5).abs() < 1e-9, "{eye:?}");
-    assert_eq!(names(&out), ["tick_end"]);
+    assert_eq!(names(&out), ["rot", "tick_end"]);
     // An untracked vehicle leaves the passenger where it was.
     tick_riding(&mut p, &InputState::default(), None);
     assert_eq!(p.state.pos, DVec3::new(11.0, 64.1, 10.0));
@@ -813,6 +888,9 @@ fn the_seat_turns_with_the_vehicle() {
             y: 0.0,
             z: 0.0,
         },
+        None,
+        None,
+        None,
     );
     let pose = VehiclePose {
         pos: DVec3::new(10.0, 64.0, 10.0),
@@ -840,13 +918,14 @@ fn a_passenger_looks_freely_and_sends_rotation_only() {
     // The look changed: one rotation packet, no position (the keys have not changed, so no
     // player_input with it).
     assert_eq!(names(&out), ["rot", "tick_end"]);
-    // Same look again: nothing but the tick end.
+    // Same look again: still a rotation packet — LocalPlayer.sendChanges sends
+    // MovePlayerPacket.Rot every tick while riding, changed or not.
     let out = tick_riding(
         &mut p,
         &look,
         Some(vehicle_at(DVec3::new(10.0, 64.0, 10.0))),
     );
-    assert_eq!(names(&out), ["tick_end"]);
+    assert_eq!(names(&out), ["rot", "tick_end"]);
 }
 
 #[test]
@@ -873,6 +952,143 @@ fn sneak_while_riding_sets_the_shift_flag_in_player_input() {
     assert_eq!(p.vehicle(), Some(EntityId(9)));
 }
 
+// ---------------------------------------------------------------------------
+// Riding a boat: the vehicle we steer (vanilla `LocalPlayer.rideTick`).
+// ---------------------------------------------------------------------------
+
+/// The boat's box, from its `EntityType`'s `sized(1.375F, 0.5625F)`.
+const BOAT_DIMS: (f32, f32) = (1.375, 0.5625);
+
+/// Open water the boat floats on: a 17x17 pool of source water at y = 63.
+fn pool() -> TestWorld {
+    let mut world = TestWorld::new();
+    world.fill((-8, 63, -8), (8, 63, 8), states::WATER_SOURCE);
+    world
+}
+
+/// The water surface, as the status check stores it (vanilla's float `y + getHeight`).
+fn surface() -> f64 {
+    (63.0f32 + 8.0 / 9.0) as f64
+}
+
+/// Mounted on a boat floating on `pool`'s water, at the seat vanilla's attachment points give
+/// the first passenger of an oak boat.
+fn in_the_boat(world: &TestWorld) -> LocalPlayer {
+    let shapes = TestShapes::default();
+    let env = crate::boat::BoatEnv {
+        world,
+        shapes: &shapes,
+        blocks: &shapes,
+    };
+    let surface = surface();
+    let boat = crate::boat::Boat::new(
+        DVec3::new(0.5, surface - 0.65 * f64::from(BOAT_DIMS.1), 0.5),
+        0.0,
+        BOAT_DIMS,
+        &env,
+    );
+    let (mut p, _) = spawned();
+    let seat = haste_entity::passenger_seat(haste_entity::riding::SeatQuery {
+        vehicle_type: "oak_boat",
+        vehicle_dims: BOAT_DIMS,
+        seat: 0,
+        passengers: 1,
+        passenger: haste_entity::riding::PassengerKind::Player,
+        passenger_type: "player",
+    });
+    p.set_vehicle(Some(EntityId(9)), seat, Some(boat), None, None);
+    p
+}
+
+/// One tick of a passenger, against `world`.
+fn tick_paddling(
+    p: &mut LocalPlayer,
+    input: &InputState,
+    world: &TestWorld,
+) -> Vec<ServerboundPlay> {
+    let mut out = Vec::new();
+    let shapes = TestShapes::default();
+    p.tick_with(input, world, &shapes, &shapes, None, &mut out);
+    out
+}
+
+/// The paddled boat is simulated on our side (vanilla's `AbstractBoat.tick` for a
+/// client-authoritative instance): the keys our `rideTick` hands it are the ones the next tick's
+/// `controlBoat` uses, the boat sends `paddle_boat`, and after the passenger's rotation the
+/// `move_vehicle` carries the boat's own simulation to the server.
+#[test]
+fn steering_a_boat_sends_paddle_boat_and_move_vehicle() {
+    let world = pool();
+    let mut p = in_the_boat(&world);
+    let forward = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    let out = tick_paddling(&mut p, &forward, &world);
+    assert_eq!(
+        names(&out),
+        ["paddle", "input", "rot", "move_vehicle", "tick_end"]
+    );
+    // First tick: the keys we came aboard with were empty, so the paddles do not turn yet.
+    let paddle = out.iter().find_map(|p| match p {
+        ServerboundPlay::PaddleBoat(p) => Some((p.left, p.right)),
+        _ => None,
+    });
+    assert_eq!(paddle, Some((false, false)));
+    // The second tick paddles: both paddles turn and the boat has started forward.
+    let out = tick_paddling(&mut p, &forward, &world);
+    assert_eq!(names(&out), ["paddle", "rot", "move_vehicle", "tick_end"]);
+    match &out[0] {
+        ServerboundPlay::PaddleBoat(p) => assert!(p.left && p.right),
+        other => panic!("expected paddle_boat, got {other:?}"),
+    }
+    let boat = p.boat().expect("still steering the boat");
+    assert!(boat.delta.z > 0.0, "the boat paddled: {}", boat.delta.z);
+    // The rider sits at the seat of the boat we are paddling, not at the server's copy of it.
+    // (A boat's first passenger has no sideways offset, and its seat height is the boat's
+    // `rideHeight` minus the player's own vehicle attachment point.)
+    assert!((p.state.pos.x - boat.pos.x).abs() < 1.0e-9);
+    assert!((p.state.pos.z - boat.pos.z).abs() < 1.0e-9);
+    assert!(
+        (p.state.pos.y - (boat.pos.y + p.seat().y)).abs() < 1.0e-9,
+        "seat height: {} vs {}",
+        p.state.pos.y,
+        boat.pos.y + p.seat().y
+    );
+    // The `move_vehicle` is the boat's own pose (its pitch is zero: a boat never pitches).
+    match &out[2] {
+        ServerboundPlay::MoveVehicle(m) => {
+            assert_eq!(m.pos, boat.pos);
+            assert_eq!(m.yaw, boat.yaw);
+            assert_eq!(m.pitch, 0.0);
+        }
+        other => panic!("expected move_vehicle, got {other:?}"),
+    }
+}
+
+/// The seat follows the boat the paddles push, tick by tick, and the boat keeps its own
+/// registration in the world (the packet that carries it says where the boat is now).
+#[test]
+fn the_seat_follows_the_paddled_boat() {
+    let world = pool();
+    let mut p = in_the_boat(&world);
+    let forward = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    let start = p.state.pos;
+    for _ in 0..20 {
+        tick_paddling(&mut p, &forward, &world);
+    }
+    // The boat paddled forward; the rider left with it (the seat is fixed in the boat's frame).
+    assert!(p.state.pos.z > start.z + 0.4, "{}", p.state.pos.z);
+    assert!(
+        (p.state.pos.x - start.x).abs() < 1.0e-9,
+        "{}",
+        p.state.pos.x
+    );
+}
+
 #[test]
 fn dismount_resumes_physics_from_the_seat() {
     let mut p = riding();
@@ -884,7 +1100,7 @@ fn dismount_resumes_physics_from_the_seat() {
     assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
     // Dismount: gravity takes over from the seat position. The first tick after it builds
     // velocity (the ride zeroed it); the fall starts the tick after.
-    p.set_vehicle(None, SeatPoint::ZERO);
+    p.set_vehicle(None, SeatPoint::ZERO, None, None, None);
     tick_riding(&mut p, &InputState::default(), None);
     assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
     let out = tick_riding(&mut p, &InputState::default(), None);
@@ -900,6 +1116,252 @@ fn dismount_resumes_physics_from_the_seat() {
             ServerboundPlay::MovePlayerPos(_) | ServerboundPlay::MovePlayerPosRot(_)
         )
     }));
+}
+
+// ---------------------------------------------------------------------------
+// Riding a horse: the steered mount of the horse family (vanilla `AbstractHorse`).
+// ---------------------------------------------------------------------------
+
+/// The horse's box, from its `EntityType`'s `sized(1.3964844F, 1.6F)`.
+const HORSE_DIMS: (f32, f32) = (1.396_484_4, 1.6);
+
+/// One tick of a passenger, against `world`.
+fn tick_riding_world(
+    p: &mut LocalPlayer,
+    input: &InputState,
+    world: &TestWorld,
+) -> Vec<ServerboundPlay> {
+    let mut out = Vec::new();
+    let shapes = TestShapes::default();
+    p.tick_with(input, world, &shapes, &shapes, None, &mut out);
+    out
+}
+
+/// Mounted on a saddled horse standing on the flat stone floor (top at y = 0), at the seat
+/// vanilla's attachment points give the first passenger of a horse.
+fn on_the_horse() -> (LocalPlayer, TestWorld) {
+    let world = TestWorld::flat(0, states::STONE);
+    let horse = crate::horse::Horse::new(
+        DVec3::new(0.5, 0.0, 0.5),
+        0.0,
+        HORSE_DIMS,
+        crate::horse::DEFAULT_MOVEMENT_SPEED,
+        crate::horse::DEFAULT_JUMP_STRENGTH,
+        crate::horse::DEFAULT_GRAVITY,
+    );
+    let (mut p, _) = spawned();
+    let seat = haste_entity::passenger_seat(haste_entity::riding::SeatQuery {
+        vehicle_type: "horse",
+        vehicle_dims: HORSE_DIMS,
+        seat: 0,
+        passengers: 1,
+        passenger: haste_entity::riding::PassengerKind::Player,
+        passenger_type: "player",
+    });
+    p.set_vehicle(Some(EntityId(9)), seat, None, Some(horse), None);
+    (p, world)
+}
+
+/// The steered horse is simulated on our side (vanilla's `AbstractHorse` tick for a
+/// client-authoritative instance): riding forward sends `move_vehicle` with the horse's own
+/// simulated pose each tick, and the seat follows it.
+#[test]
+fn steering_a_horse_sends_move_vehicle_of_its_simulation() {
+    let (mut p, world) = on_the_horse();
+    let forward = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    // The first tick: the horse has not got our keys yet (they arrive with this tick, one tick
+    // late, like the boat's paddles), so it stands still but still reports its pose.
+    let out = tick_riding_world(&mut p, &forward, &world);
+    assert_eq!(names(&out), ["input", "rot", "move_vehicle", "tick_end"]);
+    let horse = p.horse().expect("still steering the horse");
+    assert!(horse.delta.z.abs() < 1.0e-9, "{}", horse.delta.z);
+    // The second tick rides.
+    let out = tick_riding_world(&mut p, &forward, &world);
+    assert_eq!(names(&out), ["rot", "move_vehicle", "tick_end"]);
+    match &out[1] {
+        ServerboundPlay::MoveVehicle(m) => {
+            assert_eq!(m.pos, p.horse().unwrap().pos);
+            assert_eq!(m.yaw, p.horse().unwrap().yaw);
+            assert!(m.pos.z > 0.5, "the horse walked: {}", m.pos.z);
+        }
+        other => panic!("expected move_vehicle, got {other:?}"),
+    }
+    // The rider sits at the seat of the horse we steer.
+    let horse = p.horse().unwrap();
+    assert!((p.state.pos.x - horse.pos.x).abs() < 1.0e-9);
+    assert!((p.state.pos.y - (horse.pos.y + p.seat().y)).abs() < 1.0e-9);
+    assert!((p.state.pos.z - horse.pos.z).abs() < 1.0e-9);
+}
+
+/// Holding jump charges the mount's jump (vanilla `LocalPlayer.aiStep`'s `jumpRidingTicks`
+/// series); releasing it sends the `player_command` START_RIDING_JUMP with the charge, and the
+/// horse fires the jump on its next ground tick.
+#[test]
+fn holding_and_releasing_jump_charges_and_sends_the_riding_jump() {
+    let (mut p, world) = on_the_horse();
+    let jump = InputState {
+        jump: true,
+        ..Default::default()
+    };
+    // Press: the charge starts empty. Tick two climbs to 0.1 (vanilla counts the press tick).
+    tick_riding_world(&mut p, &jump, &world);
+    assert_eq!(p.jump_riding_scale(), 0.0);
+    tick_riding_world(&mut p, &jump, &world);
+    assert!((p.jump_riding_scale() - 0.1).abs() < 1.0e-6);
+    for _ in 0..3 {
+        tick_riding_world(&mut p, &jump, &world);
+    }
+    assert!((p.jump_riding_scale() - 0.4).abs() < 1.0e-6);
+    // Release: the START_RIDING_JUMP carries the floor of the scale in percent.
+    let out = tick_riding_world(&mut p, &InputState::default(), &world);
+    let command = out.iter().find_map(|p| match p {
+        ServerboundPlay::PlayerCommand(c) => Some(c),
+        _ => None,
+    });
+    let c = command.expect("a riding jump command");
+    assert_eq!(c.action, command::START_RIDING_JUMP);
+    assert_eq!(c.jump_boost, 40);
+    // The horse fires the charged jump on its next tick (the scale is the pending 0.4 + 0.4 x
+    // 40/90).
+    tick_riding_world(&mut p, &InputState::default(), &world);
+    let horse = p.horse().unwrap();
+    assert!(!horse.on_ground, "the horse jumped: {}", horse.pos.y);
+    // The scale itself outlives the release (vanilla keeps it until the ten-tick lockout
+    // counts up to zero, so the HUD bar drains rather than vanishes).
+    assert_eq!(p.jump_riding_scale(), 0.4);
+    for _ in 0..10 {
+        tick_riding_world(&mut p, &InputState::default(), &world);
+    }
+    assert_eq!(p.jump_riding_scale(), 0.0);
+    // A fresh press charges from zero again.
+    tick_riding_world(&mut p, &jump, &world);
+    tick_riding_world(&mut p, &jump, &world);
+    assert!((p.jump_riding_scale() - 0.1).abs() < 1.0e-6);
+}
+
+/// A new mount starts uncharged, and a dismount clears the simulation (the horse keeps its
+/// server-driven position again).
+#[test]
+fn a_dismount_clears_the_horse_simulation() {
+    let (mut p, world) = on_the_horse();
+    let jump = InputState {
+        jump: true,
+        ..Default::default()
+    };
+    tick_riding_world(&mut p, &jump, &world);
+    tick_riding_world(&mut p, &jump, &world);
+    assert!(p.jump_riding_scale() > 0.0);
+    p.set_vehicle(None, SeatPoint::ZERO, None, None, None);
+    assert!(p.horse().is_none());
+    assert_eq!(p.jump_riding_scale(), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Riding a pig with a carrot on a stick (vanilla `Pig`).
+// ---------------------------------------------------------------------------
+
+/// The pig's box, from its `EntityType`'s `sized(0.9F, 0.9F)`.
+const PIG_DIMS: (f32, f32) = (0.9, 0.9);
+
+/// Mounted on a saddled pig standing on the flat stone floor, holding a carrot on a stick
+/// (item index 42, marked as a steer item) in the main hand.
+fn on_the_pig() -> (LocalPlayer, TestWorld) {
+    let world = TestWorld::flat(0, states::STONE);
+    let pig = crate::pig::Pig::new(
+        DVec3::new(0.5, 0.0, 0.5),
+        0.0,
+        PIG_DIMS,
+        crate::pig::DEFAULT_MOVEMENT_SPEED,
+        crate::horse::DEFAULT_GRAVITY,
+    );
+    let (mut p, _) = spawned();
+    let seat = haste_entity::passenger_seat(haste_entity::riding::SeatQuery {
+        vehicle_type: "pig",
+        vehicle_dims: PIG_DIMS,
+        seat: 0,
+        passengers: 1,
+        passenger: haste_entity::riding::PassengerKind::Player,
+        passenger_type: "player",
+    });
+    p.set_vehicle(
+        Some(EntityId(9)),
+        seat,
+        None,
+        None,
+        Some(crate::item_based_steering::ItemSteered::Pig(pig)),
+    );
+    // The carrot on a stick in the main hand, and the steer-item set that names it.
+    let stick = haste_core::RegistryIndex(42);
+    p.int.steer_items = Some(
+        [(
+            stick,
+            crate::item_based_steering::SteerStick::CarrotOnAStick,
+        )]
+        .into_iter()
+        .collect(),
+    );
+    p.int.hotbar[0] = haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(stick),
+        components_raw: Default::default(),
+    };
+    (p, world)
+}
+
+/// The pig walks forward on its own while the rider holds the carrot on a stick
+/// (`Pig.getRiddenInput` is a constant full forward): our simulation drives the seat and the
+/// `move_vehicle`, and putting the stick away stands it down (the server simulates again).
+#[test]
+fn a_pig_walks_while_the_carrot_stick_is_held() {
+    let (mut p, world) = on_the_pig();
+    let hold = InputState::default();
+    // The pig has no look yet (it arrives one tick late, like the horse's input). The
+    // passenger's rotation goes before the vehicle's move (LocalPlayer.sendChanges sends it
+    // every tick while riding).
+    let out = tick_riding_world(&mut p, &hold, &world);
+    assert_eq!(names(&out), ["rot", "move_vehicle", "tick_end"]);
+    let out = tick_riding_world(&mut p, &hold, &world);
+    let pig = p.pig().expect("still steering the pig");
+    assert!(pig.delta.z > 0.0, "the pig walked: {}", pig.delta.z);
+    match &out[1] {
+        ServerboundPlay::MoveVehicle(m) => {
+            assert_eq!(m.pos, p.pig().unwrap().pos);
+            assert!(m.pos.z > 0.5, "the pig moved: {}", m.pos.z);
+        }
+        other => panic!("expected move_vehicle, got {other:?}"),
+    }
+    // The rider sits at the seat of the pig we steer.
+    let pig = p.pig().unwrap();
+    assert!((p.state.pos.z - pig.pos.z).abs() < 1.0e-9);
+    // Putting the stick away (an empty hotbar slot): our simulation stands down, the pig
+    // keeps whatever the server says about it.
+    p.held_slot = 1;
+    let before = p.pig().unwrap().pos;
+    for _ in 0..5 {
+        tick_riding_world(&mut p, &hold, &world);
+    }
+    assert_eq!(p.pig().unwrap().pos, before, "the pig stood down");
+}
+
+/// `LivingEntity.isHolding` looks at both hands: the carrot on a stick in the off hand steers
+/// the pig too.
+#[test]
+fn the_carrot_stick_in_the_off_hand_steers_the_pig() {
+    let (mut p, world) = on_the_pig();
+    p.int.offhand = p.int.hotbar[0].clone();
+    p.held_slot = 1;
+    let hold = InputState::default();
+    tick_riding_world(&mut p, &hold, &world);
+    let out = tick_riding_world(&mut p, &hold, &world);
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, ServerboundPlay::MoveVehicle(_))),
+        "the off-hand stick steers"
+    );
+    assert!(p.pig().unwrap().pos.z > 0.5, "the pig walked");
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +1412,57 @@ fn jump_in_the_air_with_a_glider_starts_falling_flying() {
     assert!((p.eye_height() - 0.4).abs() < 1e-6, "{}", p.eye_height());
     // The glide already moves this tick (it sinks from the look-ahead pitch 0).
     assert!(p.state.pos.y < 100.0, "{}", p.state.pos);
+}
+
+/// Within one tick, `LocalPlayer.sendChanges` sends the input packet after `aiStep` — whose
+/// START_FALL_FLYING and abilities toggle went out first — and before the sprint command and
+/// the movement (`Minecraft.tick`'s order: aiStep, then the player's sendChanges).
+#[test]
+fn the_input_packet_follows_ai_step_within_the_tick() {
+    let (mut p, _) = spawned();
+    equip_glider(&mut p, 42);
+    airborne(&mut p);
+    let out = names(&tick(
+        &mut p,
+        &InputState {
+            jump: true,
+            forward: true,
+            ..Default::default()
+        },
+    ));
+    // The fresh keys make this a jump-glide tick with an input change.
+    let fall_flying = out
+        .iter()
+        .position(|n| *n == "command")
+        .expect("START_FALL_FLYING");
+    let input = out.iter().position(|n| *n == "input").expect("input");
+    let movement = out
+        .iter()
+        .position(|n| matches!(*n, "pos" | "pos_rot" | "rot"))
+        .expect("movement");
+    assert!(fall_flying < input, "{out:?}");
+    assert!(input < movement, "{out:?}");
+}
+
+/// `Minecraft.tick` ends with ClientTickEnd every tick a level exists — before the player
+/// is loaded, and with a screen open (the earlier ticks of `spawned` and the login-waiting
+/// tests above cover the loaded case).
+#[test]
+fn client_tick_end_flows_before_the_player_is_loaded() {
+    let mut p = LocalPlayer::with_entity(ME, GameMode::Survival);
+    let mut out = Vec::new();
+    // No position yet: only the tick end.
+    for _ in 0..3 {
+        p.tick_with(
+            &InputState::default(),
+            &world(),
+            &TestShapes::default(),
+            &TestShapes::default(),
+            None,
+            &mut out,
+        );
+    }
+    assert_eq!(names(&out), ["tick_end", "tick_end", "tick_end"]);
 }
 
 #[test]
@@ -1031,4 +1544,124 @@ fn landing_ends_the_glide_and_the_pose() {
         "vanilla `LivingEntity.travelFallFlying`"
     );
     assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
+}
+
+#[test]
+fn the_swap_key_ignores_damage_but_not_count_or_other_components() {
+    // `ItemStack.matchesIgnoringComponents` with `ignoreSwapAnimation`: a different count, a
+    // different custom name or a damage component appearing is a different stack (the hand
+    // dips); a different damage value on the same stack is not.
+    use haste_protocol::wire::components::{ComponentPatch, ItemComponent};
+    let stack = |count: i32| haste_core::entity::ItemStackData {
+        count,
+        item: Some(haste_core::RegistryIndex(3)),
+        components_raw: Default::default(),
+    };
+    let patch = |added: Vec<ItemComponent>| ComponentPatch {
+        added,
+        removed: Vec::new(),
+    };
+    let plain = interact::swap_key(&stack(1), &patch(vec![]));
+    assert_ne!(plain, interact::swap_key(&stack(2), &patch(vec![])));
+    let worn = interact::swap_key(&stack(1), &patch(vec![ItemComponent::Damage(5)]));
+    assert_ne!(plain, worn, "a damage component appearing counts");
+    assert_eq!(
+        worn,
+        interact::swap_key(&stack(1), &patch(vec![ItemComponent::Damage(9)])),
+        "its value does not"
+    );
+    assert_ne!(
+        plain,
+        interact::swap_key(&stack(1), &patch(vec![ItemComponent::RepairCost(1)]))
+    );
+    assert_ne!(
+        plain,
+        interact::swap_key(
+            &stack(1),
+            &ComponentPatch {
+                added: vec![],
+                removed: vec!["minecraft:food".into()],
+            }
+        )
+    );
+}
+
+/// Each animal answers to its own stick (`Pig.getControllingPassenger` names the carrot on a
+/// stick, `Strider`'s the warped fungus on a stick): a pig ridden with a warped fungus on a
+/// stick is not ours, so it follows the server and no `move_vehicle` goes out.
+#[test]
+fn a_pig_ignores_the_warped_fungus_on_a_stick() {
+    let (mut p, world) = on_the_pig();
+    let stick = p.int.hotbar[0].item.expect("the stick");
+    p.int.steer_items = Some(
+        [(
+            stick,
+            crate::item_based_steering::SteerStick::WarpedFungusOnAStick,
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let hold = InputState::default();
+    for _ in 0..3 {
+        let out = tick_riding_world(&mut p, &hold, &world);
+        assert!(
+            !out.iter()
+                .any(|o| matches!(o, ServerboundPlay::MoveVehicle(_))),
+            "not ours: {:?}",
+            names(&out)
+        );
+    }
+}
+
+/// The player's own column is sand at the feet and head with a free east neighbour, so
+/// `LocalPlayer.moveTowardsClosestSpace` must push east.
+fn sand_cell() -> TestWorld {
+    let mut w = TestWorld::new();
+    for (x, z) in [(0, 0), (-1, 0), (0, -1), (0, 1)] {
+        w.set(x, 0, z, states::SAND).set(x, 1, z, states::SAND);
+    }
+    w
+}
+
+fn player_in_sand(mode: GameMode) -> LocalPlayer {
+    let mut p = LocalPlayer::with_entity(ME, mode);
+    p.set_attribute_ids(ids());
+    p.state.pos = DVec3::new(0.5, 0.0, 0.5);
+    p.has_position = true;
+    p.loaded = true;
+    p
+}
+
+#[test]
+fn a_suffocating_block_pushes_the_player_east() {
+    let world = sand_cell();
+    let shapes = TestShapes::default();
+    let mut p = player_in_sand(GameMode::Survival);
+    let mut out = Vec::new();
+    p.tick_with(
+        &InputState::default(),
+        &world,
+        &shapes,
+        &shapes,
+        None,
+        &mut out,
+    );
+    assert!(p.state.pos.x > 0.5, "pushed east: {}", p.state.pos.x);
+}
+
+#[test]
+fn a_spectator_is_not_pushed_out_of_suffocating_blocks() {
+    let world = sand_cell();
+    let shapes = TestShapes::default();
+    let mut p = player_in_sand(GameMode::Spectator);
+    let mut out = Vec::new();
+    p.tick_with(
+        &InputState::default(),
+        &world,
+        &shapes,
+        &shapes,
+        None,
+        &mut out,
+    );
+    assert_eq!(p.state.pos.x, 0.5, "noPhysics: no push");
 }

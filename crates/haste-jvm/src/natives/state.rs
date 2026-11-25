@@ -26,6 +26,25 @@ pub(crate) extern "system" fn permission_level<'l>(_env: EnvUnowned<'l>, _c: JCl
     with_state(|s| jint::from(s.permission_level))
 }
 
+/// The global block state id the client's world has at a position (-1 unknown): the block
+/// entities the screens edit are built from it, like vanilla's chunks build them from the
+/// block state (`LevelChunk.setBlockState` -> `EntityBlock.newBlockEntity(pos, state)`).
+/// The client records the states of the positions whose entity packets it forwards (see
+/// `GameState::block_states`).
+pub(crate) extern "system" fn block_state<'l>(
+    _env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    x: jint,
+    y: jint,
+    z: jint,
+) -> jint {
+    with_state(|s| {
+        s.block_states
+            .get(&[x, y, z])
+            .map_or(-1, |id| jint::from(*id))
+    })
+}
+
 pub(crate) extern "system" fn game_mode<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>) -> jint {
     with_state(|s| s.game_mode as jint)
 }
@@ -123,6 +142,25 @@ pub(crate) extern "system" fn resource_packs_changed<'l>(
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// The cooldown percent of an item's cooldown group (vanilla
+/// `GuiGraphicsExtractor.itemCooldown` reading `player.getCooldowns().getCooldownPercent`)
+/// from the snapshot the client publishes per tick; `group` is the stack's group as Java
+/// resolved it (`ItemCooldowns.getCooldownGroup`), `partial` the frame's partial tick.
+pub(crate) extern "system" fn item_cooldown<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    group: JString<'l>,
+    partial: f32,
+) -> f32 {
+    env.with_env(|env| -> jni::errors::Result<f32> {
+        let group = group.try_to_string(env)?;
+        Ok(crate::item_cooldowns::item_cooldown_percent(
+            &group, partial,
+        ))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Copies the primitive player/debug state into Java's mirror arrays (one call per frame and tick).
 pub(crate) extern "system" fn mirror<'l>(
     mut env: EnvUnowned<'l>,
@@ -151,6 +189,16 @@ pub(crate) extern "system" fn debug_text<'l>(
 
 pub(crate) extern "system" fn request_disconnect<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>) {
     with_state(|s| s.disconnect_requested = true);
+}
+
+/// The player answered the server resource pack prompt (vanilla's
+/// `PackConfirmScreen` callback).
+pub(crate) extern "system" fn pack_prompt_answered<'l>(
+    _env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    accepted: jboolean,
+) {
+    with_state(|s| s.pack_prompt_answer = Some(accepted));
 }
 
 pub(crate) extern "system" fn request_join<'l>(

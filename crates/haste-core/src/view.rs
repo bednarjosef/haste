@@ -42,6 +42,13 @@ pub trait BlockPhysics {
     fn is_air(&self, state: BlockStateId) -> bool;
     /// Opaque full cube (vanilla `isSolidRender`): occludes neighbours' faces and light.
     fn is_opaque_full(&self, state: BlockStateId) -> bool;
+    /// Vanilla `BlockState.isSuffocating`: the state suffocates an entity whose box is inside it
+    /// (`LocalPlayer.suffocatesAt` -> `Level.collidesWithSuffocatingBlock` uses it to push the
+    /// player out of blocks). Defaults to false (no push-out).
+    fn is_suffocating(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
 
     // Block identity for the movement effects (vanilla `Block.entityInside` blocks,
     // `Block.getBounceRestitution`, `FluidState.getFlow`). Implementors answer from their
@@ -68,6 +75,18 @@ pub trait BlockPhysics {
     }
     /// Honey block: slide slowdown on its sides (`HoneyBlock.entityInside`).
     fn is_honey(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// Bubble column: pushes entities up or down depending on the `drag` property
+    /// (`BubbleColumnBlock.entityInside` -> `Entity.handleOnInside/OnAboveBubbleColumn`).
+    fn is_bubble_column(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// Whether a bubble column drags down (magma) rather than pushes up (soul sand):
+    /// the block state's `drag` property (`BlockStateProperties.DRAG`).
+    fn bubble_column_drag_down(&self, state: BlockStateId) -> bool {
         let _ = state;
         false
     }

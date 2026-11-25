@@ -15,5 +15,7 @@ click left 330 90
 type stone
 wait 10
 screenshot creative-search
-key E
+# Escape, not E: with the search box focused vanilla types the E into it
+# (CreativeModeInventoryScreen.keyPressed lets only Escape through to the screen).
+key Escape
 wait_until screen_closed

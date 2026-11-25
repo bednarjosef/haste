@@ -32,6 +32,10 @@ jobs:
           fetch-depth: 0
       - name: No personal data (paths, emails, commit identities)
         run: scripts/check-no-personal.sh
+      - name: File sizes (small files, one module per vanilla concept)
+        run: scripts/check-file-sizes.sh
+      - name: Agent tools (hx parsers and worker hooks)
+        run: python3 -m unittest discover -s tools/hx
       - name: Install Rust (pinned by rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2

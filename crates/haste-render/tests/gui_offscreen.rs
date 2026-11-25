@@ -200,6 +200,7 @@ fn frame(items: &[(RegistryIndex, &str)]) -> GuiFrame {
             x,
             y: 53,
             count: 1,
+            foil: Default::default(),
         });
         c.push(text(x + 11, 62, "64", 0xFFFF_FFFF, true));
     }
@@ -210,6 +211,7 @@ fn frame(items: &[(RegistryIndex, &str)]) -> GuiFrame {
         width: W,
         height: H,
         cursor: None,
+        blur_after: -1,
     }
 }
 
@@ -278,6 +280,7 @@ fn gui_frame_offscreen() {
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     let stats = renderer.render(&input).unwrap();
     // Second frame: everything resident, measure.

@@ -20,12 +20,14 @@ final class Mirror {
         I_FLAGS = 6, I_FPS = 7, I_CHUNKS = 8, I_SECTIONS_DRAWN = 9, I_SECTIONS_TOTAL = 10, I_ENTITIES = 11,
         I_ENTITIES_RENDERED = 12, I_SIMULATION_DISTANCE = 13, I_VIEW_DISTANCE = 14, I_FRAMERATE_LIMIT = 15,
         I_REFRESH_RATE = 16, I_DISPLAY_W = 17, I_DISPLAY_H = 18, I_GUI_SCALE = 19, I_LIGHT_SKY = 20, I_LIGHT_BLOCK = 21,
-        INTS = 22;
+        I_HURT_COOLDOWN = 22, INTS = 23;
     static final int D_HEALTH = 0, D_SATURATION = 1, D_XP_PROGRESS = 2, D_FLY_SPEED = 3, D_WALK_SPEED = 4, D_X = 5,
         D_Y = 6, D_Z = 7, D_YAW = 8, D_PITCH = 9, D_GAME_TIME = 10, D_DAY_TIME = 11, D_TX_PER_S = 12, D_RX_PER_S = 13,
-        DOUBLES = 14;
+        D_MOUNT_HEALTH = 14, D_MOUNT_MAX_HEALTH = 15, D_MOUNT_JUMP_SCALE = 16, D_ATTACK_STRENGTH_TICKER = 17,
+        D_ATTACK_STRENGTH_DELAY = 18, DOUBLES = 19;
     static final int F_HARDCORE = 1, F_EYE_IN_WATER = 2, F_INVULNERABLE = 4, F_FLYING = 8, F_MAY_FLY = 16,
-        F_INSTABUILD = 32, F_IN_WORLD = 64, F_IMMEDIATE_RESPAWN = 128, F_DEBUG_SHOWN = 256;
+        F_INSTABUILD = 32, F_IN_WORLD = 64, F_IMMEDIATE_RESPAWN = 128, F_DEBUG_SHOWN = 256,
+        F_MOUNT_LIVING = 512, F_MOUNT_JUMPABLE = 1024, F_CROSSHAIR_PICK = 2048;
 
     static final int[] I = new int[INTS];
     static final double[] D = new double[DOUBLES];
@@ -37,6 +39,20 @@ final class Mirror {
     static boolean flag(int f) { return (I[I_FLAGS] & f) != 0; }
     static boolean inWorld() { return flag(F_IN_WORLD); }
     static float health() { return (float) D[D_HEALTH]; }
+    /** Riding a living vehicle (the mount HUD: vehicle hearts, jump bar). */
+    static boolean mountLiving() { return flag(F_MOUNT_LIVING); }
+    /** Steering a vehicle that can jump (the horse family: the jump bar shows). */
+    static boolean mountJumpable() { return flag(F_MOUNT_JUMPABLE); }
+    static float mountHealth() { return (float) D[D_MOUNT_HEALTH]; }
+    static float mountMaxHealth() { return (float) D[D_MOUNT_MAX_HEALTH]; }
+    /** The mount's charged jump scale (vanilla LocalPlayer.getJumpRidingScale). */
+    static float jumpRidingScale() { return (float) D[D_MOUNT_JUMP_SCALE]; }
+    /** The attack strength ticker (vanilla Player.attackStrengthTicker, Rust's charge state). */
+    static float attackStrengthTicker() { return (float) D[D_ATTACK_STRENGTH_TICKER]; }
+    /** The held item's attack delay (vanilla Player.getCurrentItemAttackStrengthDelay). */
+    static float attackStrengthDelay() { return (float) D[D_ATTACK_STRENGTH_DELAY]; }
+    /** The crosshair picks a living, alive entity in reach (vanilla Minecraft.crosshairPickEntity). */
+    static boolean crosshairPickLiving() { return flag(F_CROSSHAIR_PICK); }
 
     private static boolean callbackSet;
 
@@ -46,6 +62,8 @@ final class Mirror {
         LocalPlayer p = Proxies.player;
         p.experienceLevel = I[I_XP_LEVEL];
         p.totalExperience = I[I_XP_TOTAL];
+        // Vanilla LivingEntity.damageCooldownTime: the HUD's heart blink gates on it (Hud.extractPlayerHealth).
+        p.damageCooldownTime = I[I_HURT_COOLDOWN];
         p.experienceProgress = (float) D[D_XP_PROGRESS];
         FOOD.setFoodLevel(I[I_FOOD]);
         FOOD.setSaturation((float) D[D_SATURATION]);
@@ -69,5 +87,8 @@ final class Mirror {
         p.setXRot((float) D[D_PITCH]);
         int sel = I[I_SELECTED];
         if (sel >= 0 && sel < 9 && Proxies.inventory.getSelectedSlot() != sel) Proxies.inventory.setSelectedSlot(sel);
+        // Vanilla picks every frame (Minecraft.pick) and stores the entity here for the HUD's
+        // attack indicator; Haste's pick is Rust's, so the flag stands the proxy in and out.
+        Proxies.minecraft.crosshairPickEntity = crosshairPickLiving() ? Proxies.crosshairPick : null;
     }
 }

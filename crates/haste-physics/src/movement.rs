@@ -6,6 +6,7 @@ use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{Aabb, BlockPos, BlockStateId, DVec3};
 
 use crate::block_effects;
+use crate::climbing::{self, ClimbableBlocks, NoClimbables};
 use crate::collision::{collide_with_step, no_collision, supporting_block};
 use crate::elytra;
 use crate::{
@@ -37,6 +38,14 @@ pub const VERTICAL_DRAG: f32 = 0.98;
 /// Horizontal boost of a sprint jump, along the facing direction (mcpk.wiki "Horizontal Movement
 /// Formulas"; checked against the wiki's 7.127 m/s sprint-jump speed in tests/scenarios.rs).
 pub const SPRINT_JUMP_BOOST: f32 = 0.2;
+/// Extra jump power per jump-boost level (vanilla `LivingEntity.getJumpBoostPower`: `0.1F` per
+/// amplifier + 1, computed in float).
+pub const JUMP_BOOST_POWER_PER_LEVEL: f32 = 0.1;
+/// Levitation rise per level (vanilla `LivingEntity.travelInAir`: 0.05 x (amplifier + 1)).
+pub const LEVITATION_RISE_PER_LEVEL: f64 = 0.05;
+/// How fast levitation blends the vertical velocity towards its rise each tick (vanilla
+/// `LivingEntity.travelInAir`: 0.2).
+pub const LEVITATION_BLEND: f64 = 0.2;
 /// Ticks between jumps while jump stays held (wiki "Jumping": half a second delay).
 pub const JUMP_COOLDOWN_TICKS: u8 = 10;
 /// Sneak edge back-off step (vanilla `Player.maybeBackOffFromEdge`: 0.05).
@@ -107,8 +116,7 @@ fn fluid_jump_threshold(attrs: &PlayerAttributes, pose: Pose) -> f64 {
     }
 }
 
-/// One 50 ms player tick. `blocks` stands in for `GameData` until haste-data provides it (see
-/// NOTES.md, interface requests).
+/// One 50 ms player tick without a climbable table: nothing climbs (see [`tick_with`]).
 pub fn tick(
     state: &mut PlayerState,
     input: &InputState,
@@ -116,6 +124,20 @@ pub fn tick(
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
+) -> TickResult {
+    tick_with(state, input, attrs, world, shapes, blocks, &NoClimbables)
+}
+
+/// One 50 ms player tick. `blocks` stands in for `GameData` until haste-data provides it (see
+/// NOTES.md, interface requests); `climb` answers the climbable tag and trapdoor rule.
+pub fn tick_with(
+    state: &mut PlayerState,
+    input: &InputState,
+    attrs: &PlayerAttributes,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+    blocks: &dyn BlockPhysics,
+    climb: &dyn ClimbableBlocks,
 ) -> TickResult {
     let old_pos = state.pos;
     let old_ground = state.on_ground;
@@ -143,7 +165,7 @@ pub fn tick(
     state.eyes_in_water = eyes_in_water;
     // Water currents (vanilla Entity.updateFluidInteraction, before the move).
     block_effects::apply_water_currents(state, attrs, world, blocks);
-    update_flags(state, input, attrs, eyes_in_water, world, shapes);
+    update_flags(state, input, attrs, eyes_in_water, world, shapes, blocks);
 
     if state.jump_cooldown > 0 {
         state.jump_cooldown -= 1;
@@ -179,20 +201,52 @@ pub fn tick(
     // `Player.updatePlayerPose` after `LivingEntity.aiStep`'s travel, inside `Player.tick`.
     let impulse = impulse(state, input, attrs);
 
+    // Vanilla `LivingEntity.aiStep`, just before `travel`: either effect resets the fall
+    // distance, so slow falling and levitation never accumulate fall damage.
+    if state.slow_falling || state.levitation.is_some() {
+        state.fall_distance = 0.0;
+    }
+
     if state.flying {
-        flying::travel(state, input, impulse, attrs, world, shapes, blocks);
+        // vanilla `LocalPlayer.aiStep`: while flying, jump/sneak steer y directly by three
+        // times the flying speed per tick, before the travel.
+        flying::apply_vertical_impulse(state, input, attrs);
+        if state.in_water || state.in_lava {
+            // vanilla `Player.travel`: with flight on, the y velocity is saved, the normal travel
+            // runs (the fluid one in water/lava: `LivingEntity.travel` -> `travelInFluid`), then y
+            // is restored to the saved value times 0.6.
+            let saved_y = state.velocity.y;
+            if state.in_water {
+                fluids::travel_water(state, input, impulse, attrs, world, shapes, blocks, climb);
+            } else {
+                fluids::travel_lava(state, input, impulse, attrs, world, shapes, blocks);
+            }
+            state.velocity.y = saved_y * flying::VERTICAL_FLY_DRAG;
+            // Landing ends creative flight, except for spectators (vanilla `LocalPlayer.aiStep`:
+            // `onGround() && abilities.flying && !gameMode.isSpectator()`).
+            if state.on_ground && !state.spectating {
+                state.flying = false;
+            }
+        } else {
+            flying::travel(state, input, impulse, attrs, world, shapes, blocks);
+        }
     } else if state.in_water {
         // vanilla `LivingEntity.travel`: the fluid branch wins over gliding (entering water
         // switches a glider to swim physics; the server clears the flag separately).
-        fluids::travel_water(state, input, impulse, attrs, world, shapes, blocks);
+        fluids::travel_water(state, input, impulse, attrs, world, shapes, blocks, climb);
     } else if state.in_lava {
         fluids::travel_lava(state, input, impulse, attrs, world, shapes, blocks);
-    } else if state.fall_flying {
-        // vanilla `LivingEntity.travel` -> `travelFallFlying`. No effects are modelled, so the
-        // slow-falling gravity clamp is passed `false` (see `elytra`).
-        elytra::travel(state, attrs, world, shapes, blocks, false);
+    } else if state.fall_flying && !climbing::on_climbable(state, world, climb) {
+        // vanilla `LivingEntity.travel` -> `travelFallFlying`, which uses the effective gravity
+        // (the slow falling clamp) like the air branch.
+        elytra::travel(state, attrs, world, shapes, blocks, state.slow_falling);
     } else {
-        travel_normal(state, impulse, attrs, world, shapes, blocks);
+        // `travelFallFlying` on a climbable: travel in air (still with the glider box), then
+        // stop gliding.
+        travel_normal(
+            state, input.jump, impulse, attrs, world, shapes, blocks, climb,
+        );
+        state.fall_flying = false;
     }
 
     // vanilla `Entity.move`: the flag next tick's `shouldStopRunSprinting` reads - whether the
@@ -220,9 +274,10 @@ pub fn tick(
     }
 }
 
-/// The input-driven flags for this tick's movement: `sneaking` (raw shift key), `crouching` and
-/// the sprint state (vanilla `LocalPlayer.aiStep`, in that order, from the CURRENT box, i.e. the
-/// pose the last tick ended with, before the player moves).
+/// The input-driven flags for this tick's movement: `swimming` (vanilla `Entity.baseTick`), then
+/// `sneaking` (raw shift key), `crouching` and the sprint state (vanilla `LocalPlayer.aiStep`, in
+/// that order, from the CURRENT box, i.e. the pose the last tick ended with, before the player
+/// moves).
 fn update_flags(
     state: &mut PlayerState,
     input: &InputState,
@@ -230,9 +285,12 @@ fn update_flags(
     eyes_in_water: bool,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
+    blocks: &dyn BlockPhysics,
 ) {
+    // `Entity.baseTick` updates the swimming state before `aiStep` looks at the keys.
+    let under_water = eyes_in_water && state.in_water;
+    crate::sprint::update_swimming(state, under_water, world, blocks);
     state.sneaking = input.sneak;
-    let forward = input.forward && !input.back;
     // Crouching (vanilla `LocalPlayer.aiStep`): not flying, not swimming, the crouching box
     // fits, and shift is held or standing does not fit (forced crouch under a low ceiling).
     // Riding and sleeping are not modelled.
@@ -240,28 +298,7 @@ fn update_flags(
         && !state.swimming
         && fits_pose(state, attrs, Pose::Crouching, world, shapes)
         && (state.sneaking || !fits_pose(state, attrs, Pose::Standing, world, shapes));
-    // Sprint (vanilla `LocalPlayer.aiStep`, `canStartSprinting` / `shouldStopRunSprinting`):
-    // starting needs the forward impulse and not moving slowly (`isMovingSlowly`: crouching or
-    // the swimming pose out of water, unless under water), with no collision condition; a
-    // horizontal collision ends it only when the collision is not minor (the input direction and
-    // the actual movement within 8 degrees, `isHorizontalCollisionMinor`). The stop is evaluated
-    // after the start so a persistent collision keeps the sprint off instead of restarting it
-    // every other tick. Releasing the sprint key alone does not end it. Hunger and blindness
-    // are the caller's business.
-    let moving_slowly = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
-    let under_water = state.eyes_in_water && state.in_water;
-    if !state.sprinting && input.sprint && forward && (!moving_slowly || under_water) {
-        state.sprinting = true;
-    }
-    if state.sprinting
-        && (!forward || (state.horizontal_collision && !state.minor_horizontal_collision))
-    {
-        state.sprinting = false;
-    }
-    // Sprint-swimming state (vanilla `Entity.updateSwimming`: sprinting in water with the eyes
-    // in it, or already swimming; never while flying).
-    state.swimming =
-        state.sprinting && state.in_water && (eyes_in_water || state.swimming) && !state.flying;
+    crate::sprint::update_sprinting(state, input, under_water);
 }
 
 /// Whether the box of `pose` at the current position fits (vanilla
@@ -325,20 +362,62 @@ fn update_player_pose(
     };
 }
 
+/// The movement key vector (f32 throughout, in vanilla's order): `KeyboardInput.tick` builds
+/// (left - right, forward - back) and normalises it (`Vec2.normalized`, so a diagonal is
+/// (0.707, 0.707)); `LocalPlayer.modifyInput` then scales it by 0.98, by the used item's
+/// `use_effects` speed multiplier while using an item, by the sneak factor while moving slowly
+/// (`LocalPlayer.isMovingSlowly`: `isCrouching() || isVisuallyCrawling()`, the latter being the
+/// swimming pose outside water) and finally stretches it for square movement.
 fn impulse(state: &PlayerState, input: &InputState, attrs: &PlayerAttributes) -> Impulse {
-    let mut forward = (input.forward as i32 - input.back as i32) as f32;
-    let mut strafe = (input.left as i32 - input.right as i32) as f32;
-    // Slowed while crouching or crawling (vanilla `LocalPlayer.isMovingSlowly`:
-    // `isCrouching() || isVisuallyCrawling()`, the latter being the swimming pose outside
-    // water). Wiki "Sneaking": 1.3 m/s straight, 1.8 m/s diagonal.
+    let forward = (input.forward as i32 - input.back as i32) as f32;
+    let strafe = (input.left as i32 - input.right as i32) as f32;
+    let dist = (strafe * strafe + forward * forward).sqrt();
+    if dist < 1.0e-4 {
+        return Impulse::default();
+    }
+    let mut imp = Impulse {
+        strafe: strafe / dist * INPUT_SCALE,
+        forward: forward / dist * INPUT_SCALE,
+    };
+    // Vanilla `LocalPlayer.modifyInput`: while using an item the input is scaled by the used
+    // stack's `use_effects` speed multiplier (`LocalPlayer.itemUseSpeedMultiplier`, 1.0 when no
+    // item is in use). Vanilla also skips it while riding (`isPassenger()`); riding never
+    // reaches here, because the player's own physics tick does not run while in a vehicle.
+    // `using_item`, not `slow_using_item`: an item whose `use_effects` can sprint still slows
+    // (a stack can carry can_sprint true with a speed multiplier below 1).
+    if state.using_item {
+        imp.strafe *= state.item_use_speed;
+        imp.forward *= state.item_use_speed;
+    }
     let slow = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
     if slow {
-        forward *= attrs.sneaking_speed as f32;
-        strafe *= attrs.sneaking_speed as f32;
+        let factor = attrs.sneaking_speed as f32;
+        imp.strafe *= factor;
+        imp.forward *= factor;
     }
+    square_movement(imp)
+}
+
+/// Vanilla `LocalPlayer.modifyInputSpeedForSquareMovement`: the input vector is stretched by
+/// its direction's distance to the unit square (`distanceToUnitSquare`: sqrt(1 + tan^2) of the
+/// angle to the nearer axis, 1 on an axis, sqrt(2) on the diagonal) and capped at length 1. A
+/// full-speed diagonal lands on the cap, a slowed diagonal (sneaking, item use) keeps its
+/// per-axis speed instead of being 29 % slower (wiki "Sneaking": 1.3 m/s straight, 1.8 m/s
+/// diagonal).
+pub(crate) fn square_movement(imp: Impulse) -> Impulse {
+    let length = (imp.strafe * imp.strafe + imp.forward * imp.forward).sqrt();
+    if length <= 0.0 {
+        return imp;
+    }
+    let inv = 1.0 / length;
+    let (dx, dy) = (imp.strafe * inv, imp.forward * inv);
+    let (ax, ay) = (dx.abs(), dy.abs());
+    let tan = if ay > ax { ax / ay } else { ay / ax };
+    let to_unit_square = (1.0 + tan * tan).sqrt();
+    let modified = (length * to_unit_square).min(1.0);
     Impulse {
-        strafe: strafe * INPUT_SCALE,
-        forward: forward * INPUT_SCALE,
+        strafe: dx * modified,
+        forward: dy * modified,
     }
 }
 
@@ -439,10 +518,14 @@ fn jump(
     blocks: &dyn BlockPhysics,
 ) {
     let factor = block_factor(state, attrs, world, shapes, |s| blocks.jump_factor(s));
-    // vanilla `LivingEntity.jumpFromGround` (LivingEntity.java:2372): y = max(jump power, current
-    // y), so jumping keeps a faster rise; the sprint boost uses the same deg->rad conversion as
-    // the movement code (no separate jump constant).
-    let power = attrs.jump_strength * factor as f64;
+    // vanilla `LivingEntity.getJumpPower` (jump_strength x block jump factor) plus
+    // `getJumpBoostPower` (0.1 per jump-boost level); `jumpFromGround` (LivingEntity.java:2372)
+    // then takes y = max(jump power, current y), so jumping keeps a faster rise. The sprint boost
+    // uses the same deg->rad conversion as the movement code (no separate jump constant).
+    let power = attrs.jump_strength * factor as f64
+        + state.jump_boost.map_or(0.0, |amplifier| {
+            f64::from(JUMP_BOOST_POWER_PER_LEVEL * (amplifier as f32 + 1.0))
+        });
     if power > 1.0e-5 {
         state.velocity.y = power.max(state.velocity.y);
         if state.sprinting {
@@ -453,15 +536,20 @@ fn jump(
     }
 }
 
-/// Walking/falling in air: accelerate, move, block speed factor, gravity + vertical drag,
-/// horizontal drag (slipperiness x 0.91 on ground, 0.91 in air).
+/// Walking/falling in air (vanilla `LivingEntity.travelInAir`): accelerate, the climbable clamp,
+/// move, the climb boost, block speed factor, gravity + vertical drag, horizontal drag
+/// (slipperiness x 0.91 on ground, 0.91 in air). `jumping` is the jump key
+/// (`LocalPlayer.applyInput`).
+#[allow(clippy::too_many_arguments)]
 fn travel_normal(
     state: &mut PlayerState,
+    jumping: bool,
     imp: Impulse,
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
+    climb: &dyn ClimbableBlocks,
 ) {
     let slip = if state.on_ground {
         blocks.friction(ground_block(state, attrs, world, shapes))
@@ -480,10 +568,20 @@ fn travel_normal(
         AIR_ACCELERATION * sprint as f32
     };
     accelerate(state, imp, speed);
+    climbing::handle_on_climbable(state, world, climb);
     let motion = state.velocity;
     move_entity(state, attrs, motion, world, shapes, blocks);
+    climbing::climb_after_move(state, jumping, world, climb);
     apply_speed_factor(state, world, blocks);
-    state.velocity.y -= attrs.gravity;
+    // Vanilla `LivingEntity.travelInAir`: levitation blends the vertical velocity towards
+    // `0.05 * (amplifier + 1)` per tick and replaces gravity entirely; otherwise the effective
+    // gravity applies (slow falling caps it at 0.01 while falling, `getEffectiveGravity`).
+    if let Some(amplifier) = state.levitation {
+        let rise = LEVITATION_RISE_PER_LEVEL * f64::from(amplifier + 1);
+        state.velocity.y += (rise - state.velocity.y) * LEVITATION_BLEND;
+    } else {
+        state.velocity.y -= elytra::effective_gravity(attrs, state.velocity, state.slow_falling);
+    }
     state.velocity.y *= VERTICAL_DRAG as f64;
     let drag = (slip * HORIZONTAL_DRAG) as f64;
     state.velocity.x *= drag;
@@ -708,6 +806,139 @@ mod tests {
         w // surface 1 + 8/9: depth from the feet 0.389 <= 0.4
     }
 
+    /// A stone floor with the fluid up to y = 19: a player at y = 10 is fully submerged.
+    fn deep_fluid(fluid: haste_core::BlockStateId) -> TestWorld {
+        let mut w = TestWorld::flat(0, STONE);
+        w.fill((-50, 0, -50), (50, 19, 50), fluid);
+        w
+    }
+
+    /// vanilla `Player.travel`: a flying player in water or lava runs the fluid travel
+    /// (`LivingEntity.travel` -> `travelInFluid`), not the flight acceleration, so horizontal
+    /// flight in a fluid is far slower than in air.
+    #[test]
+    fn flying_in_fluid_covers_less_distance_than_flying_in_air() {
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let mut air = PlayerState::at(DVec3::new(0.5, 100.0, 0.5));
+        air.flying = true;
+        let mut water = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        water.flying = true;
+        let mut lava = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        lava.flying = true;
+        for _ in 0..20 {
+            tick(
+                &mut air,
+                &input,
+                &attrs,
+                &TestWorld::new(),
+                &shapes,
+                &shapes,
+            );
+            tick(
+                &mut water,
+                &input,
+                &attrs,
+                &deep_fluid(WATER_SOURCE),
+                &shapes,
+                &shapes,
+            );
+            tick(
+                &mut lava,
+                &input,
+                &attrs,
+                &deep_fluid(LAVA_SOURCE),
+                &shapes,
+                &shapes,
+            );
+        }
+        let air_d = air.pos.z - 0.5;
+        assert!(
+            water.pos.z - 0.5 < air_d * 0.5,
+            "flying in water covers {} blocks against {} in air",
+            water.pos.z - 0.5,
+            air_d
+        );
+        assert!(
+            lava.pos.z - 0.5 < air_d * 0.5,
+            "flying in lava covers {} blocks against {} in air",
+            lava.pos.z - 0.5,
+            air_d
+        );
+        assert_eq!(water.pos.y, 10.0, "the y restore keeps the flyer hovering");
+        assert_eq!(water.velocity.y, 0.0);
+    }
+
+    /// Hand-computed from vanilla's formulas for a flying player in deep water moving forward
+    /// from rest (`LivingEntity.travelInWater` + `Player.travel`): each tick adds 0.98 x 0.02
+    /// (the input scale x the fluid acceleration) to z, moves by it, drags z by the water drag
+    /// 0.8, and `Player.travel` restores y to the tick-start value times 0.6 - 0 every tick here,
+    /// so the flyer hovers.
+    #[test]
+    fn flying_in_water_matches_hand_computed_fluid_travel() {
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let mut s = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        s.flying = true;
+        let a = INPUT_SCALE as f64 * fluids::FLUID_ACCELERATION as f64;
+        let v1 = a;
+        let v2 = v1 * fluids::WATER_DRAG + a;
+        let v3 = v2 * fluids::WATER_DRAG + a;
+        for _ in 0..3 {
+            tick(
+                &mut s,
+                &input,
+                &attrs,
+                &deep_fluid(WATER_SOURCE),
+                &shapes,
+                &shapes,
+            );
+        }
+        assert!(
+            (s.pos.z - (0.5 + v1 + v2 + v3)).abs() < 1e-12,
+            "pos {:?}",
+            s.pos
+        );
+        assert_eq!(s.pos.y, 10.0, "hovering: y never moves");
+        assert_eq!(
+            s.velocity.y, 0.0,
+            "y restored to the tick-start value times 0.6"
+        );
+    }
+
+    #[test]
+    fn a_player_at_a_pool_edge_is_not_pushed_out_of_the_water() {
+        // The live rig: a stone floor (top y 0) with source water z >= 1 and air z < 1. A
+        // player standing in the shallow water at the edge must stay put: vanilla's getFlow
+        // gives the edge cell no flow (the empty neighbour's below cell has no fluid), so
+        // `apply_water_currents` adds nothing.
+        let mut w = TestWorld::flat(0, STONE);
+        for x in -2..=2 {
+            for z in 1..=4 {
+                w.set(x, 0, z, WATER_SOURCE);
+            }
+        }
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 1.5));
+        for _ in 0..100 {
+            tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        }
+        assert!(
+            (s.pos.z - 1.5).abs() < 1.0e-9,
+            "the player drifted to {s:?}"
+        );
+        assert!(s.pos.x == 0.5, "the player drifted to {s:?}");
+    }
+
     #[test]
     fn jump_in_shallow_water_on_ground_is_a_normal_jump() {
         // vanilla `LivingEntity.aiStep`, "jump" section: on ground with the fluid no deeper than
@@ -875,6 +1106,64 @@ mod tests {
     }
 
     #[test]
+    fn using_an_item_scales_the_walking_input_by_the_use_effects_multiplier() {
+        // Vanilla `LocalPlayer.modifyInput`: while using an item the input is scaled by the
+        // used stack's `use_effects` speed multiplier after the 0.98 input scale. Walking
+        // straight on stone from rest, the per-tick recurrence is v = v_prev + a (the move),
+        // then v *= 0.6 x 0.91, with a = 0.98 x 0.2 (the multiplier) x movement speed 0.1.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        settle(&w, &mut s, &attrs, &shapes);
+        s.using_item = true;
+        s.item_use_speed = 0.2;
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let a = (INPUT_SCALE * 0.2) as f64 * 0.1f32 as f64;
+        let drag = (DEFAULT_SLIPPERINESS * HORIZONTAL_DRAG) as f64;
+        let mut v = 0.0f64;
+        let mut z = s.pos.z;
+        for _ in 0..10 {
+            tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+            v += a;
+            z += v;
+            v *= drag;
+            assert!(
+                (s.pos.z - z).abs() < 1.0e-9,
+                "walked to {} expected {z}",
+                s.pos.z
+            );
+        }
+    }
+
+    #[test]
+    fn using_an_item_at_multiplier_one_is_unchanged() {
+        // A `use_effects` speed multiplier of 1.0 leaves the walk exactly as it is without an
+        // item in use.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let run = |using: bool, speed: f32| {
+            let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+            settle(&w, &mut s, &attrs, &shapes);
+            s.using_item = using;
+            s.item_use_speed = speed;
+            for _ in 0..10 {
+                tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+            }
+            s.pos.z
+        };
+        assert_eq!(run(true, 1.0), run(false, 0.2), "multiplier 1.0 is a no-op");
+    }
+
+    #[test]
     fn sneak_edge_probe_reaches_a_ledge_exactly_step_below_the_feet() {
         // vanilla `Player.canFallAtLeast`: the probe is the slab from minY - step - 1e-7 to
         // minY, so a block top exactly `step` below the feet is still reached.
@@ -952,5 +1241,134 @@ mod tests {
         }
         assert!(s.horizontal_collision, "grazing the wall at x={}", s.pos.x);
         assert!(s.sprinting, "a minor collision keeps sprinting");
+    }
+
+    #[test]
+    fn levitation_blends_the_rise_towards_five_hundredths_per_level() {
+        // vanilla `LivingEntity.travelInAir`: movementY += (0.05 * (amplifier + 1) - movementY)
+        // * 0.2, then the 0.98 vertical drag. Levitation I (amplifier 0, level 1) targets 0.05.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.levitation = Some(0);
+        s.velocity = DVec3::ZERO;
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        // (0.05 - 0.0) * 0.2 = 0.01, then * 0.98.
+        assert!(
+            (s.velocity.y - 0.01 * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+        // Levitation II (level 2) targets 0.1: a tick from rest blends 0.02, then * 0.98.
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.levitation = Some(1);
+        s.velocity = DVec3::ZERO;
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - 0.02 * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
+    fn levitation_replaces_gravity_and_resets_the_fall_distance() {
+        // vanilla `LivingEntity.travelInAir`: the levitation branch is an `else if`, so no
+        // gravity is applied; `LivingEntity.aiStep` resets the fall distance with the effect.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.levitation = Some(0);
+        s.velocity = DVec3::new(0.0, -0.5, 0.0);
+        s.fall_distance = 10.0;
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        // No gravity: the sink only blends towards the rise.
+        assert!(
+            (s.velocity.y - (-0.5 + (0.05 - -0.5) * 0.2) * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+        // The fall distance was reset, then the tick's descent (0.5) was added back.
+        assert!((s.fall_distance - 0.5).abs() < 1e-12, "{}", s.fall_distance);
+    }
+
+    #[test]
+    fn slow_falling_caps_the_fall_speed_growth_at_one_hundredth() {
+        // vanilla `LivingEntity.getEffectiveGravity`: while falling (y <= 0) slow falling clamps
+        // the gravity to min(gravity, 0.01); rising keeps the full gravity.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.slow_falling = true;
+        s.velocity = DVec3::new(0.0, -0.5, 0.0);
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - (-0.5 - 0.01) * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+        // Rising with the effect: the full 0.08 gravity applies.
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.slow_falling = true;
+        s.velocity = DVec3::new(0.0, 0.5, 0.0);
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - (0.5 - 0.08) * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+        // Without the effect the same fall loses the full 0.08.
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.velocity = DVec3::new(0.0, -0.5, 0.0);
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - (-0.5 - 0.08) * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
+    fn slow_falling_resets_the_fall_distance() {
+        // vanilla `LivingEntity.aiStep` resets the fall distance while slow falling, so a fall
+        // never accumulates (and deals no damage).
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.slow_falling = true;
+        s.velocity = DVec3::ZERO;
+        s.fall_distance = 10.0;
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert_eq!(s.fall_distance, 0.0);
+    }
+
+    #[test]
+    fn jump_boost_adds_one_tenth_per_level_to_the_jump_power() {
+        // vanilla `LivingEntity.getJumpBoostPower`: 0.1 per (amplifier + 1); `getJumpPower`
+        // adds it to jump_strength x the block jump factor.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        s.on_ground = true;
+        s.jump_boost = Some(0);
+        let input = InputState {
+            jump: true,
+            ..Default::default()
+        };
+        tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y
+                - (attrs.jump_strength + f64::from(0.1_f32) - attrs.gravity)
+                    * VERTICAL_DRAG as f64)
+                .abs()
+                < 1e-15,
+            "{}",
+            s.velocity.y
+        );
     }
 }

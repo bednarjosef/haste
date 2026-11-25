@@ -22,16 +22,54 @@ use haste_core::Identifier;
 use serde::Deserialize;
 
 /// The vanilla ground plane in model units (see the module doc).
-const GROUND_Y: f32 = 24.0;
+pub(crate) const GROUND_Y: f32 = 24.0;
 /// The dump's format version this loader understands.
 const KNOWN_VERSION: u32 = 1;
 
-/// Layers whose vanilla `MeshDefinition` was built `.transformed(p -> p.translated(0, 24, 0))`:
-/// dump v1 records only the root's children, so the root's own PartPose translation is lost,
-/// and their pivots are already relative to the ground (vanilla
-/// `CopperGolemModel.createBodyLayer` is the only such main layer in 26.3). For these the
-/// `GROUND_Y` shift is skipped - applying it would float the model 1.5 blocks up.
-const ROOT_TRANSLATED_LAYERS: &[&str] = &["minecraft:copper_golem#main"];
+/// Layers whose parts' pivots are already relative to the render origin, so the `GROUND_Y`
+/// shift must not apply (applying it would sink or float the model 1.5 blocks):
+/// - those whose vanilla `MeshDefinition` was built `.transformed(p -> p.translated(0, 24, 0))`
+///   (dump v1 records only the root's children, so the root's own PartPose translation is
+///   lost; vanilla `CopperGolemModel.createBodyLayer` is the only such main layer in 26.3);
+/// - the boats', whose renderer does not sit them on the ground plane at all
+///   (`AbstractBoatRenderer.submit` lifts them 0.375 blocks instead of
+///   `LivingEntityRenderer`'s -1.501, so their `PartPose` values are already relative to that
+///   origin; see `crate::boat`);
+/// - the evoker fangs' and the llama spit's, whose renderers do their own placement
+///   (`EvokerFangsRenderer.submit` flips and translates by -1.501 itself, carried whole by
+///   `crate::evoker_fangs_model::body`; `LlamaSpitRenderer.submit` draws the layer unflipped
+///   about the entity's origin), so shifting them too would move them by 1.5 blocks;
+/// - the trident's, which `ThrownTridentRenderer.submit` draws at the entity's own position
+///   with only its yaw and pitch turns (it is no `LivingEntityRenderer`), so the shift would
+///   slide the whole trident 1.5 blocks along its shaft (see `crate::trident`).
+const UNSHIFTED_LAYERS: &[&str] = &[
+    "minecraft:copper_golem#main",
+    "minecraft:evoker_fangs#main",
+    "minecraft:llama_spit#main",
+    "minecraft:trident#main",
+    "minecraft:boat/acacia#main",
+    "minecraft:chest_boat/acacia#main",
+    "minecraft:boat/bamboo#main",
+    "minecraft:chest_boat/bamboo#main",
+    "minecraft:boat/birch#main",
+    "minecraft:chest_boat/birch#main",
+    "minecraft:boat/cherry#main",
+    "minecraft:chest_boat/cherry#main",
+    "minecraft:boat/dark_oak#main",
+    "minecraft:chest_boat/dark_oak#main",
+    "minecraft:boat/jungle#main",
+    "minecraft:chest_boat/jungle#main",
+    "minecraft:boat/mangrove#main",
+    "minecraft:chest_boat/mangrove#main",
+    "minecraft:boat/oak#main",
+    "minecraft:chest_boat/oak#main",
+    "minecraft:boat/pale_oak#main",
+    "minecraft:chest_boat/pale_oak#main",
+    "minecraft:boat/poplar#main",
+    "minecraft:chest_boat/poplar#main",
+    "minecraft:boat/spruce#main",
+    "minecraft:chest_boat/spruce#main",
+];
 
 #[derive(Deserialize)]
 struct DumpFile {
@@ -105,16 +143,17 @@ impl ModelLibrary {
         }
         let mut layers = AHashMap::with_capacity(file.layers.len());
         for l in file.layers {
-            // Layers whose vanilla mesh was built with a translated root PartPose (dump v1
-            // records only the root's children, so the translation is lost): their pivots are
-            // already ground-relative, and the shift is skipped (see ROOT_TRANSLATED_LAYERS).
-            let skip_ground_shift = ROOT_TRANSLATED_LAYERS.contains(&l.layer.as_str());
+            // Layers whose parts' pivots are already relative to the render origin (a
+            // translated root PartPose, or a renderer that does not sit on the ground
+            // plane): the shift is skipped (see UNSHIFTED_LAYERS).
+            let skip_ground_shift = UNSHIFTED_LAYERS.contains(&l.layer.as_str());
             let model = CubeModel {
                 texture: Identifier::new("haste", "entity_box"),
                 tex_width: l.texture_width.max(1),
                 tex_height: l.texture_height.max(1),
                 root: ModelPart {
                     name: "root".to_owned(),
+                    id: haste_core::parts::ROOT,
                     pivot: glam::Vec3::ZERO,
                     rotation: glam::Vec3::ZERO,
                     visible: true,
@@ -200,6 +239,7 @@ fn convert_part(p: PartJson) -> ModelPart {
         })
         .collect();
     ModelPart {
+        id: haste_core::parts::intern(&p.name),
         name: p.name,
         pivot,
         rotation,
@@ -215,6 +255,7 @@ fn scaled_model(model: &CubeModel, factor: f32) -> CubeModel {
     fn scaled_part(p: &ModelPart, factor: f32) -> ModelPart {
         ModelPart {
             name: p.name.clone(),
+            id: p.id,
             pivot: p.pivot * factor,
             rotation: p.rotation,
             visible: p.visible,

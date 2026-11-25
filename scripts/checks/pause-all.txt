@@ -4,6 +4,10 @@
 # (report bugs 204, send feedback 228, friends 252, player reporting 276; row centre y 134).
 wait_until joined
 wait_until settled
+# The runner grants the player the advancements here: a player that never earned one only
+# ever gets the recipe tree, whose root has no display and so shows no tab at all.
+screenshot advance-setup
+wait 30
 wait 10
 key Escape
 wait_until screen_open
@@ -12,7 +16,7 @@ screenshot pause
 
 # Advancements (the server's tree; the story root is always visible)
 click_text Advancements
-wait 10
+wait 20
 screenshot advancements
 # The tab row (only drawn with two or more tabs): hover the second tab so its title shows as
 # a tooltip — with one tab the window title is already the tab's name.

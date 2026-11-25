@@ -141,3 +141,395 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   `ShaderDefines`). A mod pipeline with a known blend function maps correctly; the texture-name
   rule is only the fallback for a null pipeline. Additive pipelines (`GUI_TEXT_HIGHLIGHT`) still
   draw normal until the renderer gets an additive GUI blend.
+- **2026-10-18 Wrapped sprite UVs need continuous derivatives.** The greedy mesher stretches a
+  quad's sprite-local UV over the merged rectangle and `chunk.wgsl` wraps it per block with
+  `fract()`. Taking `dpdx`/`dpdy` of the wrapped atlas UV jumps a whole sprite at every block edge,
+  `textureSampleGrad` then picks the coarsest mip and draws the atlas-average grey as a 1-2 px line
+  on each edge (user bug "dashed lines on block edges"). The derivatives now come from the
+  continuous sprite UV scaled into atlas space. Vanilla never merges faces, so it has no wraps.
+- **2026-10-18 Face culling by neighbour coverage.** `mesher/culling.rs` culls a face when the
+  neighbour's opaque, flush, axis-aligned model quads cover it: the visible result of vanilla
+  `Block.shouldRenderFace`'s shape comparison (snow against snow, slab against slab), -28% quads
+  on the bench world. Vanilla compares occlusion shapes, not models; the oracle dump now carries
+  `occlusion` per state, and branch dump-occlusion-light moves the rule onto it.
+  `skipRendering` (glass against glass, iron bars) is not implemented yet.
+- **2026-10-18 The oracle dump carries occlusion and light per state.** `block_shapes.json` has
+  `occlusion` (`getOcclusionShape`), `light_dampening` and `propagates_skylight_down`; the light
+  engine and fluid occlusion should read them instead of name matching. `dump-server-oracles.sh`
+  removes its old outputs first (it waits for the files to appear, so a rerun over an existing
+  dump used to stop the server before it wrote anything).
+- **2026-10-18 The embedded JVM must be warm before the render thread calls it.** The 100-600 ms
+  frame hitches were the JVM's boot full GCs (code cache, metaspace thresholds) and first-frame
+  class loading, landing in the render thread's GUI calls right after the HUD went live. A fresh
+  HUD now renders warm-up frames on the game thread before it is published (`ui/hud.rs`
+  `HudWarmup`), and the packets that arrive meanwhile are handed over before it goes live.
+  `HASTE_JVM_GC_LOG=1` adds `-Xlog:gc`.
+- **2026-10-18 Mesh upload memory.** One `queue.write_buffer` per mesh left ~3 GB of driver
+  staging resident at render distance 32, and the unbounded mesh-result channel piled up the whole
+  view distance's meshes behind the upload budget (glibc arenas never shrink after that). Uploads
+  go through a `StagingBelt` with one encoder per frame, and the mesh backlog is capped at 3072
+  sections (`terrain_feed.rs`): RSS 4.1-4.8 GB -> ~1.0 GB (vanilla ~2 GB). GPU memory is still
+  ~2.8 GB because every section in view distance is meshed; vanilla meshes only visible sections
+  (`LevelExtractor`), branch mesh-visible-sections.
+- **2026-10-18 The "entities" GPU sub-pass was water.** The entities timestamp bracket stayed open
+  across the translucent terrain draws, so translucent read 0 and entities 2.5 ms at rd 32
+  (`timing.rs` `SubpassBrackets` now). Block entities also drew at any distance; vanilla's
+  `BlockEntityRenderer.shouldRender` limit (64 blocks, piston 68, beacon horizontal render
+  distance) is in `blockentity/view_distance.rs`.
+- **2026-10-18 Screenshots are opaque.** The framebuffer alpha behind leaves and water is 0.5;
+  vanilla `Screenshot.takeScreenshot` forces alpha 255 and so does Haste's readback now. Before,
+  images looked washed out over a light background.
+- **2026-10-18 Offscreen scripts and keys.** A `--script` client drops keys pressed before the
+  JVM's KeyMappings exist; scripts that hold keys start with `wait_until settled`.
+- **2026-10-18 GPU sub-pass timestamps are expensive on RADV.** Writing the 16 inside-pass
+  timestamps every frame cost ~2.5 ms of GPU time at rd 32 (Radeon 860M); the sub-pass brackets
+  are now sampled every 64th frame (`timing.rs` `SUBPASS_SAMPLE_FRAMES`), and a bracket counts as
+  run only when its timestamp was written. The frame at rd 32 is vertex/draw-bound, not
+  fragment-bound (13x fewer pixels cut GPU time by 23%): grouping draws by arena (2761 -> 649
+  calls) and skipping back-facing face-direction groups per section (-30% quads) took the frame
+  from 11.6 to 6.4 ms. Phase 2 note: a section layer's draws are per face direction
+  (`LayerDraw.dir`, 6 = whole layer, used by translucent to keep emission order).
+- **2026-10-18 Ctrl state in the JVM.** Vanilla polls the live keyboard for `hasControlDown()`
+  when a click is consumed (`Minecraft.handleKeybinds` drop: one item or the stack). In Haste the
+  JVM keeps the SDL keymods of the last key event, also with no screen open
+  (`ClientImpl.ctrlDown()`); later "Ctrl held at the consume" reads use it.
+- **2026-10-18 Reported "holes" in the held block were texels.** The grey spots on a held dirt
+  block are dirt.png's own grey pebbles over grey ground; an offscreen test now checks that a
+  held block draws as a solid cube (`haste-render/tests/held_block_offscreen.rs`).
+- **2026-10-18 Vanilla reference runs have clouds off.** `scripts/vanilla-options.sh` sets
+  `renderClouds:"false"` (clouds drift, so shots would not compare). Haste ignores the cloud
+  option and always draws fancy clouds (brief cloud-option); benches against vanilla are not
+  like-for-like until it honours `Options.cloudStatus`.
+- **2026-10-18 Zero-copy light arrays pinned whole chunk packets.** Light nibble arrays were
+  `Bytes` slices of the `level_chunk_with_light` packet, so every non-uniform section kept its
+  whole packet alive (~125 MB of 139 MB received at rd 32). Light arrays are now owned
+  (`Arc<[u8; 2048]>`, copied out of the packet) and uniform sky sections store one value, like
+  vanilla's `DataLayer`: RSS -80 MB (-30%) at rd 32. Any other long-lived data sliced out of a
+  packet with `Bytes::slice` has the same trap.
+- **2026-10-18 Which block carries which block entity comes from the game.** The
+  `block_entity_types.json` dump records `EntityBlock.newBlockEntity` per state. The old
+  hand-written table had `moving_piston -> piston` (vanilla returns null there: the piston's block
+  event creates that entity) and missed the copper golem statue variants.
+- **2026-10-18 Face culling order in the mesher.** A cullface is drawn when the state's
+  `skipRendering` rule keeps it (`mesher/skip.rs`, rules per vanilla class from the
+  `block_classes.json` dump) and `Block.shouldRenderFace`'s occlusion-shape test shows it
+  (`mesher/face_occlusion.rs`, from `block_shapes.json`); an old dump falls back to the model
+  rule. Cross models (grass, flowers) light by their 26.3 `shade_direction_override` ("up"),
+  not their side shades.
+- **2026-10-18 Container clicks are sent inside the input event.** Vanilla's
+  `MultiPlayerGameMode.handleContainerInput` sends at once; queuing to the next tick added
+  50-100 ms before the crafting result appeared.
+- **2026-10-18 Visible-only meshing: the trade the lead accepted.** Meshing only the sections in
+  `visibleSections` (vanilla `LevelExtractor`), windowed bench at the reference spot, two runs
+  each: rd 32 average frame 6.47/6.80 -> 6.20/6.26 ms, p99 9.5/13.0 -> 9.1/9.6 ms, but p99.9 and
+  worst frames 12.7-26 -> 25-30 ms; GPU 2.6-2.8 GB -> 0.82 GB, RSS -50 to -110 MB. rd 12 average
+  2.06/2.14 -> 2.19/2.24 ms, p99 6.1/7.8 -> 7.9/9.9 ms, GPU 0.82-0.95 -> 0.56 GB. The worst
+  frames are the pop-in catch-up when sections become visible; turn prediction and spreading
+  background work across frames are meant to win them back.
+- **2026-10-18 Validate oracle values on an exact state.** `validate-dumps.py`'s `find` returns
+  the first matching state, and for slabs and stairs that is the waterlogged one (light
+  dampening 1, not 0). Pin every property that matters, `waterlogged` included.
+- **2026-10-18 Item particle sprites for every item.** The sprite table for `minecraft:item`
+  particles was built from the items whose default components are consumable, so a stack made
+  consumable by its component patch, and every server item particle of a non-food item
+  (snowball and egg hits, tool breaks), drew the missing sprite. It now covers the whole item
+  registry: +35 ms once at join, same 1024x1024 atlas page.
+- **2026-10-18 Another entity eating: particles yes, sound no.** The watcher's client runs
+  `LivingEntity.updateUsingItem` for other entities from the synced living flags and spawns the
+  crumbs itself, but `ClientLevel.playSeededSound` only plays for our own player: the eating
+  sound of others arrives as the server's broadcast sound packet. The 16-particle finish burst
+  (entity event 9) is sent only to the eater's own client.
+- **2026-10-19 Answer in-play teleports at once.** The vanilla server drops `use_item_on` while a
+  teleport is unconfirmed (`ServerGamePacketListenerImpl.handleUseItemOn`,
+  `awaitingPositionFromClient`). Haste sent `accept_teleportation` one tick late, so a click right
+  after any teleport or position correction vanished. In-play teleports are now accepted in their
+  arrival tick, ahead of that tick's uses; only the join teleport keeps the one-tick wait
+  (`player/teleport_accept.rs`).
+- **2026-10-19 Turn pre-meshing is off by default.** Lead A/B on `--bench-path turns` at the
+  reference spot: `--premesh cone` cut visible-but-unmeshed section-frames by 20-55 % but made
+  frames 10-25 % slower (rd 32 avg 9.1/10.0 -> 9.9/11.4 ms, rd 12 2.3/2.0 -> 2.7/2.5 ms). The
+  bigger finding: even with it off, a section entering the view at rd 12 waits ~1 s for its mesh,
+  so meshing throughput, not prediction, is the pop-in cause (task frame-work-budget).
+- **2026-10-19 Clouds use vanilla's per-face records.** Like `CloudRenderer.encodeFace`, one
+  packed record per drawn face, expanded in the vertex shader and drawn instanced: a cloud cell
+  crossing uploads 143 KB instead of 3.4 MB, rebuild 2.0 -> 1.3 ms, pixel-identical (GPU test).
+  `Options.cloudRange` sets the radius (`ceil(range * 16 / 12)` cells, default 128 chunks).
+- **2026-10-19 T-junction cracks in merged quads.** Greedy-merged rectangles' edges ran past
+  neighbouring quads' corners and rasterized sky-coloured pixel cracks. Edges now split only where
+  a neighbouring quad has a corner on them, and at every block along section borders (both sides
+  agree). Splitting every edge at every block cost ~7 % frame time; the precise split costs +2 %
+  terrain memory on a real world.
+- **2026-10-19 Held items are in block units.** After the arm's model transform (pixel scale,
+  `/16`), vanilla's `ItemInHandLayer` transforms and the item geometry are in blocks; Haste drew
+  them 16x too small. 26.3 has no EAT/DRINK arm pose (eating shows ITEM), and 26.3's summon NBT
+  for equipment is `equipment:{mainhand:{id:...}}` (the old `HandItems` is silently ignored).
+- **2026-10-19 Side-by-side with the real client.** `scripts/vanilla-client.sh 127.0.0.1:25691
+  <scenario>` with a scenario `wait_world / wait 100 / hud off / wait 20 / screenshot NAME / quit`,
+  RCON `gamemode spectator HasteRef` + `tp HasteRef x y z yaw pitch` once it joined, and a Haste
+  bot holding or doing the thing in front of it, gives a vanilla reference of any entity visual
+  in a minute. Use it before calling a visual done.
+- **2026-10-19 Left-hand item display.** Vanilla resolves the left hand's
+  `ItemDisplayContext.THIRD_PERSON_LEFT_HAND` to the model's own `thirdperson_lefthand` entry
+  (e.g. `item/handheld`'s), not to the right-hand entry mirrored; mirroring drew an off-hand
+  sword about twice too long and too upright.
+- **2026-10-19 Returning memory after the join (perf-ram-diet).** The join floods the client with
+  short-lived chunk data; glibc keeps freed arena pages and the JVM keeps its grown heap. Fixes:
+  `malloc_trim(0)` on a background thread once the world is quiet (no chunk arrivals for 15 s, at
+  most once a minute; 5-6 ms off the game and render threads), the atlas releasing its CPU pixel
+  copy after upload, and the embedded JVM on G1 with a 5 s periodic GC, `MaxGCPauseMillis=5`,
+  10-30 % free ratios and no class unloading at concurrent mark (remarks were 8-18 ms with it;
+  pauses now at most 2.5 ms). A forced full GC returned the same memory but froze play for
+  150-290 ms. Shenandoah never uncommitted (+174 MiB RSS); ZGC's multi-mapped heap counts
+  twice in RSS (1.1 GiB). Settled RSS rd 12 635 -> 558 MiB, rd 32 766 -> ~675. The two ~150 MiB
+  anonymous mappings in smaps were the glibc heap and the JVM heap. Phase 2: mods that churn
+  classes may need class unloading at concurrent mark back.
+- **2026-10-19 Pop-in under a still camera.** Sections held back because a neighbour chunk was
+  missing were re-checked only when the camera turned, so they stayed holes until the next turn.
+  They now register their neighbour columns and are re-promoted when one loads (vanilla re-checks
+  its dirty set every frame). Pop-in while turning was not meshing throughput: a turn meshes and
+  uploads ~640 sections within a second. `--work-budget adaptive` (EWMA of CPU, GPU and frame
+  interval, 2-8 ms per frame) makes `--premesh cone` cheap at rd 32 but not yet at rd 12; both
+  stay off by default until a quiet-machine A/B says otherwise.
+- **2026-10-19 Benches at the reference spot.** The bench player stands at 144.5 100 -191.5 only
+  if its player data has creative flight (`perfmem` has it); a new user name falls. The bench
+  scripts are not executable: run them as `bash scripts/...`. The reference server on 25620 lives
+  two hours per start; a bench that starts during its restart fails with "Connection refused".
+- **2026-10-19 Entity type id 0 is acacia_boat.** Test fixtures that spawn a default-kind entity
+  now spawn a boat; use an explicit kind (`minecraft:arrow`, `minecraft:zombie`).
+- **2026-10-19 Shadows: blend space and depth.** Two separate bugs hid entity shadows. The main
+  pass target is sRGB, so the GPU blends in linear light while vanilla's UNORM target blends the
+  stored bytes: a shadow alpha of 0.32 darkened by about half of vanilla's. And the shadow quad lies
+  exactly on the block top, while terrain positions are quantized (~0.37 mm steps), so the quad
+  lost the depth test by a rounding hair in game (an offscreen test passed by luck). Vanilla
+  layers shadows toward the camera (`VIEW_OFFSET_Z_LAYERING`); Haste uses a depth bias of -16.
+  The blend-space difference affects every translucent pass (water, glass, particles, weather);
+  a renderer-wide fix is its own task.
+- **2026-10-19 Entity fire draws one frame.** The entity atlas has no animation ticker, so
+  animated sprites (`fire_0`, `fire_1`) must be added as their first frame; uploading the whole
+  `.mcmeta` strip drew the burning overlay as thin horizontal stripes.
+- **2026-10-19 26.3 NBT for test scenes.** Falling blocks: `BlockState:"minecraft:gravel"` (a plain
+  string, not the old compound). Armour stands: `Pose:{Head:[..],RightArm:[..]}` (unchanged
+  keys), `equipment:{head:{id:..},mainhand:{id:..}}`. Item frames with a map:
+  `Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":N}}`; a map id without
+  saved data draws the plain map item. A NoGravity falling block needs `Time` set far negative
+  or it drops after 600 ticks. Vanilla re-derives a resting arrow's rotation from its motion, so
+  a summoned `Rotation` is not kept.
+- **2026-10-19 Vanilla reference shots.** The reference client runs fov 70, `fovEffectScale` 0 and
+  clouds off (`scripts/vanilla-options.sh`): Haste shots for a side-by-side need the same (no
+  flying FOV in spectator, ignore clouds). F1 also hides the hand: take held-item shots with the
+  HUD on. Several workers sharing one test platform need fixed, tagged scenes and a rule never
+  to kill by type.
+- **2026-10-19 Test server memory.** The shared test server on 25691 ran out of its 1500M heap after
+  ~21 hours of many players and summoned entities and stopped answering RCON; test-server.sh now
+  defaults to 2G (`HASTE_SERVER_HEAP`).
+- **2026-10-19 Colours from the game are sRGB bytes.** Vanilla writes packet and option colours
+  (particle `ColorParticleOption`, tints) straight into a target that does not convert, so the bytes
+  are the displayed colour. Haste's main target is sRGB: a byte colour must be decoded to linear
+  before it goes into a vertex colour, or the target encodes it a second time and it comes out pale
+  (the tipped-arrow poison swirls read (192,208,160) against vanilla's dark olive). Alpha bytes are
+  not gamma-encoded and stay as they are.
+- **2026-10-19 Pre-mesh slack gate.** Cone pre-meshing (sections in the turn direction meshed before
+  they are visible) collapsed to 15-16 ms frames on a loaded machine. The gate stops pre-meshing
+  while the mesh backlog stays above 1536 sections for 400 ms and resumes below 512. Interleaved
+  runs at the reference spot: rd 12 cone 2.30 ms against off 3.02 ms, rd 32 6.59 against 6.69, no
+  collapse in 8 gated rd 32 runs. The default stays off until a sustained-load pair confirms it.
+  Next idea there: the section slab is looked up through a hash about 45k times per frame at rd 32;
+  a grid index would help every lookup site.
+- **2026-10-19 Spectators do not load chunks.** On a 26.3 server a player in spectator mode does not
+  keep the chunks around it loaded, so `fill` and `setblock` near a spectator bot fail with "not
+  loaded". Switch the bot to creative (or `forceload` the area) before building or cleaning up a
+  test scene.
+- **2026-10-19 No terrain drawn from 07:45 to 15:00.** The quad-pulling split left `collect_draws`
+  dropping the draw list, so neither terrain format drew a section while the frame stats still
+  counted them (found by bisect: a screenshot's lower half scored as sky). Every renderer number
+  measured in that window is void: the quad format's GPU memory saving, the pre-mesh slack gate
+  and the adaptive budget entries above. A bench that reports thousands of FPS, a GPU main pass
+  under 0.5 ms or a handful of draw calls means terrain is missing; look at a screenshot before
+  trusting it. With the list restored the quad format still draws scattered garbage (opt-in, task
+  open). The bench player `perfmem` had lost its saved flight: a creative player teleported into a
+  chunk its client has not loaded sinks (vanilla) and lands, so stand it on the ground at the spot
+  first, double-tap jump (input script), then teleport it up.
+- **2026-10-19 Quiet-machine renderer A/B (after the fix).** Reference spot, 1408x828 window,
+  two interleaved runs each, average / p99 frame interval in ms.
+  Still camera: meshing every section (before mesh-visible-sections) rd 12 3.95 / 11.1,
+  rd 32 6.77 / 9.9, GPU memory 946 / 2750 MiB; visible-only rd 12 4.14 / 11.2, rd 32 9.89 / 28.1,
+  566 / 825 MiB; main now matches visible-only. At rd 32 visible-only draws the same 10.7M
+  indices but the GPU main pass takes 8.8 ms instead of 6.0 (85 multi-draws instead of 613, the
+  resident sections packed into fewer arenas), with p99 spikes at 28 ms: open question.
+  Turns path, rd 32: off 7.81 / 27.0, cone 7.87 / 28.1, predict 7.61 / 27.2, adaptive budget
+  7.37 / 19.0, cone + adaptive 7.63 / 19.1; visible-unmeshed section-frames 9359 off, about 3700
+  with cone (-60 %). rd 12: off 3.06 (runs 2.4 and 3.7), cone 3.72, predict 3.91, adaptive 4.14,
+  cone + adaptive 3.97; unmeshed 7929 off, 2848-3500 with cone or predict. Adaptive is the clear
+  rd 32 win (p99 -30 %); cone + adaptive keeps it and cuts pop-in by 60 % at rd 32; rd 12 is too
+  noisy to decide (more runs before changing defaults).
+- **2026-10-19 Visible-only at rd 32, second look.** Rechecked on a quiet machine with the bench's
+  pop-in counter switched off (two interleaved runs each, still camera, average / p99 ms): meshing
+  every section 6.60 / 9.4 and 6.63 / 9.6 (GPU main 5.9); visible-only 9.20 / 29.3 and
+  7.78 / 27.7 (GPU 7.8 and 6.7) without the counter, 9.54 / 29.1 and 9.55 / 29.4 with it. rd 12
+  is even (3.87-3.99). So the entry above stands: the gap is real and sits in the GPU main pass
+  and in p99 spikes. Two leads ruled out on the way: the occlusion walks do not keep re-running
+  at a still camera (about 200 walks, all in the first 4 s while 3,700 chunks stream in, none in
+  the measured phase), and draw order (unstable, stable, distance, visit) moves the GPU main pass
+  by only 5 %. The bench's own pop-in count (`update_premesh` walks the whole visible mask with
+  hash lookups every frame, only when the bench tracks pop-in and smart culling is on) costs
+  about 1 ms per frame quiet and 2-3.4 ms under load: it biases every visible-only bench number
+  and should become incremental.
+- **2026-10-19 Cheap headless workers (Haiku 5.5, Sonnet 5.5).** Measured on three tasks already
+  done by GLM workers: with economy rules Haiku cost $0.15-0.31 a task and Sonnet $0.45-3.05;
+  without them Haiku cost 8.5x more (its price rises 5x above a 100K-token prompt). A run's cost
+  is requests x prompt size, re-read from cache each request, and half of every prompt was fixed
+  overhead: 28.5K tokens before the first read (unused tool definitions 9.5K, CLAUDE.md and
+  AGENTS.md 6K, Claude Code's system prompt 3K). `tools/worker/run.py` starts a worker at 13-15K
+  (six tools, no settings from disk, `tools/worker/RULES.md` appended, the `hx context`
+  orientation pack). Shell searches filled 70-86 % of Haiku's context and whole-file reads
+  52-79 % of Sonnet's, hence `scripts/hx`. Found on the way: in `dontAsk` mode every read through
+  the `cache` symlink is refused unless the cache is passed with `--add-dir`; the allow-list also
+  refuses loops, `$(...)`, `$VAR` expansion and heredocs (the worker hook now says so precisely);
+  a headless session ends when the model ends its turn to wait for a background task (Haiku did
+  in 3 of 4 runs; the hooks now refuse background commands and hold the stop until `hx done`);
+  stream-json per-message usage under-reports output, the result event is exact; Claude Code
+  clears old tool results only after an hour idle, so a long run's context only shrinks by
+  auto-compaction.
+- **2026-10-20 Where the GPU time goes (rd 32, Radeon 860M, RADV).** The terrain pass is bound by
+  geometry, not pixels: at 1/16 of the pixels the GPU main pass fell only from 9.9 to about 7.5 ms.
+  Vertex-shader trims barely matter (no lightmap or no fog about -0.5 ms; a position-only shader
+  still about 6 ms), and dropping the shader's sRGB work saves nothing measurable. Per sub-draw of
+  a multi-draw-indirect costs about 0.8 ms per frame with empty draws and 1.6 ms with one triangle
+  each at rd 32, so splitting draws further must remove more vertices than it adds draws. What
+  wins is drawing fewer vertices: fewer sections (the walk below) and skipping back-facing groups.
+- **2026-10-20 The occlusion walk follows `SectionOcclusionGraph.runUpdates`.** Haste's walk drew
+  632 sections at rd 12 and 3215 at rd 32 where vanilla draws 507 and 2646. Three deviations: it
+  walked a square, not vanilla's view circle (`ChunkTrackingView.isInViewDistance`, which tests
+  `max(0, |dx| - 1)^2 + max(0, |dz| - 1)^2 < vd^2`, plus `|dy| <= vd` on sections); it kept
+  empty sections in the visible list (vanilla only adds sections with geometry to its section
+  tree); and the advanced-culling ray started at the camera-facing corner on all axes instead of
+  `getRelativeFrom`'s per-face corner. Now 486 / 2677 sections, cull 3.9 -> 1.41 ms, resident
+  sections at rd 32 3355 -> 2803.
+- **2026-10-20 Power saver makes frame times bimodal.** With the power-saver profile both clients
+  alternate between two GPU clocks, so averages and p90 swing by 30 % between runs of the same
+  binary (Haste rd 12 286 FPS in one run, 357 in the next). A/B runs must be interleaved and on
+  the same profile; vs-vanilla numbers on power saver only show the order of magnitude.
+- **2026-10-20 Facing groups from the geometry.** Direct model quads were grouped by their baked
+  nearest direction, so a crossed plant plane (45 degrees, `FaceBakery` facing = a side) sat in an
+  axis group and was skipped when the camera was behind that axis plane, though half of it still
+  faced the camera. Translucent kept one never-skipped range, so the underside of every water
+  surface (`FluidState.shouldRenderBackwardUpFace`) and the inner copies of its sides were
+  vertex-shaded every frame. Groups now come from the quad itself (`mesher::sink::axis_facing`):
+  in an axis plane -> that direction with the winding's sign, else group 6 (never skipped), for
+  every layer including translucent. Within a group the emission order is kept and the
+  translucent sort is stable, so coplanar blending (water under ice) is unchanged. Flight path at rd 32: GPU main pass
+  11.45 -> 10.0-10.6 ms, translucent sub-pass 1.6-2.0 -> 1.1-1.27 ms; rotated fallen logs no longer
+  show see-through holes. Adjacent ranges of one section are joined into one sub-draw
+  (`draw_list.rs`), 15286 -> 7904 sub-draws per frame.
+- **2026-10-20 Haste against vanilla, power saver (1408x828, reference spot).** rd 12: 357 FPS /
+  583 MB RSS against 402 FPS / 1489 MB (an earlier run: 286 against 248). rd 32: average 11.6 ms
+  against 9.7, median 7.47 against 7.85, p90 24 against 18.8, 9.5M indices drawn against 15.4M,
+  734 MB against 1967 MB RSS. Haste draws far fewer vertices and is faster in the median, but its
+  slow-frame tail is longer: that tail is the next target.
+- **2026-10-20 Two-phase GPU occlusion culling** (`renderer/gpu_cull.rs`). The CPU walk follows
+  vanilla's `SectionOcclusionGraph` and keeps every section a ray can see past the cave/visibility
+  graph, so behind a hill thousands of fully hidden sections were still drawn. Each frame a compute
+  pass first draws the opaque sections that were visible last frame, builds a depth pyramid from
+  that depth (R32Float, max reduction, mip sizes rounded down with the last texel covering the odd
+  edge), then tests every candidate's box against the pyramid and draws the newly visible opaque
+  ones; translucent draws keep their place and order (hidden ones get zero instances). Visibility
+  per section slot ping-pongs between two buffers. Ground spot rd 32: 6068 -> 1634 opaque draws,
+  frame 9.15 -> 3.05 ms; flight path GPU main 9.45 -> 7.62 ms; high spot (little to hide) 6305 ->
+  5593, frame time within noise. `HASTE_GPU_CULL=0` turns it off; statistics at debug level
+  (`RUST_LOG=haste_render::renderer::gpu_cull=debug`). Pitfall: a pyramid built with rounded-up
+  mip sizes exceeds wgpu's mip count for the texture (11 levels where 10 are allowed). An attempt
+  to measure on/off alternating inside one process gave nonsense (cull "on" 2.4x slower, the
+  per-frame toggling defeats last-frame visibility); compare separate runs.
+- **2026-10-20 GPU memory: 794 -> 432 MiB resident at rd 32.** Four changes: wgpu's
+  `MemoryHints::MemoryUsage` (gpu-allocator blocks of 8-64 MiB instead of 128-256; 790 -> 650 MiB
+  alone); the GUI atlas starts at 1024x1024 and doubles on demand up to 4096 (it was a fixed 64 MiB
+  texture; the shader reads texels, so a grow is a texture copy and a new bind group); u16 terrain
+  indices (indices are relative to the section's base vertex, every section seen has fewer than
+  65536 vertices; bigger ones go to u32 arenas); arenas reserve 2 indices per vertex instead of 3
+  (measured 1.53 at rd 32). It also fixed a leak: since 4f3cf35a the vertex upload passed an empty
+  index range to `finish_resident`, so freed sections never returned their indices. GPU main pass
+  9.73 -> 8.51 ms in the same run, frame time unchanged within noise. `HASTE_GPU_REPORT=1` makes
+  the offscreen bench print wgpu's allocations grouped by label.
+- **2026-10-20 Measuring renderer changes in one process.** Separate runs swing up to 30% on
+  this laptop (the GPU switches between 600, 1100 and about 2800 MHz states), more than most
+  changes. The offscreen bench now caps itself at two frames in flight
+  (`renderer/frames_in_flight.rs`; without it the queue ran ahead and an A/B came out inverted),
+  and `HASTE_AB_BLOCK=16` flips `haste_render::experiment::on()` every 16 frames and reports
+  the median on/off ratio over the pairs (`app/bench/ab.rs`): 60 s gives about 200 pairs and
+  +-2%. Only for stateless variants (a shader, a draw order, a draw split); anything meshed or
+  carried between frames still needs interleaved separate runs (A, B, A, B, at least four each).
+  A throwaway pipeline-statistics query (vertex and fragment invocations, clipper primitives)
+  around the terrain draws is worth rebuilding when the question is "how many".
+- **2026-10-20 What the terrain pass is made of at rd 32 (reference spot, Radeon 860M).**
+  2.35M triangles reach the rasterizer, with 1.9 vertex and 1.9 fragment invocations per
+  triangle and 3.7x overdraw: the triangles are tiny and the cost is per triangle and per
+  vertex, not per pixel. Per million indices: solid 0.9 ms, cutout 0.94, leaves (cutout
+  mipped) 1.32, translucent 0.66. Vanilla draws 15.4M indices against Haste's 7.6M but its
+  back faces die cheaply in the driver (NGG culling), so both rasterize about the same front
+  faces: matching vanilla here means fewer front-facing triangles or cheaper vertices. Dead
+  ends, each measured: splitting every sub-draw in two (+7400 sub-draws) costs 9% (about 0.12
+  us per multi-draw sub-draw); capping multi-draw calls at 64 or 8 sub-draws is 1.4% / 2.5%
+  slower; drawing a skipped back-facing group to join two ranges (up to 256 or 1024 indices)
+  is 1.1% / 1.8% slower; looser greedy merging (light and tint ignored, an upper bound for
+  per-pixel lighting) removes only 19% of the indices, since rd 32 terrain is too bumpy to
+  merge further. Haste's GPU buffers live in GTT: the 512 MiB VRAM carve-out is nearly full
+  with the desktop before the game starts.
+- **2026-10-20 Every vertex output is a vec4 on RDNA.** The vertex shader's outputs go to the
+  attribute ring in memory, one 16-byte slot per location whatever its width. Packing vanilla's
+  per-vertex colour with the fog factor (5% at rd 32), then the sprite index into the UV's vec4
+  as a float (it is equal at all three corners, so interpolation returns it; 5.8%), took the
+  terrain from four outputs to two. Trimming shader arithmetic barely moves the pass (a
+  position-only shader still takes about 60% of it).
+- **2026-10-20 Diagonal facing groups.** Crossed plant planes (vanilla's `cross` models) face a
+  horizontal diagonal; they now have four groups of their own (11 per layer), skipped like the
+  axis groups when the whole section box is behind the plane. A storage order found by search
+  (`mesher::GROUP_ORDER`) keeps the visible groups in at most three ranges. Indices drawn at rd
+  32: -6.8% at both spots, GPU time -7% at the ground spot.
+- **2026-10-20 Shared corner vertices.** A full unit face now takes UVs that count whole
+  blocks from the section corner (`merge::section_uvs`, the merged rectangles' rings too), so
+  coplanar neighbours with the same sprite, tint and corner light produce identical corner
+  vertices, which the sink stores once. Vertex invocations 4.57M -> 3.66M at rd 32, GPU memory
+  429 -> 341 MiB, GPU main pass -5.7% at rd 32 and about -40% at rd 12. Stored vertices
+  roughly halved but invocations fell only 20%: the hardware reuses a vertex within a short
+  window only. Reordering each group's faces along a Morton curve to keep neighbours close
+  changed nothing (3.66M -> 3.64M) and was dropped.
+- **2026-10-20 CPU side of the frame at rd 32.** The draw list costs 1.3 ms per frame (the
+  occlusion walk runs on a worker): the per-section emit 0.95 ms, of which half the slab lookups
+  miss (the walk's order holds empty sections) and every drawn section carries about 11 slab
+  layers (layer x facing group). A facing mask per section and a counting sort by arena saved
+  only 0.06 ms; the next step is a flat per-visible-section cache rebuilt when the walk result
+  or the slab changes. Frames are GPU-bound on this laptop, so this pays on faster GPUs.
+  Done (`renderer/visible_list.rs`): the cached list, grouped by arena at rebuild, with each
+  layer's groups as storage-order offsets walked by bitmask, takes the draw list from 1.1 to
+  0.55 ms per frame. What is left: emit 0.27 ms (2803 frustum tests and pushes of 64-byte
+  draws), copying the buckets into the draw list and summing indices 0.15 ms, the per-draw
+  GPU data 0.13 ms. Shrinking `SectionDraw` (the bounds belong to the section, not the draw)
+  is the next lever. The cache only helps frames where neither the mask nor the slab
+  changed; while chunks stream in it rebuilds every frame at the old cost.
+- **2026-10-20 The scratchpad is RAM.** `/tmp` is a 16 GiB tmpfs; a night of 240 MB release
+  binaries kept for A/B runs had taken 8 GiB of it. Delete experiment binaries as soon as
+  their comparison is done.
+- **2026-10-20 What the embedded JVM costs.** Windowed bench at rd 12 (settled RSS 591 MiB):
+  heap 152 MiB committed (104 used), metaspace 68 MiB, code cache 11 MiB, about 231 MiB before
+  the JVM's native overhead (GC tables, thread stacks, the library), which was not measured; the
+  estimate is 250-300 MiB of the 591, against vanilla's 1.45-1.7 GB process. Per frame it costs
+  almost nothing: everything outside the renderer (the JVM's GUI building included) took
+  0.1-0.3 ms, and none of the traced slow frames came from it. Boot is 6.6 s (4.8 s of it
+  vanilla's bootstrap) before the HUD is ready. Porting the HUD, chat and screens to Rust and
+  keeping Java only for mods was considered and not done: vanilla has 127 screen classes plus
+  the HUD, chat with Brigadier suggestions and text components, all of which would have to be
+  ported exactly; the JVM returns with the first mod anyway; and the HUD and screens are among
+  the most-modded parts (`Gui.render` injections, `Screen` subclasses), so a Rust UI would need
+  a landmark and a proxy for every one of them. Cheaper steps first: class data sharing, a
+  measured native footprint, trimmed heap limits, a background boot (roadmap F1-F4). A no-mods
+  Rust UI stays possible later but changes architecture rule 1 (roadmap F11).
+- **2026-10-20 Slow frames are the GPU's clock, not Haste's work.** `--bench-trace PATH` writes
+  every measured frame as a CSV row. At the reference spot on power saver the slow 1% spent
+  their time waiting for a swapchain image (rd 12: 6.3 of 8.2 ms) with no uploads, steady CPU
+  steps and 0.1-0.3 ms outside the renderer; the same still view took 3-15 ms of GPU time
+  within a fraction of a second (the GPU timer is read every 4 frames). Mailbox against
+  Immediate made no difference (rd 32 p99 18.2 against 17.1 ms). Haste had no frame limiter at
+  all; vanilla's (`FramerateLimiter`, `FramerateLimitTracker`) is ported now, and a cap evens
+  the pacing: rd 32 at 60 FPS p50 16.65, p99 18.39 ms (unlimited 11.81 / 18.21), rd 12 at 90 FPS
+  p50 11.06, p99 13.05 ms (unlimited 3.66 / 6.89). The 16.7 ms p99 seen at rd 32 in performance
+  mode is not traced yet (roadmap F7).

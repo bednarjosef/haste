@@ -31,6 +31,13 @@ public final class Proxies {
     public static SoundManager sound;
     public static GuiGraphicsExtractor graphics;
     public static LocalPlayer player;
+    /** The vehicle we ride, while it is a living entity (vanilla {@code Entity.getVehicle}; a
+     * horse-family proxy — Haste's one mount proxy, see NOTES.md "Mount HUD"). */
+    public static net.minecraft.world.entity.animal.equine.Horse mount;
+    /** The entity under the crosshair, while Rust's pick is a living, alive one (vanilla
+     * {@code Minecraft.crosshairPickEntity}; a zombie proxy stands in — the HUD attack
+     * indicator's full icon — until per-entity proxies exist). */
+    public static net.minecraft.world.entity.monster.zombie.Zombie crosshairPick;
     public static Inventory inventory;
     public static net.minecraft.world.entity.EntityEquipment equipment;
     public static net.minecraft.client.multiplayer.ClientLevel level;
@@ -56,7 +63,8 @@ public final class Proxies {
         level = make(net.minecraft.client.multiplayer.ClientLevel.class);
         connection = service(net.minecraft.client.multiplayer.ClientPacketListener.class);
         // the player's inventory and equipment are real vanilla containers on the player proxy
-        equipment = new net.minecraft.world.entity.EntityEquipment();
+        // (PlayerEquipment, like Player.createEquipment: the main hand slot is the selected hotbar stack)
+        equipment = new net.minecraft.world.entity.player.PlayerEquipment(player);
         set(player, "equipment", net.minecraft.world.entity.EntityEquipment.class, equipment);
         inventory = new Inventory(player, equipment);
         set(player, "inventory", Inventory.class, inventory);
@@ -116,6 +124,23 @@ public final class Proxies {
             throw new IllegalStateException("defining the player's entity data", e);
         }
         set(minecraft, "player", LocalPlayer.class, player);
+        // the mount proxy (a living vehicle: its health feeds the HUD's vehicle hearts). Like the
+        // player, the type and dimensions its constructor would set, from the horse's registry entry
+        // (the proxy never runs it)
+        mount = make(net.minecraft.world.entity.animal.equine.Horse.class);
+        var horseType = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getValue(
+            net.minecraft.resources.Identifier.withDefaultNamespace("horse"));
+        set(mount, "type", net.minecraft.world.entity.EntityType.class, horseType);
+        set(mount, "dimensions", net.minecraft.world.entity.EntityDimensions.class, horseType.getDimensions());
+        set(mount, "eyeHeight", float.class, horseType.getDimensions().eyeHeight());
+        // the crosshair pick's stand-in proxy (the HUD's attack indicator asks it: a LivingEntity
+        // whose isAlive holds while Rust's flag has it assigned to Minecraft.crosshairPickEntity)
+        crosshairPick = make(net.minecraft.world.entity.monster.zombie.Zombie.class);
+        var zombieType = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getValue(
+            net.minecraft.resources.Identifier.withDefaultNamespace("zombie"));
+        set(crosshairPick, "type", net.minecraft.world.entity.EntityType.class, zombieType);
+        set(crosshairPick, "dimensions", net.minecraft.world.entity.EntityDimensions.class, zombieType.getDimensions());
+        set(crosshairPick, "eyeHeight", float.class, zombieType.getDimensions().eyeHeight());
         camera = make(net.minecraft.client.Camera.class);
         set(minecraft, "gameRenderer", net.minecraft.client.renderer.GameRenderer.class, make(net.minecraft.client.renderer.GameRenderer.class));
         minecraft.level = level;
@@ -145,6 +170,7 @@ public final class Proxies {
             ConnectionImpl.searchTrees(connection));
         set(connection, "level", net.minecraft.client.multiplayer.ClientLevel.class, level);
         // ClientCommonPacketListenerImpl.minecraft: the kept handlers' thread check reads its packetProcessor
+        // (and handleUpdateRecipes and the other recipe-book handlers reach the client through it)
         set(connection, "minecraft", Minecraft.class, minecraft);
         // the HUD and the chat pipeline are real vanilla Java (tier 3) over the proxies
         toasts = new net.minecraft.client.gui.components.toasts.ToastManager(minecraft, options);

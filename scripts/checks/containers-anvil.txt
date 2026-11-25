@@ -1,0 +1,52 @@
+# Container check: anvil. The anvil screen is 176x166 centred in the 480x270 GUI, so its
+# origin is (152, 52) and a slot's centre is its menu position + 8 (vanilla AnvilMenu:
+# input (27,47), ingredient (76,47), result (134,47); the player inventory and hotbar are
+# the container screen's standard rows).
+#   input (menu slot 0)    -> (152+27+8, 52+47+8)  = (187, 107)
+#   ingredient (slot 1)   -> (152+76+8, 52+47+8)  = (236, 107)
+#   result (menu slot 2)  -> (152+134+8, 52+47+8) = (294, 107)
+#   player inventory (slots 3+) -> (152+8+8, 52+84+8) = (168, 144), step 18
+#   hotbar (slots 30+)    -> (152+8+8, 52+142+8)  = (168, 202), step 18
+# The runner tps us into the check's own area, gives a wooden sword and one XP level, and
+# places the anvil when the setup screenshot appears. The rename costs 1 level.
+wait_until joined
+wait_until settled
+screenshot canvil-setup
+# The runner now tps us to (122.5, 71, 2.5) facing the anvil, clears the inventory, gives
+# the sword and the level. Waiting for the hotbar absorbs the busy shared server.
+wait_until hotbar_item
+# Open the anvil: look at it and use (the runner placed it at (122, 71, 5), on this
+# check's own stone platform; from the eye at (122.5, 72.62, 2.5), pitch 20 aims at the
+# face at y ~71.7).
+look 0 20
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait_until screen_open
+wait 10
+screenshot canvil-open
+# The sword goes into the input (slot 0), from hotbar slot 0.
+click left 168 202
+click left 187 107
+# The anvil's name field is focused on open (vanilla focuses it in init): type the new
+# name. The rename costs 1 level and fills the result.
+type RenamedSword
+wait 10
+screenshot canvil-named
+# Take the result: the renamed sword, shift-click straight into the inventory.
+key_down LShift
+wait 2
+click left 294 107
+wait 2
+key_up LShift
+wait 10
+screenshot canvil-taken
+# Close with E (the inventory key, vanilla's keyInventory path in keyPressed).
+key E
+wait 20
+wait_until screen_closed
+screenshot canvil-closed
+# 10 s tail: the runner reads `data get entity ... Inventory` (the sword's custom name)
+# from this frame on.
+wait 200

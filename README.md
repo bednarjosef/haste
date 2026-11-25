@@ -1,120 +1,251 @@
+<div align="center">
+
 # Haste
 
-A Minecraft: Java Edition 26.3 client written in Rust, designed to run Fabric mods through a
-compatibility layer later (Phase 2). Phase 1, this repo's current state, is a fast vanilla client
-with the mod architecture designed in. Licensed GPL-3.0-or-later.
+**A fast Minecraft: Java Edition client, written in Rust.**
 
-## How far along it is
+[![License: GPL v3+](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![Minecraft](https://img.shields.io/badge/Minecraft-Java%2026.3-62b47a.svg)](#getting-started)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
 
-What a player needs to play Haste like the original game, without noticing a difference.
-Fabric mod support (Phase 2) is not counted here.
+</div>
 
-**43 of 62 done, 15 partly done, 4 not started (about 81 %, counting partly done as half).**
+Haste is a new client for **Minecraft: Java Edition 26.3**. The world, physics, networking,
+rendering and sound are written in Rust. The menus and screens are the game's own Java code,
+loaded from your copy of the game. The goals:
 
-✅ done: works in the game window today, checked against a real server.
-🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
-⬜ not started.
+- **Plays exactly like vanilla.** Anything you can see, hear or feel, and every packet the
+  server sees, is ported from the game's own code: same constants, same math, same order.
+- **Faster than vanilla.** A [wgpu](https://wgpu.rs) renderer (Vulkan, Metal, DX12) that does
+  its heavy work off the render thread.
+- **Runs Fabric mods** later, through a compatibility layer (Phase 2, not started).
 
-### Launching and setup
-- ✅ Install the game files (`haste setup`): downloads 26.3 from Mojang and runs the data generator; a second run is instant
-- ✅ Options screens: vanilla's options screen and every sub-screen open from the pause menu (checked by script)
-- ✅ Saved options: vanilla's options.txt; changes in the options screens apply live (FOV, render distance, sensitivity, max FPS, vsync, GUI scale, volumes)
-- ✅ Title screen: vanilla's title screen is shown when `haste` starts
-- ✅ Singleplayer: the world list, Create New World and Save and Quit to Title, played through a local server (checked by script); `haste singleplayer --world NAME` also works
-- ✅ Server list: vanilla's multiplayer screen with the saved servers, status pings, Add Server and Direct Connection
-- ✅ Joining a server: from the server list or Direct Connection, or `haste --server host:port`
-- ✅ Languages: every language of the game, switched live from Options > Language
-- 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow and store the account, untested end to end (needs a Microsoft app id)
-- 🟡 Keybind remapping: the controls follow vanilla's key mappings (unit-tested); not yet checked by hand in the window
-- ⬜ Resource packs (selection screen, applying server resource packs)
+## Status
 
-### Connecting to servers
-- ✅ Offline-mode vanilla and Fabric servers: join and stay connected on normal terrain, every packet decodes
-- ✅ Configuration phase, server transfers, cookies, resource pack answers
-- 🟡 Online-mode servers: encryption and session join need the Microsoft login above
-- 🟡 Signed chat (required by online-mode servers): message and command signing match vanilla's format (unit-tested); used once online mode works
-- 🟡 Item data: stacks decode and round-trip, and names, enchantments, damage, rarity and tool rules read into typed values; the game logic does not use them yet
+Haste is in development. **What works today:** singleplayer, and offline-mode servers (vanilla
+or Fabric). You can explore, build, fight, ride, use every menu and container, and change the
+options as in vanilla.
 
-### World
-- ✅ Terrain: chunks, light, block and multi-block updates, chunk loading and unloading
-- ✅ Biomes and their grass, foliage and water colours
-- ✅ Dimensions: Overworld, Nether, End, respawn and dimension changes
-- ✅ Block entities (chests, signs, banners, ...): stored with their chunks and kept up to date
-- 🟡 Day and night, sun, moon, stars and clouds work; rain, snow and thunder are not drawn yet
+**What does not work yet:**
 
-### Rendering
-- ✅ Textured blocks and block models
-- ✅ Water and lava with flow direction and corner heights
-- ✅ Block selection outline and break cracks
-- ✅ Fullscreen (F11)
-- ✅ Animated textures (water, lava, fire, portals), prepared off the render thread
-- ✅ Third-person view (F5)
-- ✅ First-person hand and held item (hidden in third person)
-- ✅ Dropped items, item frames and paintings drawn as themselves, with vanilla's bob, spin and stack copies
-- ✅ Fog: vanilla's distance fog, colours, sky disc and sunrise, and the water, lava, powder snow, Nether, End, blindness and darkness fog
-- ✅ Screen effects: damage tilt, red flash on hit entities, vignette, underwater, fire, in-wall, pumpkin, powder snow, spyglass, portal and nausea
-- ✅ Entity animation: walking, head and body turning, attack swings, aggressive arms, death tilt, sleeping, swimming and mob-specific poses
-- ✅ Armour, held items, heads and elytra on mobs and players
-- 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
-- 🟡 Mobs and players: vanilla's models for all 91 mob types with babies, variants, sizes and states, default skins, name tags and shadows; a few models still have misplaced parts (horse heads)
-- 🟡 Particles: the server's particles are drawn with vanilla's per-type motion, size and lifetime; block-breaking and other client-side particles not yet
-- 🟡 Performance: `haste --bench` measures about 900-980 FPS (1.0-1.1 ms per frame) at 1920x1080, render distance 12, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
-- 🟡 Block entities drawn: chests (lid animation), ender chests, shulker boxes, signs with text, banners and heads (beds are ordinary block models); lecterns, bells, campfire items, spawners and the other block entities not yet
-- ⬜ Downloaded player skins and capes
+- **Online-mode servers**, which means most public servers. The Microsoft login and the server
+  encryption are written and tested offline, but Haste ships no Microsoft app id, so you cannot
+  log in yet.
+- **Mods.** That is Phase 2.
+- **A few things in game are missing or still placeholders:**
+  - guardian lasers and the End crystal and dragon beams are not drawn;
+  - End crystals, wind charges and shulker bullets are drawn as boxes;
+  - the server dialog screens added in 26.3 do not open;
+  - most particle types (all but about 35 of vanilla's ~128) move with a default behaviour
+    instead of their own;
+  - sounds from a moving mob stay where they started.
+- **Not yet checked by eye or ear:** player skins and capes, the newest block entities, and
+  sound effects and music.
 
-### HUD and screens
-These run as the game's own Java code inside Haste, with keyboard and mouse input. Checked with input scripts (`haste --script`, `scripts/checks/`) against a vanilla server.
+### Progress
+
+The checklist below is what a player needs to play Haste in place of the vanilla game; mods are
+not counted. A partly done item counts as half. The percentage is a rough guide: one item can
+be a small feature or, like online-mode servers, a large one.
+
+**54 of 67 done, 11 partly done, 2 missing: about 89 %.**
+
+| Area | Done | Partly | Missing | |
+|---|---:|---:|---:|---:|
+| Launching and menus | 7 | 1 | 0 | 94 % |
+| Servers | 3 | 2 | 0 | 80 % |
+| World | 5 | 0 | 0 | 100 % |
+| Rendering | 13 | 5 | 1 | 82 % |
+| HUD and screens | 15 | 0 | 1 | 94 % |
+| Playing | 9 | 0 | 0 | 100 % |
+| Sound | 2 | 3 | 0 | 70 % |
+
+<details>
+<summary><b>The full checklist</b></summary>
+
+✅ done · 🟡 partly done · ⬜ missing
+
+**Launching and menus**
+- ✅ `haste setup` downloads the game from Mojang and prepares its data
+- ✅ Title screen, singleplayer world list, Create New World, Save and Quit
+- ✅ Server list with status pings, Add Server and Direct Connection
+- ✅ Options screens; options are saved in vanilla's `options.txt` and apply live
+- ✅ Key binds can be changed and are kept
+- ✅ Every language, switchable live
+- ✅ Resource packs: your own, and server packs with the accept/decline prompt
+- 🟡 Microsoft login: works against a stand-in for Microsoft's servers; no real app id yet
+
+**Servers**
+- ✅ Offline-mode vanilla and Fabric servers
+- ✅ Configuration phase, server transfers, cookies
+- ✅ Item data: names, enchantments, damage, tool and attack speed rules
+- 🟡 Online-mode servers: written and unit-tested; needs the Microsoft login
+- 🟡 Signed chat: written and unit-tested; needs online mode
+
+**World**
+- ✅ Terrain: chunks, light, block updates, loading and unloading
+- ✅ Biome colours for grass, foliage and water
+- ✅ Overworld, Nether and End; respawning and changing dimension
+- ✅ Block entities (chests, signs, banners, ...) kept up to date
+- ✅ Day and night, sun, moon, stars, clouds, rain, snow, thunder and lightning
+
+**Rendering**
+- ✅ Blocks and block models, animated textures
+- ✅ Water and lava
+- ✅ Smooth lighting and ambient occlusion, matching vanilla's shots within about 3/255
+- ✅ Fog in every dimension and fluid, sky colours and sunrise
+- ✅ Block outline and breaking cracks
+- ✅ First-person hand and held item; third-person view (F5); fullscreen (F11)
+- ✅ Screen effects: hurt tilt, vignette, underwater, fire, pumpkin, spyglass, portal, nausea
+- ✅ All mobs and players with vanilla's models, variants, babies and animations
+- ✅ Armour, held items, heads and elytra; horse and wolf armour, saddles, llama carpets
+- ✅ Enchantment glint on items and armour
+- ✅ Dropped items, item frames, paintings and maps
+- ✅ Leashes
+- ✅ The world border wall and its warning vignette
+- 🟡 Other entities: boats, minecarts, arrows, tridents, thrown items, fireworks, falling
+  blocks, TNT, armour stands, fishing bobbers and display entities are drawn; End crystals,
+  wind charges and shulker bullets are still boxes
+- 🟡 Particles: all are shown; about 35 types move like vanilla, the rest use a default
+- 🟡 Block entities: chests, signs, banners, heads, beacons, end portals and more; the newest
+  are not yet checked on screen
+- 🟡 Player skins and capes: done, not yet checked on screen
+- 🟡 Speed: see [Performance](#performance); not yet compared with Sodium
+- ⬜ Beams: the guardian laser and the End crystal and dragon beams
+
+**HUD and screens** (vanilla's own Java code, running inside Haste)
 - ✅ HUD: hotbar, health, hunger, armour, air, experience
-- ✅ Chat: typing and sending (the server relays the message)
-- ✅ Pause menu
-- ✅ Player list (Tab), boss bars, scoreboard sidebar, titles and action bar
-- ✅ Player inventory and crafting grid, with the player model
+- ✅ Item cooldowns on the hotbar
+- ✅ Chat
+- ✅ Subtitles
+- ✅ Pause menu, and every button on it
+- ✅ Player list, boss bars, scoreboard, titles and action bar
+- ✅ Inventory and crafting
+- ✅ Creative inventory with search
+- ✅ Recipe book
+- ✅ Containers: chests, crafting table, furnace, anvil, enchanting, brewing, trading
+- ✅ Editing signs, books and command blocks
+- ✅ Advancements and statistics
 - ✅ Death screen and respawn
-- ✅ Debug screen (F3): vanilla's default entries with real values (checked against the server)
-- ✅ Creative inventory: every tab's items and search
-- ✅ Advancements and statistics screens, and every other pause-menu button
-- 🟡 Chests (clicks match vanilla byte for byte); furnace, crafting table, anvil, enchanting, brewing and trading are untested
-- ⬜ Editing signs, books and command blocks
-- ⬜ Recipe book
+- ✅ Debug screen (F3)
+- ✅ Spectator menu
+- ⬜ Server dialogs (new in 26.3)
 
-### Playing
-- ✅ Walking, sprinting, sneaking, jumping, swimming, creative flight and fall damage, accepted by the vanilla server without corrections
-- ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar (mouse wheel and 1-9)
-- ✅ Dropping items (Q, Ctrl+Q) and swapping to the off-hand (F)
-- ✅ Game modes: survival, creative, spectator (through walls) and adventure
-- ✅ Screenshot key (F2): saves to the screenshots folder
-- ✅ Elytra flight: gliding started from the game, firework boost (the server sees a normal glide)
-- 🟡 Riding: sitting in boats, minecarts, horses and pigs at vanilla's seat positions; steering vehicles not yet
+**Playing**
+- ✅ Walking, sprinting, sneaking, jumping, swimming, flying and fall damage, accepted by the
+  server without corrections
+- ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar
+- ✅ Dropping items and swapping hands
+- ✅ Survival, creative, adventure and spectator, including watching through another entity
+- ✅ Elytra flight with firework boosts
+- ✅ Riding boats, minecarts, horses, pigs and striders
+- ✅ Climbing ladders, vines and scaffolding
+- ✅ Explosion knockback
+- ✅ Screenshots (F2)
 
-### Sound
-- ✅ 3D sound: distance falloff and stereo panning from the player's eye, entity sounds follow the entity
-- ✅ Sounds of your own footsteps, mining, breaking, placing and falling, with vanilla's step distance
-- 🟡 Sound effects: the server's sounds play in the window (block, entity and stopped sounds, per-category volumes); not yet checked by ear
-- 🟡 Music: plays by situation (game, creative, underwater) with vanilla's pauses; not yet checked by ear
+**Sound**
+- ✅ Your own footsteps, mining, breaking, placing and falling
+- ✅ Ambient sound: caves, underwater and biome loops
+- 🟡 3D sound: distance and stereo work; sounds from moving mobs do not follow them
+- 🟡 Sound effects from the server: they play, not yet checked by ear
+- 🟡 Music: plays by situation, not yet checked by ear
 
-## Try it
+</details>
+
+### Performance
+
+Measured on 2026-10-20 on a laptop (Radeon 860M on power saver, 1408x828 window), at the same
+spot as vanilla:
+
+| Render distance | Haste median frame | Vanilla median frame | Memory |
+|---|---|---|---|
+| 32 | 4.1-4.8 ms | 7.9 ms | 2.8x less (716 MB against 2.0 GB) |
+| 12 | within noise of vanilla | about the same | 2.7x less |
+
+## Getting started
+
+You need [Rust](https://rustup.rs) and a GPU with Vulkan, Metal or DX12. On Linux, also install
+the ALSA headers (`libasound2-dev` or your distribution's equivalent).
 
 ```bash
-cargo run --release --bin haste -- setup                         # once: game files and data generator
-cargo run --release --bin haste -- singleplayer --world test     # a local world, opens the game window in it
-cargo run --release --bin haste -- --server host:port             # or join any offline-mode 26.3 server
+git clone https://github.com/bednarjosef/haste
+cd haste
+cargo run --release --bin haste -- setup   # once: downloads the game and a Java 25 runtime
+cargo run --release --bin haste            # opens the title screen
 ```
 
-Any offline-mode 26.3 server works with `--server` (`--username NAME` sets the player name).
-Controls are vanilla's defaults: WASD, space, shift, ctrl, mouse to look, left click to break,
-right click to place or use, 1-9 and the mouse wheel for the hotbar, Q / Ctrl+Q to drop, F to
-swap hands, F11 for fullscreen. The HUD shows
-health, hunger and the hotbar; F5 switches to third person.
-
-## Build
-
-Pinned stable Rust (`rust-toolchain.toml`), no system-wide installs. First run:
+You can also join a server or open a world directly:
 
 ```bash
-cargo run --release --bin haste -- setup        # downloads 26.3 from Mojang into the cache, runs the data generator
+cargo run --release --bin haste -- --server host:port --username Steve
+cargo run --release --bin haste -- singleplayer --world test
 ```
 
-Everything downloaded or derived from Mojang's files lives in `cache/` (gitignored) or
-`$HASTE_CACHE`. Nothing from it is ever committed.
+Controls and options are vanilla's. Everything downloaded from Mojang stays in `cache/` (or
+`$HASTE_CACHE`); none of it is in this repository.
 
-See `TASKS.md` (board), `NOTES.md` (decisions) and `docs/HANDOFF.md` (state and known problems).
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph rust["Rust (Haste)"]
+        net["Protocol"] --> world["World, chunks, light"]
+        world --> phys["Physics"]
+        world --> render["Renderer"]
+        ent["Entities"] --> render
+    end
+    subgraph jvm["Java, inside Haste"]
+        proxies["Java views of Rust objects"]
+        vanilla["Vanilla code from your game:<br/>screens, HUD, chat"]
+    end
+    world <--> proxies
+    vanilla --> proxies
+    vanilla -- "one draw list per frame" --> render
+```
+
+- **Rust** owns everything with live game state: the world, entities, physics, the connection.
+- **Java views** give the game's Java code access to those Rust objects, one view per object
+  for its whole lifetime, so mods can later keep their own data on them.
+- **Vanilla Java** from your game runs everything else: screens, widgets, chat, data formats.
+  Its drawing is collected into one list per frame.
+
+## Repository layout
+
+| Crate | What it does |
+|---|---|
+| [`haste-client`](crates/haste-client) | The `haste` program: window, game loop, input |
+| [`haste-protocol`](crates/haste-protocol) | Network protocol, packets, encryption, login |
+| [`haste-world`](crates/haste-world) | Chunks, light, block updates |
+| [`haste-physics`](crates/haste-physics) | Movement and collision |
+| [`haste-entity`](crates/haste-entity) | Entities, their models and animations |
+| [`haste-render`](crates/haste-render) | The renderer, particles, GUI drawing |
+| [`haste-assets`](crates/haste-assets) | Textures, models, fonts, resource packs |
+| [`haste-audio`](crates/haste-audio) | Sound and music |
+| [`haste-jvm`](crates/haste-jvm) | The embedded Java runtime and the bridge to it |
+| [`haste-data`](crates/haste-data) | Block, item and registry data from the game |
+| [`haste-setup`](crates/haste-setup) | Downloads, options, the local singleplayer server |
+| [`haste-testkit`](crates/haste-testkit) | Test data formats, screenshot comparison, benchmarks |
+| [`haste-core`](crates/haste-core) | Shared types |
+
+`tools/recorder-mod` is a Fabric mod that records reference data from the real game.
+`phase2/` holds the experiments for mod support.
+
+## Development
+
+```bash
+scripts/ci-local.sh                                     # checks for what your branch changed
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Tests that need the game files are skipped until `haste setup` has run. In-game checks live in
+`scripts/checks/`. Read [AGENTS.md](AGENTS.md) before contributing: vanilla behaviour is looked
+up in the game's code, never guessed.
+
+## License
+
+Haste is free software under the [GNU General Public License v3.0 or later](LICENSE). Code it
+reuses from other projects is listed in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+Haste is not an official Minecraft product and is not approved by or associated with Mojang or
+Microsoft. You need your own copy of Minecraft: Java Edition to play.

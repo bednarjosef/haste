@@ -11,6 +11,7 @@ use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{BlockPos, DVec3};
 
+use crate::climbing::{self, ClimbableBlocks};
 use crate::collision::no_collision;
 use crate::movement::{accelerate, apply_speed_factor, move_entity, Impulse};
 use crate::trig;
@@ -119,6 +120,7 @@ pub(crate) fn swim_up(state: &mut PlayerState) {
     state.velocity.y += SWIM_UP;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn travel_water(
     state: &mut PlayerState,
     input: &InputState,
@@ -127,10 +129,13 @@ pub(crate) fn travel_water(
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
+    climb: &dyn ClimbableBlocks,
 ) {
-    // `LivingEntity.travelInFluid` decides `isFalling` from the velocity the tick started with,
-    // before the sneak sink, the swim steering, the acceleration and the move.
+    // `LivingEntity.travelInFluid` decides `isFalling` and the base gravity from the velocity
+    // the tick started with, before the sneak sink, the swim steering, the acceleration and the
+    // move (`getEffectiveGravity`: slow falling caps it at 0.01 while falling).
     let is_falling = state.velocity.y <= 0.0;
+    let base_gravity = crate::elytra::effective_gravity(attrs, state.velocity, state.slow_falling);
     let old_y = state.pos.y;
     if input.sneak {
         state.velocity.y -= SWIM_DOWN;
@@ -148,12 +153,15 @@ pub(crate) fn travel_water(
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
     move_entity(state, attrs, motion, world, shapes, blocks);
+    // `travelInFluid`: a horizontal collision with a climbable (vines in water) climbs it; the
+    // jump key does not count here, unlike in air.
+    climbing::climb_after_move(state, false, world, climb);
     apply_speed_factor(state, world, blocks);
     state.velocity.x *= h_drag;
     state.velocity.y *= WATER_DRAG;
     state.velocity.z *= h_drag;
     state.velocity.y = fluid_falling_adjusted_movement(
-        attrs.gravity,
+        base_gravity,
         is_falling,
         state.sprinting,
         state.velocity.y,
@@ -171,6 +179,7 @@ pub(crate) fn travel_lava(
     blocks: &dyn BlockPhysics,
 ) {
     let is_falling = state.velocity.y <= 0.0;
+    let base_gravity = crate::elytra::effective_gravity(attrs, state.velocity, state.slow_falling);
     let old_y = state.pos.y;
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
@@ -185,7 +194,7 @@ pub(crate) fn travel_lava(
         state.velocity.y *= LAVA_DRAG_SHALLOW_VERTICAL;
         state.velocity.z *= LAVA_DRAG_SHALLOW;
         state.velocity.y = fluid_falling_adjusted_movement(
-            attrs.gravity,
+            base_gravity,
             is_falling,
             state.sprinting,
             state.velocity.y,
@@ -193,8 +202,8 @@ pub(crate) fn travel_lava(
     } else {
         state.velocity *= LAVA_DRAG;
     }
-    if attrs.gravity != 0.0 {
-        state.velocity.y -= attrs.gravity / LAVA_GRAVITY_DIVISOR;
+    if base_gravity != 0.0 {
+        state.velocity.y -= base_gravity / LAVA_GRAVITY_DIVISOR;
     }
     jump_out_of_fluid(state, attrs, old_y, world, shapes, blocks);
 }
@@ -467,10 +476,30 @@ mod tests {
     }
 
     #[test]
+    fn slow_falling_caps_the_fluid_base_gravity() {
+        // vanilla `LivingEntity.travelInFluid` computes baseGravity from `getEffectiveGravity`,
+        // so slow falling while sinking caps the water sink at 0.01 / 16.
+        let w = water_pool_eyes_dry();
+        let mut s = water_player();
+        s.velocity = DVec3::new(0.2, -0.1, 0.0);
+        s.slow_falling = true;
+        tick_once(&w, &mut s, &InputState::default());
+        // drag 0.8 on y, then baseGravity/16 (0.01/16) subtracted.
+        assert!(
+            (s.velocity.y - (-0.08 - 0.01 / 16.0)).abs() < 1e-12,
+            "sink velocity {:?}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
     fn water_gravity_sixteenths_skipped_while_sprinting() {
         // Vanilla LivingEntity.getFluidFallingAdjustedMovement skips the sink when sprinting,
         // whatever the pose (the swim flag is irrelevant).
-        let w = water_pool_eyes_dry();
+        // The eyes under water: in shallow water vanilla's `shouldStopRunSprinting` ends the
+        // sprint before the move (`isSprintingPossible(false)`).
+        let mut w = TestWorld::flat(0, STONE);
+        w.fill((-2, 0, -2), (2, 12, 2), WATER_SOURCE);
         let mut s = water_player();
         s.sprinting = true;
         tick_once(
@@ -481,9 +510,14 @@ mod tests {
                 i.sprint = true;
             }),
         );
+        // Sprinting under water with water at the feet also starts the swim this tick
+        // (`updateSwimming` sees last tick's sprint), so `Player.travel` steers y toward the
+        // level look (0.06) before the drag; no gravity sink follows.
+        let expected = (0.1 + (0.0 - 0.1) * SWIM_STEER) * WATER_DRAG;
+        assert!(s.swimming);
         assert!(
-            (s.velocity.y - 0.08).abs() < 1e-12,
-            "sprinting sink velocity {:?}",
+            (s.velocity.y - expected).abs() < 1e-12,
+            "sprinting sink velocity {:?}, expected {expected}",
             s.velocity.y
         );
     }
@@ -553,14 +587,18 @@ mod tests {
         let w = shallow_water();
         let mut s = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
         s.on_ground = false;
-        tick_once(
-            &w,
-            &mut s,
-            &input(|i| {
-                i.forward = true;
-                i.sprint = true;
-            }),
-        );
+        // The first tick starts the sprint, the second's `updateSwimming` (before the keys,
+        // vanilla `Entity.baseTick`) sees it and starts the swim.
+        for _ in 0..2 {
+            tick_once(
+                &w,
+                &mut s,
+                &input(|i| {
+                    i.forward = true;
+                    i.sprint = true;
+                }),
+            );
+        }
         assert!(s.swimming, "sprint-swimming established");
         s.pos = DVec3::new(0.5, 0.4, 0.5);
         s.velocity = DVec3::ZERO;
@@ -591,14 +629,18 @@ mod tests {
         let w = shallow_water();
         let mut s = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
         s.on_ground = false;
-        tick_once(
-            &w,
-            &mut s,
-            &input(|i| {
-                i.forward = true;
-                i.sprint = true;
-            }),
-        );
+        // The first tick starts the sprint, the second's `updateSwimming` (before the keys,
+        // vanilla `Entity.baseTick`) sees it and starts the swim.
+        for _ in 0..2 {
+            tick_once(
+                &w,
+                &mut s,
+                &input(|i| {
+                    i.forward = true;
+                    i.sprint = true;
+                }),
+            );
+        }
         assert!(s.swimming);
         s.pos = DVec3::new(0.5, 0.4, 0.5);
         s.velocity = DVec3::ZERO;

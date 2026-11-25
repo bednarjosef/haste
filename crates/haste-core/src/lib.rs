@@ -9,6 +9,8 @@
 //! vanilla Java for stateless classes. The types here are the vocabulary all tiers share.
 
 pub mod chunk;
+pub mod decoration;
+pub mod display;
 pub mod entity;
 pub mod game;
 pub mod gui;
@@ -17,6 +19,7 @@ pub mod ids;
 pub mod input;
 pub mod math;
 pub mod model;
+pub mod parts;
 pub mod paths;
 pub mod pos;
 pub mod text;

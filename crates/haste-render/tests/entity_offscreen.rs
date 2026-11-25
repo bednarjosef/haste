@@ -6,6 +6,7 @@ use haste_core::model::{
     BodyTransform, Decoration, EntityInstance, ItemFrameDecoration, PaintingDecoration,
     PoseOverrides,
 };
+use haste_core::parts;
 use haste_core::{BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos};
 use haste_render::{Camera, FrameInput, Renderer, SkyState};
 
@@ -45,7 +46,7 @@ impl haste_core::view::BlockView for Flat {
 fn render_scene(
     renderer: &mut Renderer,
     world: &dyn haste_core::view::BlockView,
-    entities: &[EntityInstance],
+    entities: &mut [EntityInstance],
     camera: Camera,
 ) -> image::RgbaImage {
     render_scene_at(renderer, world, entities, camera, 0.0)
@@ -54,7 +55,7 @@ fn render_scene(
 fn render_scene_at(
     renderer: &mut Renderer,
     world: &dyn haste_core::view::BlockView,
-    entities: &[EntityInstance],
+    entities: &mut [EntityInstance],
     camera: Camera,
     partial_tick: f32,
 ) -> image::RgbaImage {
@@ -68,7 +69,7 @@ fn render_scene_at(
 fn render_with_gui(
     renderer: &mut Renderer,
     world: &dyn haste_core::view::BlockView,
-    entities: &[EntityInstance],
+    entities: &mut [EntityInstance],
     camera: Camera,
     gui: &haste_core::gui::GuiFrame,
     partial_tick: f32,
@@ -80,13 +81,16 @@ fn render_with_gui(
 fn render_with_gui_skip(
     renderer: &mut Renderer,
     world: &dyn haste_core::view::BlockView,
-    entities: &[EntityInstance],
+    entities: &mut [EntityInstance],
     camera: Camera,
     gui: &haste_core::gui::GuiFrame,
     partial_tick: f32,
     camera_entity: Option<haste_core::EntityId>,
 ) -> image::RgbaImage {
-    renderer.sample_entity_lights(world, entities);
+    // Entity light rides on the instances (sampled here, where the test builds its frame).
+    for e in entities.iter_mut() {
+        e.sample_light(world);
+    }
     let frame = FrameInput {
         camera,
         entities,
@@ -105,6 +109,7 @@ fn render_with_gui_skip(
         breaking: &[],
         camera_entity,
         spin: None,
+        weather: None,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()
@@ -134,17 +139,15 @@ fn entities_offscreen() {
     }
 
     let mut walk = PoseOverrides::default();
-    walk.rotations
-        .push(("right_arm".into(), glam::Vec3::new(-0.6, 0.0, 0.0)));
-    walk.rotations
-        .push(("left_arm".into(), glam::Vec3::new(0.6, 0.0, 0.0)));
-    walk.rotations
-        .push(("right_leg".into(), glam::Vec3::new(0.5, 0.0, 0.0)));
-    walk.rotations
-        .push(("left_leg".into(), glam::Vec3::new(-0.5, 0.0, 0.0)));
-    walk.rotations
-        .push(("head".into(), glam::Vec3::new(0.0, 0.5, 0.0)));
-    let (skin, slim) = haste_render::default_skin(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+    walk.set_rotation(parts::RIGHT_ARM, glam::Vec3::new(-0.6, 0.0, 0.0));
+    walk.set_rotation(parts::LEFT_ARM, glam::Vec3::new(0.6, 0.0, 0.0));
+    walk.set_rotation(parts::RIGHT_LEG, glam::Vec3::new(0.5, 0.0, 0.0));
+    walk.set_rotation(parts::LEFT_LEG, glam::Vec3::new(-0.5, 0.0, 0.0));
+    walk.set_rotation(parts::HEAD, glam::Vec3::new(0.0, 0.5, 0.0));
+    let default = haste_entity::skin::default_skin(uuid::Uuid::from_u128(
+        0x1234_5678_9abc_def0_1234_5678_9abc_def0,
+    ));
+    let (skin, slim) = (default.body.clone(), default.model.is_slim());
     let player = EntityInstance {
         id: EntityId(1),
         model: haste_entity::models::humanoid(slim),
@@ -163,15 +166,21 @@ fn entities_offscreen() {
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.8,
         hurt: 0.0,
+        light: (15, 0),
         overlays: Default::default(),
         item: None,
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let boxed = EntityInstance {
         id: EntityId(2),
@@ -190,17 +199,23 @@ fn entities_offscreen() {
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.4,
         hurt: 0.0,
+        light: (15, 0),
         overlays: Default::default(),
         item: None,
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
-    let entities = vec![player, boxed];
+    let mut entities = vec![player, boxed];
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 2.2, -4.0),
         yaw: 0.0,
@@ -210,7 +225,7 @@ fn entities_offscreen() {
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
-    let img = render_scene(&mut renderer, &world, &entities, camera);
+    let img = render_scene(&mut renderer, &world, &mut entities, camera);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
     img.save(out.join("entities.png")).unwrap();
@@ -223,7 +238,7 @@ fn entities_offscreen() {
     assert_ne!(centre, sky, "player body at the centre");
     // Seen from behind, the player is drawn too (back faces of the skin), and moving it away
     // leaves the floor/sky there.
-    let empty = render_scene(&mut renderer, &world, &[], camera);
+    let empty = render_scene(&mut renderer, &world, &mut [], camera);
     assert_ne!(
         empty.get_pixel(320, 230).0,
         centre,
@@ -256,8 +271,9 @@ fn entities_offscreen() {
         width: 320,
         height: 240,
         cursor: None,
+        blur_after: -1,
     };
-    let img = render_with_gui(&mut renderer, &world, &entities, camera, &gui, 0.0);
+    let img = render_with_gui(&mut renderer, &world, &mut entities, camera, &gui, 0.0);
     img.save(out.join("entities_gui.png")).unwrap();
     // Something other than the black box inside it (the model), nothing outside the box edge
     // rows beyond the clip.
@@ -272,7 +288,7 @@ fn entities_offscreen() {
     let first = render_with_gui_skip(
         &mut renderer,
         &world,
-        &entities,
+        &mut entities,
         camera,
         &gui,
         1.0,
@@ -291,16 +307,10 @@ fn entities_offscreen() {
         data.registries
             .index("minecraft:item", &haste_core::Identifier::minecraft(n))
     };
-    let base = render_scene(&mut renderer, &world, &[], camera);
+    let base = render_scene(&mut renderer, &world, &mut [], camera);
     let hand = |held: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
-        skin: None,
-        slim: false,
         item: held,
-        light: (15, 0),
-        attack: haste_render::TickPair::fixed(0.0),
-        equip: haste_render::TickPair::fixed(1.0),
-        x_bob: haste_render::TickPair::fixed(0.0),
-        y_bob: haste_render::TickPair::fixed(0.0),
+        ..Default::default()
     };
     for (name, held) in [
         ("hand", None),
@@ -308,7 +318,7 @@ fn entities_offscreen() {
         ("stone", item("stone")),
     ] {
         renderer.set_first_person(Some(hand(held)));
-        let img = render_scene(&mut renderer, &world, &[], camera);
+        let img = render_scene(&mut renderer, &world, &mut [], camera);
         img.save(out.join(format!("first_person_{name}.png")))
             .unwrap();
         let changed = base
@@ -324,12 +334,12 @@ fn entities_offscreen() {
     // A swing moves the hand: the same hand at the swing's start, middle and end (the swing runs
     // over 6 ticks, so partial 0.33 and 0.66 are its second and fourth ticks).
     renderer.set_first_person(Some(hand(item("diamond_sword"))));
-    let still = render_scene(&mut renderer, &world, &[], camera);
+    let still = render_scene(&mut renderer, &world, &mut [], camera);
     renderer.set_first_person(Some(haste_render::FirstPerson {
         attack: haste_render::TickPair::fixed(0.33),
         ..hand(item("diamond_sword"))
     }));
-    let swung = render_scene_at(&mut renderer, &world, &[], camera, 0.33);
+    let swung = render_scene_at(&mut renderer, &world, &mut [], camera, 0.33);
     let moved = still
         .pixels()
         .zip(swung.pixels())
@@ -414,14 +424,8 @@ fn first_person_hand_against_a_wall() {
         bob: haste_render::ViewBob::default(),
     };
     let hand = |item: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
-        skin: None,
-        slim: false,
         item,
-        light: (15, 0),
-        attack: haste_render::TickPair::fixed(0.0),
-        equip: haste_render::TickPair::fixed(1.0),
-        x_bob: haste_render::TickPair::fixed(0.0),
-        y_bob: haste_render::TickPair::fixed(0.0),
+        ..Default::default()
     };
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
@@ -429,9 +433,9 @@ fn first_person_hand_against_a_wall() {
         // The wall without the hand, then with it: the hand's pixels are exactly the ones
         // that differ.
         renderer.set_first_person(None);
-        let bare = render_scene(&mut renderer, &world, &[], camera);
+        let bare = render_scene(&mut renderer, &world, &mut [], camera);
         renderer.set_first_person(Some(hand(held)));
-        let with = render_scene(&mut renderer, &world, &[], camera);
+        let with = render_scene(&mut renderer, &world, &mut [], camera);
         with.save(out.join(format!("first_person_wall_{name}.png")))
             .unwrap();
         let wall_hand = bare
@@ -450,9 +454,9 @@ fn first_person_hand_against_a_wall() {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         renderer.set_first_person(None);
-        let open_bare = render_scene(&mut renderer, &open, &[], camera);
+        let open_bare = render_scene(&mut renderer, &open, &mut [], camera);
         renderer.set_first_person(Some(hand(held)));
-        let open_with = render_scene(&mut renderer, &open, &[], camera);
+        let open_with = render_scene(&mut renderer, &open, &mut [], camera);
         let open_hand = open_bare
             .pixels()
             .zip(open_with.pixels())
@@ -523,19 +527,26 @@ fn dropped_items_offscreen() {
         shadow_radius: 0.15,
         shadow_strength: 0.75,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 0.25,
         hurt: 0.0,
+        light: (15, 0),
         item: Some(haste_core::model::DroppedItem {
             item,
             count,
             age: 0.0,
+            foil: Default::default(),
         }),
         overlays: Default::default(),
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 1.7, -2.5),
@@ -552,8 +563,8 @@ fn dropped_items_offscreen() {
     // unknown item (index past the registry). The flat diamond sprite is mostly
     // transparent (the gem shape is a few dozen pixels), so the bar is low for it; what
     // matters is that each draws something and they look different from each other.
-    let empty = render_scene(&mut renderer, &world, &[], camera);
-    let scenes: Vec<(String, Vec<EntityInstance>)> = vec![
+    let empty = render_scene(&mut renderer, &world, &mut [], camera);
+    let mut scenes: Vec<(String, Vec<EntityInstance>)> = vec![
         ("flat".into(), vec![drop(1, item("diamond").unwrap(), 1)]),
         ("block".into(), vec![drop(2, item("stone").unwrap(), 10)]),
         (
@@ -562,7 +573,7 @@ fn dropped_items_offscreen() {
         ),
     ];
     let mut images = Vec::new();
-    for (name, entities) in &scenes {
+    for (name, entities) in &mut scenes {
         let img = render_scene(&mut renderer, &world, entities, camera);
         img.save(out.join(format!("item_{name}.png"))).unwrap();
         let changed = empty
@@ -597,11 +608,11 @@ fn dropped_items_offscreen() {
     // quarter of the bob's half-cycle and a ninth of a spin, so it must differ from
     // both endpoints.
     let mut spinning = drop(1, item("diamond").unwrap(), 1);
-    let a = render_scene(&mut renderer, &world, &[spinning.clone()], camera);
+    let a = render_scene(&mut renderer, &world, &mut [spinning.clone()], camera);
     spinning.item.as_mut().unwrap().age = 10.0;
-    let b = render_scene(&mut renderer, &world, &[spinning.clone()], camera);
+    let b = render_scene(&mut renderer, &world, &mut [spinning.clone()], camera);
     spinning.item.as_mut().unwrap().age = 20.0;
-    let c = render_scene(&mut renderer, &world, &[spinning.clone()], camera);
+    let c = render_scene(&mut renderer, &world, &mut [spinning.clone()], camera);
     let diff = |x: &image::RgbaImage, y: &image::RgbaImage| {
         x.pixels()
             .zip(y.pixels())
@@ -644,15 +655,21 @@ fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstan
         shadow_radius: 0.0,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.0,
         hurt: 0.0,
+        light: (15, 0),
         overlays: Default::default(),
         item: None,
         decoration: Some(decoration),
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     }
 }
 
@@ -695,27 +712,24 @@ fn frames_and_paintings_offscreen() {
         .registries
         .index("minecraft:item", &Identifier::minecraft("diamond"))
         .expect("diamond item");
-    let entities = vec![
+    // An item frame with an item, a glowing empty one and a painting, in a row.
+    let frame = |id: i32, pos: glam::DVec3, glow: bool, item, rotation: u8| {
         decoration(
-            1,
-            glam::DVec3::new(0.0, 1.5, 0.5),
+            id,
+            pos,
             Decoration::ItemFrame(ItemFrameDecoration {
                 facing: Direction::North,
-                rotation: 1,
-                glow: false,
-                item: Some(diamond),
+                rotation,
+                glow,
+                item,
+                map_id: None,
+                item_foil: Default::default(),
             }),
-        ),
-        decoration(
-            2,
-            glam::DVec3::new(1.6, 1.5, 0.5),
-            Decoration::ItemFrame(ItemFrameDecoration {
-                facing: Direction::North,
-                rotation: 0,
-                glow: true,
-                item: None,
-            }),
-        ),
+        )
+    };
+    let mut entities = vec![
+        frame(1, glam::DVec3::new(0.0, 1.5, 0.5), false, Some(diamond), 1),
+        frame(2, glam::DVec3::new(1.6, 1.5, 0.5), true, None, 0),
         decoration(
             3,
             glam::DVec3::new(-2.0, 1.5, 0.5),
@@ -727,8 +741,8 @@ fn frames_and_paintings_offscreen() {
             }),
         ),
     ];
-    let base = render_scene(&mut renderer, &world, &[], camera);
-    let img = render_scene(&mut renderer, &world, &entities, camera);
+    let base = render_scene(&mut renderer, &world, &mut [], camera);
+    let img = render_scene(&mut renderer, &world, &mut entities, camera);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
     img.save(out.join("frames.png")).unwrap();
@@ -790,15 +804,21 @@ fn entity_shadows_offscreen() {
         shadow_radius: 0.7,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 0.9,
         hurt: 0.0,
+        light: (15, 0),
         overlays: Default::default(),
         item: None,
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let zombie = EntityInstance {
         id: EntityId(2),
@@ -817,15 +837,21 @@ fn entity_shadows_offscreen() {
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.95,
         hurt: 0.0,
+        light: (15, 0),
         overlays: Default::default(),
         item: None,
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let entities = vec![pig, zombie];
     let camera = Camera {
@@ -859,6 +885,7 @@ fn entity_shadows_offscreen() {
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     // `sample_world` extracts the shadows and samples entity light. A couple of warm-up frames
     // (lazy texture/atlas loads settle on the first render) before the captured one.
@@ -978,6 +1005,8 @@ fn equipment_offscreen() {
             item: Some(idx),
             asset: eq.asset.clone(),
             dye: None,
+            layer: None,
+            foil: Default::default(),
         });
     }
     // A leather chestplate with a dye: exercises the `dyed_color` tint path.
@@ -1002,15 +1031,21 @@ fn equipment_offscreen() {
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.8,
         hurt: 0.0,
+        light: (15, 0),
         item: None,
         overlays: Default::default(),
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
+        hand_foils: Default::default(),
+        head_item_foil: Default::default(),
     };
     let mut armed = bare.clone();
     armed.hands = [Some(sword), None];
@@ -1019,13 +1054,13 @@ fn equipment_offscreen() {
     pumpkin.head_item = Some(pumpkin_item);
     let mut dyed = bare.clone();
     dyed.equipment = vec![EquipmentPiece {
-        slot: EquipmentSlot::Chest,
         item: Some(leather),
         asset: data
             .item_components
             .equippable(leather)
             .and_then(|e| e.asset.clone()),
         dye: Some(0xFF00_FF00),
+        ..armed.equipment[0].clone()
     }];
     // An elytra on the chest: the WINGS layer on the elytra model (no humanoid layer).
     let elytra_item = item("elytra").expect("elytra in the item registry");
@@ -1043,10 +1078,9 @@ fn equipment_offscreen() {
     );
     let mut winged = bare.clone();
     winged.equipment = vec![EquipmentPiece {
-        slot: EquipmentSlot::Chest,
         item: Some(elytra_item),
         asset: elytra_eq.asset.clone(),
-        dye: None,
+        ..armed.equipment[0].clone()
     }];
 
     let camera = Camera {
@@ -1058,8 +1092,8 @@ fn equipment_offscreen() {
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
-    let base = render_scene(&mut renderer, &world, std::slice::from_ref(&bare), camera);
-    let img = render_scene(&mut renderer, &world, std::slice::from_ref(&armed), camera);
+    let base = render_scene(&mut renderer, &world, &mut [bare], camera);
+    let img = render_scene(&mut renderer, &world, &mut [armed], camera);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
     img.save(out.join("equipment.png")).unwrap();
@@ -1079,12 +1113,7 @@ fn equipment_offscreen() {
     assert_eq!(renderer.entities_drawn(), 1);
 
     // The custom head (a carved pumpkin) and a dyed leather chestplate both change pixels.
-    let pumpkin_img = render_scene(
-        &mut renderer,
-        &world,
-        std::slice::from_ref(&pumpkin),
-        camera,
-    );
+    let pumpkin_img = render_scene(&mut renderer, &world, &mut [pumpkin], camera);
     pumpkin_img.save(out.join("equipment_head.png")).unwrap();
     let head_changed = base
         .pixels()
@@ -1095,7 +1124,7 @@ fn equipment_offscreen() {
         head_changed > 100,
         "the pumpkin changed {head_changed} pixels"
     );
-    let dyed_img = render_scene(&mut renderer, &world, std::slice::from_ref(&dyed), camera);
+    let dyed_img = render_scene(&mut renderer, &world, &mut [dyed], camera);
     dyed_img.save(out.join("equipment_dyed.png")).unwrap();
     let dyed_changed = base
         .pixels()
@@ -1106,7 +1135,7 @@ fn equipment_offscreen() {
         dyed_changed > 100,
         "the dyed leather changed {dyed_changed} pixels"
     );
-    let winged_img = render_scene(&mut renderer, &world, std::slice::from_ref(&winged), camera);
+    let winged_img = render_scene(&mut renderer, &world, &mut [winged], camera);
     winged_img.save(out.join("equipment_elytra.png")).unwrap();
     let winged_changed = base
         .pixels()
@@ -1117,113 +1146,4 @@ fn equipment_offscreen() {
         winged_changed > 100,
         "the elytra changed {winged_changed} pixels"
     );
-}
-
-/// A red-wool sheep through the whole store path (spawn + wool metadata +
-/// `render_instances`): the sheep model draws (not the fallback box, not a shulker — the
-/// wool byte sits at the same metadata index as a shulker's colour byte) and the wool
-/// overlay tints the frame red. Deterministic, no server. Saves
-/// `target/render-checks/sheep.png`.
-#[test]
-#[ignore = "needs the client jar, datagen reports, the model dump and a Vulkan driver (source scripts/env.sh)"]
-fn sheep_wool_overlay_offscreen() {
-    let jar = haste_core::paths::client_jar();
-    let mut assets =
-        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
-    let data = haste_data::GameData::load().unwrap();
-    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
-    let world = Flat {
-        stone: data
-            .blocks
-            .default_state(&haste_core::Identifier::minecraft("stone"))
-            .unwrap(),
-    };
-    let dirty: Vec<SectionPos> = (-1..=1)
-        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
-        .collect();
-    renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
-    for _ in 0..200 {
-        renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    let camera = Camera {
-        pos: glam::DVec3::new(0.0, 2.2, -4.0),
-        yaw: 0.0,
-        pitch: 5.0,
-        fov_deg: 70.0,
-        hand_fov_deg: 70.0,
-        roll_deg: 0.0,
-        bob: haste_render::ViewBob::default(),
-    };
-    // The sheep's kind through the real entity-type registry, like the store resolves it.
-    let sheep_kind = data
-        .registries
-        .index("minecraft:entity_type", &Identifier::minecraft("sheep"))
-        .expect("sheep in the entity_type registry");
-    let mut store = haste_entity::EntityStore::new(haste_entity::EntityDimensions::default());
-    store.spawn(&haste_core::entity::EntitySpawn {
-        id: EntityId(1),
-        uuid: uuid::Uuid::from_u128(1),
-        kind: sheep_kind,
-        pos: glam::DVec3::new(0.0, 0.0, 0.5),
-        yaw: 180.0,
-        pitch: 0.0,
-        head_yaw: 180.0,
-        data: 0,
-        velocity: glam::DVec3::ZERO,
-    });
-    // Red wool: Sheep.DATA_WOOL_ID (metadata 18), colour 14.
-    store.set_metadata(
-        EntityId(1),
-        &[haste_core::entity::MetadataEntry {
-            index: 18,
-            value: haste_core::entity::MetadataValue::Byte(14),
-        }],
-    );
-    let mut entities = Vec::new();
-    store.render_instances(0.5, &mut entities);
-    assert_eq!(entities.len(), 1);
-    // The base model is the sheep's, not the fallback box.
-    assert_eq!(
-        entities[0].model.texture,
-        Identifier::minecraft("entity/sheep/sheep"),
-        "the sheep's base model"
-    );
-    // The wool overlay is present and tinted red.
-    let wool = entities[0].overlays[0].as_ref().expect("the wool overlay");
-    assert_eq!(
-        wool.model.texture,
-        Identifier::minecraft("entity/sheep/sheep_wool")
-    );
-    assert_eq!(wool.tint, haste_entity::variants::dye_tint(14));
-
-    // Draw it: the wool changes the frame and red pixels appear.
-    let base = render_scene(&mut renderer, &world, &[], camera);
-    let img = render_scene(&mut renderer, &world, &entities, camera);
-    // The same sheep with the overlay stripped, to prove the overlay itself draws.
-    let mut bare = entities.clone();
-    bare[0].overlays = Default::default();
-    let img_bare = render_scene(&mut renderer, &world, &bare, camera);
-    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
-    std::fs::create_dir_all(&out).unwrap();
-    img.save(out.join("sheep.png")).unwrap();
-    let changed = base
-        .pixels()
-        .zip(img.pixels())
-        .filter(|(a, b)| a.0 != b.0)
-        .count();
-    assert!(changed > 2000, "the sheep changed {changed} pixels");
-    let overlay_changed = img
-        .pixels()
-        .zip(img_bare.pixels())
-        .filter(|(a, b)| a.0 != b.0)
-        .count();
-    eprintln!("overlay changed {overlay_changed} pixels");
-    // The wool is dim (the sheep stands at the floor's sky light 0 in this scene), so the
-    // check is the red channel dominating, not an absolute brightness.
-    let red = img
-        .pixels()
-        .filter(|p| p.0[0] as i32 - p.0[1] as i32 > 15 && p.0[0] as i32 - p.0[2] as i32 > 15)
-        .count();
-    assert!(red > 200, "red wool pixels: {red}");
 }

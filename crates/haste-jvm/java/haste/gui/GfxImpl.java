@@ -3,6 +3,7 @@ package haste.gui;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import haste.rt.GuiBatch;
 import haste.rt.GuiBlend;
+import haste.rt.Native;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -50,6 +51,8 @@ public final class GfxImpl {
         scissorDepth = 0;
         tooltip = null;
         cursor = 0;
+        blurAfter = -1;
+        panorama = false;
         entityBoxes.clear();
         pipelineBlits = 0;
         nameBlits = 0;
@@ -69,7 +72,25 @@ public final class GfxImpl {
     public static int guiHeight(GuiGraphicsExtractor g) { return height; }
     public static Matrix3x2fStack pose(GuiGraphicsExtractor g) { return POSE; }
     public static void nextStratum(GuiGraphicsExtractor g) {}
-    public static void blurBeforeThisStratum(GuiGraphicsExtractor g) {}
+    /**
+     * The open screen asked to blur the world behind it (vanilla: the blur post chain runs here,
+     * between the HUD and the screen, when the accessibility option is >= 1). Records the command
+     * index the blur goes after; {@code GuiBatch.frame} reports it to Rust.
+     */
+    public static void blurBeforeThisStratum(GuiGraphicsExtractor g) {
+        if (blurAfter < 0 && Proxies.options.getMenuBackgroundBlurriness() >= 1.0F) {
+            blurAfter = GuiBatch.length();
+        }
+    }
+    /** The batch index the blur goes after this frame, or -1 when no screen asked for one. */
+    static int blurAfter;
+    /**
+     * Whether a screen extracted the panorama this frame and its spin (vanilla: the
+     * {@code PanoramaRenderState} of {@code GuiRenderState}, reset every frame); {@code GuiBatch.frame}
+     * reports both to Rust, whose renderer draws the cube map under the frame's commands.
+     */
+    static boolean panorama;
+    static float panoramaSpin;
     /** The cursor the screen asked for this frame (GuiBatch.frame's code; 0 = default). */
     static int cursor;
     public static void requestCursor(GuiGraphicsExtractor g, com.mojang.blaze3d.platform.cursor.CursorType c) {
@@ -114,7 +135,9 @@ public final class GfxImpl {
         POSE.sync();
         if (x1 > x2) { int t = x1; x1 = x2; x2 = t; }
         if (y1 > y2) { int t = y1; y1 = y2; y2 = t; }
-        GuiBatch.op(GuiBatch.FILL, x1, y1, x2, y2, color);
+        int ax = POSE.scaleX(x1, y1), ay = POSE.scaleY(x1, y1);
+        int bx = POSE.scaleX(x2, y2), by = POSE.scaleY(x2, y2);
+        GuiBatch.op(GuiBatch.FILL, Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by), color);
     }
 
     public static void fill(GuiGraphicsExtractor g, RenderPipeline p, int x1, int y1, int x2, int y2, int color) {
@@ -123,7 +146,9 @@ public final class GfxImpl {
 
     public static void fillGradient(GuiGraphicsExtractor g, int x1, int y1, int x2, int y2, int top, int bottom) {
         POSE.sync();
-        GuiBatch.op(GuiBatch.GRADIENT, x1, y1, x2, y2, top, bottom);
+        int ax = POSE.scaleX(x1, y1), ay = POSE.scaleY(x1, y1);
+        int bx = POSE.scaleX(x2, y2), by = POSE.scaleY(x2, y2);
+        GuiBatch.op(GuiBatch.GRADIENT, Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by), top, bottom);
     }
 
     public static void horizontalLine(GuiGraphicsExtractor g, int x1, int x2, int y, int color) {
@@ -270,7 +295,9 @@ public final class GfxImpl {
     }
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.SPRITE, id(s), x, y, w, h, tint, blend(p, s));
+        int ax = POSE.scaleX(x, y), ay = POSE.scaleY(x, y);
+        int bx = POSE.scaleX(x + w, y + h), by = POSE.scaleY(x + w, y + h);
+        GuiBatch.ops(GuiBatch.SPRITE, id(s), Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay), tint, blend(p, s));
     }
     /** Sub-region of a sprite: region (u, v, w, h) of a sprite drawn as {@code spriteW x spriteH}, placed at x, y. */
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h) {
@@ -278,12 +305,17 @@ public final class GfxImpl {
     }
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, x, y, w, h, tint, blend(p, s));
+        int ax = POSE.scaleX(x, y), ay = POSE.scaleY(x, y);
+        int bx = POSE.scaleX(x + w, y + h), by = POSE.scaleY(x + w, y + h);
+        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay), tint, blend(p, s));
     }
 
     private static void texture(RenderPipeline p, Identifier t, int x, int y, int w, int h, float u, float v, float uw, float vh, int texW, int texH, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.TEXTURE, id(t), x, y, w, h, Float.floatToRawIntBits(u), Float.floatToRawIntBits(v),
+        int ax = POSE.scaleX(x, y), ay = POSE.scaleY(x, y);
+        int bx = POSE.scaleX(x + w, y + h), by = POSE.scaleY(x + w, y + h);
+        GuiBatch.ops(GuiBatch.TEXTURE, id(t), Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay),
+            Float.floatToRawIntBits(u), Float.floatToRawIntBits(v),
             Float.floatToRawIntBits(uw), Float.floatToRawIntBits(vh), texW, texH, tint, blend(p, t));
     }
     public static void blit(GuiGraphicsExtractor g, RenderPipeline p, Identifier t, int x, int y, float u, float v, int w, int h, int texW, int texH) {
@@ -308,7 +340,17 @@ public final class GfxImpl {
     public static void item(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) {
         if (s == null || s.isEmpty()) return;
         POSE.sync();
-        GuiBatch.op(GuiBatch.ITEM, itemId(s), x, y, s.getCount());
+        GuiBatch.op(GuiBatch.ITEM, itemId(s), POSE.scaleX(x, y), POSE.scaleY(x, y), s.getCount(), foil(s));
+    }
+
+    /**
+     * The stack's glint as the item model picks it (vanilla {@code ItemStackRenderState.FoilType}'s order):
+     * 0 none ({@code ItemStack.hasFoil} false), 2 special for the compasses and the clock
+     * ({@code CuboidItemModelWrapper.hasSpecialAnimatedTexture}), 1 standard otherwise.
+     */
+    static int foil(ItemStack s) {
+        if (!s.hasFoil()) return 0;
+        return s.is(net.minecraft.tags.ItemTags.COMPASSES) || s.is(net.minecraft.world.item.Items.CLOCK) ? 2 : 1;
     }
 
     /** Index of the stack's item in the {@code minecraft:item} registry (the same numbering as Rust's). */
@@ -318,8 +360,9 @@ public final class GfxImpl {
     public static void fakeItem(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) { item(g, s, x, y, seed); }
 
     /**
-     * Stack decorations: the count in the bottom-right corner (white, shadow) and the durability bar (13 px wide,
-     * 2 px high, black under the item's bar colour), as they appear in the game. Cooldown overlays: not yet.
+     * Stack decorations: the count in the bottom-right corner (white, shadow), the durability bar (13 px wide,
+     * 2 px high, black under the item's bar colour) and the cooldown overlay (the white sweep from the top),
+     * as they appear in the game.
      */
     public static void itemDecorations(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y) { itemDecorations(g, f, s, x, y, null); }
     public static void itemDecorations(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y, String text) {
@@ -330,10 +373,33 @@ public final class GfxImpl {
             GuiBatch.op(GuiBatch.FILL, bx, by, bx + 13, by + 2, 0xFF000000);
             GuiBatch.op(GuiBatch.FILL, bx, by, bx + s.getBarWidth(), by + 1, 0xFF000000 | s.getBarColor());
         }
+        // Vanilla GuiGraphicsExtractor.itemCooldown: the percent of the stack's cooldown group at
+        // the frame's partial tick, the white half-transparent sweep down from the top of the
+        // 16x16 icon (floor/ceil of the same split, so top + height stays within the icon).
+        float cooldown = Native.itemCooldown(cooldownGroup(s), Delta.partial);
+        if (cooldown > 0.0F) {
+            int top = y + net.minecraft.util.Mth.floor(16.0F * (1.0F - cooldown));
+            int bottom = top + net.minecraft.util.Mth.ceil(16.0F * cooldown);
+            GuiBatch.op(GuiBatch.FILL, x, top, x + 16, bottom, Integer.MAX_VALUE);
+        }
         int count = s.getCount();
         String label = text != null ? text : (count != 1 ? Integer.toString(count) : null);
         if (label == null) return;
         Text.emit(label, x + 19 - 2 - FontImpl.width(f, label), y + 6 + 3, -1, true);
+    }
+
+    /**
+     * The stack's cooldown group (vanilla {@code ItemCooldowns.getCooldownGroup}): the
+     * {@code minecraft:use_cooldown} component's {@code cooldown_group}, else the item's registry
+     * id, as the string the native resolves the group by.
+     */
+    static String cooldownGroup(ItemStack s) {
+        net.minecraft.world.item.component.UseCooldown useCooldown =
+            s.get(net.minecraft.core.component.DataComponents.USE_COOLDOWN);
+        if (useCooldown != null && useCooldown.cooldownGroup().isPresent()) {
+            return useCooldown.cooldownGroup().get().toString();
+        }
+        return net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(s.getItem()).toString();
     }
 
     // ---- tooltips (deferred to the end of the frame) ----
@@ -426,4 +492,12 @@ public final class GfxImpl {
     }
 
     public static void setPreeditOverlay(GuiGraphicsExtractor g, Renderable r) {}
+
+    /**
+     * The enchanting table's book (vanilla: a 3D model in a GUI box, drawn by the entity renderer). Haste's
+     * GUI batch has no model rendering yet, so nothing is drawn; the book model the screen built is the
+     * replacement class ({@code haste/replace/.../BookModel.java}), whose shape matches this signature.
+     */
+    public static void book(GuiGraphicsExtractor g, net.minecraft.client.model.object.book.BookModel bookModel,
+                             Identifier texture, float scale, float open, float flip, int x0, int y0, int x1, int y1) {}
 }

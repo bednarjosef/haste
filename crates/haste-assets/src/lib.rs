@@ -10,6 +10,7 @@
 pub mod assets;
 pub mod atlas;
 pub mod bake;
+pub mod dynamic;
 pub mod equipment;
 pub mod font;
 pub mod item;
@@ -24,7 +25,7 @@ pub use assets::{
 };
 pub use atlas::{mean_linear, AnimatedSprite, AtlasBuilder, AtlasRegion, AtlasRegions};
 pub use bake::{BakedBlockModels, BlocksJsonStates, RenderLayer};
-pub use equipment::{parse_equipment_info, EquipmentInfo, EquipmentLayer};
+pub use equipment::{parse_equipment_info, Dyeable, EquipmentInfo, EquipmentLayer};
 pub use font::{
     for_each_formatted, BitmapFont, Glyph, GlyphKind, HexGlyph, TextFormat, LEGACY_COLORS,
 };

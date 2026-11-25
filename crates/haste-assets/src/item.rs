@@ -20,9 +20,7 @@ use anyhow::{Context, Result};
 use haste_core::Identifier;
 
 use crate::assets::Assets;
-use crate::model::{
-    apply_element_rotation, face_positions, face_uvs, BakedQuad, Direction, DisplayTransform,
-};
+use crate::model::{apply_element_rotation, face_positions, face_uvs, BakedQuad, DisplayTransform};
 
 /// Everything needed to draw one item in a GUI slot.
 #[derive(Clone, Debug, Default)]
@@ -40,14 +38,19 @@ pub struct ItemModelPart {
     /// `display.firstperson_righthand` (identity when the chain has none).
     pub firstperson: DisplayTransform,
     /// `display.thirdperson_righthand` (identity when the chain has none): held items on mobs
-    /// and other players (the left hand uses the same transform with the left-hand fix).
+    /// and other players.
     pub thirdperson: DisplayTransform,
+    /// `display.thirdperson_lefthand` (the right entry when the chain names no left one):
+    /// the left hand draws through it, the left-hand fix on top.
+    pub thirdperson_left: DisplayTransform,
     /// `display.head` (identity when the chain has none): heads and hats worn on the head.
     pub head: DisplayTransform,
     /// `display.ground` (identity when the chain has none): dropped item entities.
     pub ground: DisplayTransform,
     /// `display.fixed` (identity when the chain has none): item frames and other fixed mounts.
     pub fixed: DisplayTransform,
+    /// `display.on_shelf` (identity when the chain has none): items on a shelf block.
+    pub on_shelf: DisplayTransform,
     /// `gui_light: front` (flat items) instead of the default side lighting.
     pub gui_light_front: bool,
     /// Composite `transformation` applied to the geometry before the display transform.
@@ -90,6 +93,12 @@ pub struct PartTransformation {
 impl Assets {
     /// The GUI model of an item (`minecraft:stone` -> `items/stone.json`).
     pub fn item_model(&mut self, item: &Identifier) -> Result<ItemModel> {
+        self.item_model_cast(item, false)
+    }
+
+    /// The GUI model of an item for a holder whose `minecraft:fishing_rod/cast` property is
+    /// `cast` (the rod's hook is out): the branch the item definition takes for it.
+    pub fn item_model_cast(&mut self, item: &Identifier, cast: bool) -> Result<ItemModel> {
         let key = crate::assets::asset_key(item, "items", ".json");
         let bytes = self.read_asset(&key)?;
         let json: serde_json::Value =
@@ -98,7 +107,7 @@ impl Assets {
             .get("model")
             .context("item definition without `model`")?;
         let mut leaves = Vec::new();
-        collect_leaves(root, None, &mut leaves);
+        collect_leaves(root, None, cast, &mut leaves);
         let mut parts = Vec::with_capacity(leaves.len());
         for leaf in leaves {
             parts.push(self.item_part(&leaf)?);
@@ -119,9 +128,11 @@ impl Assets {
                 gui: DisplayTransform::IDENTITY,
                 firstperson: DisplayTransform::IDENTITY,
                 thirdperson: DisplayTransform::IDENTITY,
+                thirdperson_left: DisplayTransform::IDENTITY,
                 head: DisplayTransform::IDENTITY,
                 ground: DisplayTransform::IDENTITY,
                 fixed: DisplayTransform::IDENTITY,
+                on_shelf: DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: leaf.transformation,
             });
@@ -134,11 +145,17 @@ impl Assets {
         let thirdperson = resolved
             .thirdperson_display
             .unwrap_or(DisplayTransform::IDENTITY);
+        let thirdperson_left = resolved
+            .thirdperson_left_display
+            .unwrap_or(DisplayTransform::IDENTITY);
         let head = resolved.head_display.unwrap_or(DisplayTransform::IDENTITY);
         let ground = resolved
             .ground_display
             .unwrap_or(DisplayTransform::IDENTITY);
         let fixed = resolved.fixed_display.unwrap_or(DisplayTransform::IDENTITY);
+        let on_shelf = resolved
+            .on_shelf_display
+            .unwrap_or(DisplayTransform::IDENTITY);
         let geometry = if leaf.special {
             ItemGeometry::None
         } else if resolved.elements.is_empty() {
@@ -167,9 +184,11 @@ impl Assets {
             gui,
             firstperson,
             thirdperson,
+            thirdperson_left,
             head,
             ground,
             fixed,
+            on_shelf,
             gui_light_front: resolved.gui_light,
             transformation: leaf.transformation,
         })
@@ -234,97 +253,6 @@ fn parse_rgb(v: &serde_json::Value) -> Option<u32> {
     Some(0xFF00_0000 | c(0) << 16 | c(1) << 8 | c(2))
 }
 
-struct Leaf {
-    model: Option<String>,
-    tints: Vec<serde_json::Value>,
-    special: bool,
-    transformation: Option<PartTransformation>,
-}
-
-fn node_type(node: &serde_json::Value) -> &str {
-    node.get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("")
-        .trim_start_matches("minecraft:")
-}
-
-fn collect_leaves(
-    node: &serde_json::Value,
-    transformation: Option<PartTransformation>,
-    out: &mut Vec<Leaf>,
-) {
-    let transformation = node
-        .get("transformation")
-        .and_then(parse_transformation)
-        .or(transformation);
-    match node_type(node) {
-        "model" => out.push(Leaf {
-            model: node.get("model").and_then(|m| m.as_str()).map(String::from),
-            tints: node
-                .get("tints")
-                .and_then(|t| t.as_array())
-                .cloned()
-                .unwrap_or_default(),
-            special: false,
-            transformation,
-        }),
-        "special" => out.push(Leaf {
-            model: node.get("base").and_then(|m| m.as_str()).map(String::from),
-            tints: Vec::new(),
-            special: true,
-            transformation,
-        }),
-        "composite" => {
-            for m in node
-                .get("models")
-                .and_then(|m| m.as_array())
-                .into_iter()
-                .flatten()
-            {
-                collect_leaves(m, transformation, out);
-            }
-        }
-        "condition" => {
-            if let Some(n) = node.get("on_false") {
-                collect_leaves(n, transformation, out);
-            }
-        }
-        "select" => {
-            let first_case = node
-                .get("cases")
-                .and_then(|c| c.as_array())
-                .and_then(|c| c.first())
-                .and_then(|c| c.get("model"));
-            if let Some(n) = node.get("fallback").or(first_case) {
-                collect_leaves(n, transformation, out);
-            }
-        }
-        "range_dispatch" => {
-            // Property value 0 for a default stack: the entry with the largest threshold <= 0.
-            let entry = node
-                .get("entries")
-                .and_then(|e| e.as_array())
-                .into_iter()
-                .flatten()
-                .filter(|e| {
-                    e.get("threshold")
-                        .and_then(|t| t.as_f64())
-                        .is_some_and(|t| t <= 0.0)
-                })
-                .max_by(|a, b| {
-                    let t = |e: &serde_json::Value| e["threshold"].as_f64().unwrap_or(0.0);
-                    t(a).total_cmp(&t(b))
-                })
-                .and_then(|e| e.get("model"));
-            if let Some(n) = entry.or(node.get("fallback")) {
-                collect_leaves(n, transformation, out);
-            }
-        }
-        // `empty`, `bundle/selected_item`, unknown types: nothing to draw.
-        _ => {}
-    }
-}
-
 fn parse_transformation(v: &serde_json::Value) -> Option<PartTransformation> {
     let arr = |k: &str| -> Option<Vec<f32>> {
         v.get(k)?
@@ -354,123 +282,11 @@ fn parse_transformation(v: &serde_json::Value) -> Option<PartTransformation> {
     })
 }
 
-/// Vanilla's `ItemModelGenerator` extrusion of one `builtin/generated` layer: MIN_Z 7.5/16 and
-/// MAX_Z 8.5/16 around the sprite, the south (z = 8.5/16) face with the sprite's UVs, the
-/// north (z = 7.5/16) face with them mirrored, and a 1/16-deep side quad for every opaque
-/// sprite pixel whose neighbour in that direction is transparent, sampling that pixel (the UVs
-/// are inset 0.1 texel inside it, as vanilla's are). `image` is the sprite; without it
-/// (an unreadable texture) only the two faces are baked. Positions are in 0..1 item space with
-/// y up and the front towards +z, UVs 0..1, and every quad carries `tint_index`.
-fn generated_layer_quads(image: Option<&image::RgbaImage>, tint_index: u32) -> Vec<BakedQuad> {
-    // Vanilla `ItemModelGenerator.bakeExtrudedSprite`: from (0,0,7.5) to (16,16,8.5), the south
-    // face with the sprite's UVs and the north face with them mirrored.
-    let mut quads = vec![
-        face_quad(
-            Direction::South,
-            [0.0, 0.0, 7.5],
-            [16.0, 16.0, 8.5],
-            [0.0, 0.0, 16.0, 16.0],
-            tint_index,
-        ),
-        face_quad(
-            Direction::North,
-            [0.0, 0.0, 7.5],
-            [16.0, 16.0, 8.5],
-            [16.0, 0.0, 0.0, 16.0],
-            tint_index,
-        ),
-    ];
-    let Some(image) = image else {
-        return quads;
-    };
-    let (w, h) = image.dimensions();
-    let x_scale = 16.0 / w.max(1) as f32;
-    let y_scale = 16.0 / h.max(1) as f32;
-    // Out of the sprite counts as transparent (vanilla's `isTransparent` returns true there).
-    let opaque = |x: i32, y: i32| {
-        (0..w as i32).contains(&x)
-            && (0..h as i32).contains(&y)
-            && image.get_pixel(x as u32, y as u32).0[3] != 0
-    };
-    for py in 0..h as i32 {
-        for px in 0..w as i32 {
-            if !opaque(px, py) {
-                continue;
-            }
-            let x0 = px as f32 * x_scale;
-            let x1 = x0 + x_scale;
-            let y_top = 16.0 - py as f32 * y_scale;
-            let y_bottom = y_top - y_scale;
-            // The pixel's window in 0..16 sprite units, inset by vanilla's 0.1 texel.
-            let u0 = x0 + 0.1 * x_scale;
-            let u1 = x1 - 0.1 * x_scale;
-            let v0 = py as f32 * y_scale + 0.1 * y_scale;
-            let v1 = v0 + y_scale - 0.2 * y_scale;
-            if !opaque(px, py - 1) {
-                quads.push(face_quad(
-                    Direction::Up,
-                    [x0, y_top, 7.5],
-                    [x1, y_top, 8.5],
-                    [u0, v0, u1, v1],
-                    tint_index,
-                ));
-            }
-            if !opaque(px, py + 1) {
-                quads.push(face_quad(
-                    Direction::Down,
-                    [x0, y_bottom, 7.5],
-                    [x1, y_bottom, 8.5],
-                    [u0, v0, u1, v1],
-                    tint_index,
-                ));
-            }
-            if !opaque(px - 1, py) {
-                quads.push(face_quad(
-                    Direction::West,
-                    [x0, y_bottom, 7.5],
-                    [x0, y_top, 8.5],
-                    [u0, v1, u1, v0],
-                    tint_index,
-                ));
-            }
-            if !opaque(px + 1, py) {
-                quads.push(face_quad(
-                    Direction::East,
-                    [x1, y_bottom, 7.5],
-                    [x1, y_top, 8.5],
-                    [u0, v1, u1, v0],
-                    tint_index,
-                ));
-            }
-        }
-    }
-    quads
-}
+mod generated;
+mod leaves;
 
-/// One quad of the extruded sprite: positions from `from`/`to` (0..16 sprite units) on `dir` in
-/// vanilla's `FaceInfo` order, and the UV rectangle `uv` (0..16 sprite units) mapped as
-/// vanilla's `CuboidFace.UVs` corner cycle is.
-fn face_quad(
-    dir: Direction,
-    from: [f32; 3],
-    to: [f32; 3],
-    uv: [f32; 4],
-    tint_index: u32,
-) -> BakedQuad {
-    let mut quad = BakedQuad::from_element(
-        dir,
-        from.map(|v| v / 16.0),
-        to.map(|v| v / 16.0),
-        Some(&uv),
-        None,
-    );
-    quad.texture = String::new();
-    quad.cullface = None;
-    quad.shade_face = Some(dir);
-    quad.tint_index = Some(tint_index);
-    quad.direction = dir;
-    quad
-}
+use generated::generated_layer_quads;
+use leaves::{collect_leaves, Leaf};
 
 /// Model elements to quads (0..1 block units, face-local UVs), the same geometry rules as
 /// block baking without a blockstate rotation.
@@ -501,13 +317,17 @@ fn bake_elements(resolved: &crate::model::ResolvedModel) -> Vec<BakedQuad> {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests;
+
+#[cfg(test)]
+mod model_tests {
     use super::*;
+    use crate::model::Direction;
 
     fn leaves(json: &str) -> Vec<Leaf> {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         let mut out = Vec::new();
-        collect_leaves(&v["model"], None, &mut out);
+        collect_leaves(&v["model"], None, false, &mut out);
         out
     }
 

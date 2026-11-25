@@ -3,8 +3,11 @@
 //!
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
+pub mod channels;
 pub mod engine;
 pub mod music;
 pub mod output;
+pub mod random;
+pub mod sound_event_listener;
 pub mod sounds;
 pub mod spatial;

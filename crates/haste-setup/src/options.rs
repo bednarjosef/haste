@@ -5,11 +5,17 @@
 //! Defaults I am not fully certain about, listed here per the brief:
 //! - `simulation_distance` 12 (vanilla's default simulation distance; some versions ship 10),
 //! - `max_fps` 120 (vanilla's default framerate limit; 260 means "unlimited" there),
-//! - `gui_scale` is clamped to 0..=4; vanilla added the 4 ("large") step only in recent
-//!   versions, older ones cap at 3.
+//! - `gui_scale` is stored as written, like vanilla's `Options.guiScale` (0 = auto, any
+//!   larger value is bounded by the window only when used: `Window.calculateScale`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+mod cloud_status;
+mod premesh;
+
+pub use cloud_status::CloudStatus;
+pub use premesh::PremeshMode;
 
 /// Per-category sound volumes, each 0.0..=1.0. Category names follow vanilla's
 /// `soundCategory_*` keys.
@@ -154,8 +160,13 @@ pub struct Options {
     pub fov: u8,
     /// 0.0..=1.0 (vanilla stores 0..=1 in current versions; pre-1.18 it was 0..=0.5).
     pub mouse_sensitivity: f32,
-    /// 0 = auto.
+    /// 0 = auto (vanilla: `Options.AUTO_GUI_SCALE`). Not clamped here: like vanilla's
+    /// `Options.guiScale`, the stored value is bounded against the real window only when
+    /// it is used (`Window.calculateScale`, `resolve_gui_scale` in the client).
     pub gui_scale: u8,
+    /// Vanilla's "Force Unicode Font" option (`Options.forceUnicodeFont`, default off). Also
+    /// rounds an odd GUI scale up to the next even one (`Window.calculateScale`).
+    pub force_unicode_font: bool,
     pub fullscreen: bool,
     pub vsync: bool,
     /// Vanilla's "View Bobbing" accessibility option (default on).
@@ -167,11 +178,30 @@ pub struct Options {
     /// Vanilla's "Brightness" (gamma) slider, 0.0..=1.0 (default 0.5). Feeds the lightmap's
     /// brightness factor (`LightmapRenderState.brightness`).
     pub gamma: f32,
+    /// Vanilla's "Entity Distance" scaling option, 0.5..=5.0 (default 1.0). Scales the
+    /// size-based entity render cull (`Entity.shouldRenderAtSqrDistance`).
+    pub entity_distance_scaling: f32,
     /// Vanilla's "Darkness Pulsing" accessibility option, 0.0..=1.0 (default 1.0). Scales the
     /// darkness effect in the lightmap (`LightmapRenderState.darknessEffectScale`).
     pub darkness_effect_scale: f32,
+    /// Vanilla's "Menu Background Blurriness" accessibility option, 0..=10 (default 5). The
+    /// box-blur radius the open screen's blurred background uses (`Options.menuBackgroundBlurriness`).
+    pub menu_background_blurriness: u8,
+    /// Vanilla's "Glint Speed" and "Glint Strength" accessibility options, 0.0..=1.0 (defaults
+    /// 0.5 and 0.75): how fast the enchantment glint scrolls and how bright it shows.
+    pub glint_speed: f32,
+    pub glint_strength: f32,
     /// 260 means "unlimited", as in vanilla's framerate limit.
     pub max_fps: u32,
+    /// Vanilla's "Clouds" video setting (`Options.cloudStatus`, options.txt
+    /// `renderClouds`; default FANCY).
+    pub clouds: CloudStatus,
+    /// Haste's pre-mesh mode (no vanilla counterpart): turn prediction for the mesh
+    /// gate. `off` is exactly vanilla's visible-only meshing.
+    pub premesh: PremeshMode,
+    /// Vanilla's "Clouds Distance" video setting (`Options.cloudRange`, options.txt
+    /// `cloudRange`; 2..=128 chunks, default 128). The radius of the cloud mesh.
+    pub cloud_range: u32,
     pub sound: SoundVolumes,
     pub keys: Keybinds,
 }
@@ -184,6 +214,7 @@ impl Default for Options {
             fov: 70,
             mouse_sensitivity: 0.5,
             gui_scale: 0,
+            force_unicode_font: false,
             fullscreen: false,
             vsync: true,
             bob_view: true,
@@ -191,7 +222,14 @@ impl Default for Options {
             damage_tilt_strength: 1.0,
             gamma: 0.5,
             darkness_effect_scale: 1.0,
+            entity_distance_scaling: 1.0,
+            menu_background_blurriness: 5,
+            glint_speed: 0.5,
+            glint_strength: 0.75,
             max_fps: 120,
+            clouds: CloudStatus::default(),
+            premesh: PremeshMode::default(),
+            cloud_range: 128,
             sound: SoundVolumes::default(),
             keys: Keybinds::default(),
         }
@@ -207,12 +245,16 @@ impl Options {
         self.simulation_distance = self.simulation_distance.clamp(2, 32);
         self.fov = self.fov.clamp(30, 110);
         self.mouse_sensitivity = self.mouse_sensitivity.clamp(0.0, 1.0);
-        self.gui_scale = self.gui_scale.clamp(0, 4);
         self.fov_effect_scale = self.fov_effect_scale.clamp(0.0, 1.0);
         self.damage_tilt_strength = self.damage_tilt_strength.clamp(0.0, 1.0);
         self.gamma = self.gamma.clamp(0.0, 1.0);
         self.darkness_effect_scale = self.darkness_effect_scale.clamp(0.0, 1.0);
+        self.entity_distance_scaling = self.entity_distance_scaling.clamp(0.5, 5.0);
+        self.menu_background_blurriness = self.menu_background_blurriness.min(10);
+        self.glint_speed = self.glint_speed.clamp(0.0, 1.0);
+        self.glint_strength = self.glint_strength.clamp(0.0, 1.0);
         self.max_fps = self.max_fps.clamp(10, 260);
+        self.cloud_range = self.cloud_range.clamp(2, 128);
         self.sound.clamped();
         for (action, key) in &Keybinds::vanilla().bindings {
             self.keys
@@ -258,6 +300,12 @@ impl Options {
             "guiScale" => {
                 if let Ok(v) = value.parse::<u8>() {
                     self.gui_scale = v;
+                }
+                true
+            }
+            "forceUnicodeFont" => {
+                if let Ok(v) = value.parse::<bool>() {
+                    self.force_unicode_font = v;
                 }
                 true
             }
@@ -308,10 +356,51 @@ impl Options {
                 }
                 true
             }
+            // `OptionInstance.UnitDouble`: stored as the value itself.
+            "glintSpeed" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.glint_speed = v;
+                }
+                true
+            }
+            "glintStrength" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.glint_strength = v;
+                }
+                true
+            }
+            "entityDistanceScaling" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.entity_distance_scaling = v;
+                }
+                true
+            }
+            // An IntRange(0, 10) in vanilla; the blur's box-blur radius.
+            "menuBackgroundBlurriness" => {
+                if let Ok(v) = value.parse::<u8>() {
+                    self.menu_background_blurriness = v;
+                }
+                true
+            }
             // framerateLimit is the current name, maxFps the pre-1.20.5 one.
             "framerateLimit" | "maxFps" => {
                 if let Ok(v) = value.parse::<u32>() {
                     self.max_fps = v;
+                }
+                true
+            }
+            // The clouds mode: options.txt writes vanilla's serialized names
+            // ("false"/"fast"/"true"), the live option bridge the enum names.
+            "renderClouds" => {
+                if let Some(v) = CloudStatus::parse(value) {
+                    self.clouds = v;
+                }
+                true
+            }
+            // The cloud mesh radius in chunks (vanilla's IntRange(2, 128)).
+            "cloudRange" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.cloud_range = v;
                 }
                 true
             }
@@ -375,256 +464,4 @@ impl Options {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_match_vanilla() {
-        let opts = Options::default();
-        assert_eq!(opts.render_distance, 12);
-        assert_eq!(opts.simulation_distance, 12);
-        assert_eq!(opts.fov, 70);
-        assert_eq!(opts.mouse_sensitivity, 0.5);
-        assert_eq!(opts.gui_scale, 0);
-        assert!(!opts.fullscreen);
-        assert!(opts.vsync);
-        assert_eq!(opts.max_fps, 120);
-        assert_eq!(opts.sound, SoundVolumes::default());
-        assert_eq!(opts.sound.master, 1.0);
-        assert_eq!(opts.sound.ui, 1.0);
-        assert_eq!(opts.keys.get("key.forward"), Some("key.keyboard.w"));
-        assert_eq!(opts.keys.get("key.sneak"), Some("key.keyboard.left.shift"));
-        assert_eq!(opts.keys.get("key.attack"), Some("key.mouse.left"));
-        assert_eq!(opts.keys.get("key.use"), Some("key.mouse.right"));
-        assert_eq!(opts.keys.get("key.pickItem"), Some("key.mouse.middle"));
-        assert_eq!(opts.keys.get("key.hotbar.1"), Some("key.keyboard.1"));
-        assert_eq!(opts.keys.get("key.hotbar.9"), Some("key.keyboard.9"));
-        assert_eq!(opts.keys.get("key.playerlist"), Some("key.keyboard.tab"));
-        assert_eq!(opts.keys.get("key.swapOffhand"), Some("key.keyboard.f"));
-        assert!(opts.bob_view);
-        assert_eq!(opts.fov_effect_scale, 1.0);
-        assert_eq!(opts.damage_tilt_strength, 1.0);
-        assert_eq!(opts.gamma, 0.5);
-        assert_eq!(opts.darkness_effect_scale, 1.0);
-    }
-
-    #[test]
-    fn camera_options_clamp_into_range() {
-        let opts = Options {
-            fov_effect_scale: 4.0,
-            damage_tilt_strength: -2.0,
-            ..Options::default()
-        }
-        .sanitized();
-        assert_eq!(opts.fov_effect_scale, 1.0);
-        assert_eq!(opts.damage_tilt_strength, 0.0);
-    }
-
-    #[test]
-    fn camera_options_import_from_vanilla_options_txt() {
-        // fovEffectScale is stored squared by vanilla's option codec: 0.25 in the file is a
-        // 0.5 effective scale.
-        let opts = Options::import_vanilla(
-            "bobView:false\nfovEffectScale:0.25\ndamageTiltStrength:0.5\nfov:75\n",
-        );
-        assert!(!opts.bob_view);
-        assert!((opts.fov_effect_scale - 0.5).abs() < 1e-9);
-        assert_eq!(opts.damage_tilt_strength, 0.5);
-        assert_eq!(opts.fov, 75);
-    }
-
-    #[test]
-    fn lightmap_options_import_from_vanilla_options_txt() {
-        // gamma is the raw 0..1 slider; darknessEffectScale's codec squares the file value.
-        let opts = Options::import_vanilla("gamma:0.8\ndarknessEffectScale:0.5\n");
-        assert!((opts.gamma - 0.8).abs() < 1e-6);
-        assert!((opts.darkness_effect_scale - 0.25).abs() < 1e-6);
-        // Clamped like the vanilla range.
-        let opts = Options {
-            gamma: 2.0,
-            darkness_effect_scale: -1.0,
-            ..Options::default()
-        }
-        .sanitized();
-        assert_eq!(opts.gamma, 1.0);
-        assert_eq!(opts.darkness_effect_scale, 0.0);
-    }
-
-    #[test]
-    fn roundtrips_through_toml() {
-        let opts = Options {
-            render_distance: 20,
-            simulation_distance: 8,
-            fov: 90,
-            mouse_sensitivity: 0.25,
-            gui_scale: 3,
-            fullscreen: true,
-            vsync: false,
-            bob_view: false,
-            fov_effect_scale: 0.5,
-            damage_tilt_strength: 0.75,
-            gamma: 0.25,
-            darkness_effect_scale: 0.5,
-            max_fps: 60,
-            sound: SoundVolumes {
-                master: 0.8,
-                music: 0.0,
-                ..SoundVolumes::default()
-            },
-            keys: Keybinds::vanilla(),
-        };
-        let text = toml::to_string_pretty(&opts).unwrap();
-        let back: Options = toml::from_str(&text).unwrap();
-        assert_eq!(back, opts);
-    }
-
-    #[test]
-    fn missing_options_section_gives_defaults() {
-        // A Config without [options] (the pre-options file shape) loads with defaults.
-        let text = r#"
-username = "Steve"
-render_distance = 4
-gui_scale = 1
-fov = 70.0
-"#;
-        let cfg: crate::config::Config = toml::from_str(text).unwrap();
-        assert_eq!(cfg.options, Options::default());
-    }
-
-    #[test]
-    fn partial_options_section_gives_defaults() {
-        let text = "render_distance = 24\n";
-        let opts: Options = toml::from_str(text).unwrap();
-        assert_eq!(opts.render_distance, 24);
-        assert_eq!(opts.fov, 70);
-        assert_eq!(opts.sound.music, 1.0);
-        assert_eq!(opts.keys.get("key.forward"), Some("key.keyboard.w"));
-    }
-
-    #[test]
-    fn clamps_out_of_range_values() {
-        let opts = Options {
-            render_distance: 99,
-            simulation_distance: 0,
-            fov: 200,
-            mouse_sensitivity: 4.0,
-            gui_scale: 9,
-            max_fps: 1000,
-            sound: SoundVolumes {
-                master: 2.0,
-                music: -1.0,
-                ..SoundVolumes::default()
-            },
-            keys: Keybinds::default(),
-            ..Options::default()
-        }
-        .sanitized();
-        assert_eq!(opts.render_distance, 32);
-        assert_eq!(opts.simulation_distance, 2);
-        assert_eq!(opts.fov, 110);
-        assert_eq!(opts.mouse_sensitivity, 1.0);
-        assert_eq!(opts.gui_scale, 4);
-        assert_eq!(opts.max_fps, 260);
-        assert_eq!(opts.sound.master, 1.0);
-        assert_eq!(opts.sound.music, 0.0);
-    }
-
-    #[test]
-    fn keeps_unknown_keybinds_and_restores_missing_ones() {
-        let text = r#"
-[keys]
-"key.forward" = "key.keyboard.up"
-"key.modded.zoom" = "key.keyboard.c"
-"#;
-        let opts: Options = toml::from_str(text).unwrap();
-        // Unknown action kept verbatim, not dropped.
-        assert_eq!(opts.keys.get("key.modded.zoom"), Some("key.keyboard.c"));
-        assert_eq!(opts.keys.get("key.forward"), Some("key.keyboard.up"));
-        // Known actions missing from the file are restored by sanitized().
-        assert_eq!(opts.keys.get("key.jump"), None);
-        let opts = opts.sanitized();
-        assert_eq!(opts.keys.get("key.jump"), Some("key.keyboard.space"));
-        assert_eq!(opts.keys.get("key.modded.zoom"), Some("key.keyboard.c"));
-    }
-
-    #[test]
-    fn apply_one_maps_vanilla_keys_live() {
-        // The option bridge reports vanilla's own keys; apply_one is the single mapping
-        // both the options.txt import and the live bridge go through.
-        let mut opts = Options::default();
-        assert!(opts.apply_one("fov", "0.75"));
-        assert_eq!(opts.fov, 100);
-        assert!(opts.apply_one("fov", "90"));
-        assert_eq!(opts.fov, 90);
-        assert!(opts.apply_one("renderDistance", "14"));
-        assert_eq!(opts.render_distance, 14);
-        assert!(opts.apply_one("mouseSensitivity", "0.25"));
-        assert!((opts.mouse_sensitivity - 0.25).abs() < 1e-6);
-        assert!(opts.apply_one("soundCategory_master", "0.8"));
-        assert!((opts.sound.master - 0.8).abs() < 1e-6);
-        assert!(opts.apply_one("enableVsync", "false"));
-        assert!(!opts.vsync);
-        assert!(opts.apply_one("key_key.forward", "key.keyboard.up"));
-        assert_eq!(opts.keys.get("key.forward"), Some("key.keyboard.up"));
-        assert!(opts.apply_one("key_key.playerList", "key.keyboard.n"));
-        assert_eq!(opts.keys.get("key.playerlist"), Some("key.keyboard.n"));
-        // The accessibility/video options also apply through the same mapping.
-        assert!(opts.apply_one("gamma", "1.0"));
-        assert!((opts.gamma - 1.0).abs() < 1e-6);
-        assert!(opts.apply_one("bobView", "false"));
-        assert!(!opts.bob_view);
-        // Unknown keys are ignored, not fatal.
-        assert!(!opts.apply_one("skipMultiplayerWarning", "true"));
-        // Malformed values leave the field untouched.
-        assert!(opts.apply_one("renderDistance", "abc"));
-        assert_eq!(opts.render_distance, 14);
-    }
-
-    #[test]
-    fn imports_vanilla_options_txt() {
-        let text = "\
-version:4574
-renderDistance:8
-simulationDistance:6
-fov:0.75
-mouseSensitivity:0.25
-guiScale:2
-fullscreen:false
-vsync:true
-framerateLimit:60
-soundCategory_master:0.8
-soundCategory_music:0.0
-soundCategory_ui:1.0
-key_key.forward:key.keyboard.up
-key_key.playerList:key.keyboard.n
-key_key.hotbar.3:key.keyboard.c
-key_key.modded.zoom:key.keyboard.j
-gamma:1.0
-skipMultiplayerWarning:true
-";
-        let opts = Options::import_vanilla(text);
-        assert_eq!(opts.render_distance, 8);
-        assert_eq!(opts.simulation_distance, 6);
-        assert_eq!(opts.fov, 100);
-        assert_eq!(opts.mouse_sensitivity, 0.25);
-        assert_eq!(opts.gui_scale, 2);
-        assert!(!opts.fullscreen);
-        assert!(opts.vsync);
-        assert_eq!(opts.max_fps, 60);
-        assert_eq!(opts.sound.master, 0.8);
-        assert_eq!(opts.sound.music, 0.0);
-        assert_eq!(opts.sound.ui, 1.0);
-        assert_eq!(opts.keys.get("key.forward"), Some("key.keyboard.up"));
-        // vanilla's playerList maps to haste's key.playerlist
-        assert_eq!(opts.keys.get("key.playerlist"), Some("key.keyboard.n"));
-        assert_eq!(opts.keys.get("key.hotbar.3"), Some("key.keyboard.c"));
-        // unknown keybind actions are imported and kept
-        assert_eq!(opts.keys.get("key.modded.zoom"), Some("key.keyboard.j"));
-        // gamma is imported too; unknown keys (warnings) are ignored
-        assert_eq!(opts.gamma, 1.0);
-        assert_eq!(
-            opts.keys.get("key.sprint"),
-            Some("key.keyboard.left.control")
-        );
-    }
-}
+mod tests;

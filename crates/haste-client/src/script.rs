@@ -256,6 +256,8 @@ pub enum Condition {
     Settled,
     ScreenOpen,
     ScreenClosed,
+    /// The hotbar holds at least one item (the runner's RCON `give` has arrived).
+    HotbarItem,
     /// The renderer was rebuilt from a new resource pack selection this run (the pack
     /// screen's Done; vanilla `Minecraft.reloadResourcePacks`).
     Reloaded,
@@ -275,6 +277,7 @@ impl Condition {
             "settled" => Ok(Condition::Settled),
             "screen_open" => Ok(Condition::ScreenOpen),
             "screen_closed" => Ok(Condition::ScreenClosed),
+            "hotbar_item" => Ok(Condition::HotbarItem),
             "reloaded" => Ok(Condition::Reloaded),
             "screen" => {
                 let class = rest.split_whitespace().nth(1).ok_or_else(|| {
@@ -303,6 +306,7 @@ impl Condition {
             Condition::Settled => state.settled,
             Condition::ScreenOpen => state.screen_open,
             Condition::ScreenClosed => !state.screen_open,
+            Condition::HotbarItem => state.hotbar_item,
             Condition::Reloaded => state.reloaded,
             Condition::Screen(want) => state.screen_class.as_deref().is_some_and(|open| {
                 open.rsplit('.')
@@ -318,6 +322,7 @@ impl Condition {
             Condition::Settled => "settled".into(),
             Condition::ScreenOpen => "screen_open".into(),
             Condition::ScreenClosed => "screen_closed".into(),
+            Condition::HotbarItem => "hotbar_item".into(),
             Condition::Reloaded => "reloaded".into(),
             Condition::Screen(s) => format!("screen {}", s.join("|")),
         }
@@ -387,6 +392,8 @@ pub struct ScriptState {
     pub joined: bool,
     pub settled: bool,
     pub screen_open: bool,
+    /// Any hotbar slot holds an item (the RCON `give` has reached the client).
+    pub hotbar_item: bool,
     /// The open screen's class name (`wait_until screen <SimpleName>`), if any.
     pub screen_class: Option<String>,
     /// The renderer was rebuilt from a new resource pack selection this run
@@ -432,8 +439,11 @@ impl fmt::Display for ScriptError {
 
 impl std::error::Error for ScriptError {}
 
-/// `wait_until` gives up after this many ticks (default 600 ticks = 30 seconds).
-const WAIT_UNTIL_TIMEOUT: u32 = 600;
+/// `wait_until` gives up after this many ticks (2400 ticks = 2 minutes). Menu-mode scripts
+/// start with `wait_until screen TitleScreen`, which also covers the embedded JVM's start: on a
+/// loaded machine with freshly changed runtime Java that alone (javac + boot) took 33 s, so the
+/// earlier 30 s limit failed checks that were fine.
+const WAIT_UNTIL_TIMEOUT: u32 = 2400;
 
 /// Parses a whole script into steps. Blank lines and `# ...` comments are ignored; whitespace
 /// around a command is trimmed.

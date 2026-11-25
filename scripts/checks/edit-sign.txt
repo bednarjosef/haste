@@ -1,0 +1,50 @@
+# Feature: editing a sign. The check player is an operator on the test server (ops.json), so
+# the script stands at the check camera (the snowy plain, see run-feature-checks.sh), gives
+# itself an oak sign through the chat, places it on the ground ahead, types two lines (Down
+# moves to the next line) and presses Escape (which is the screen's Done: the sign update
+# goes out on close). Evidence: `data get block` of the sign's front_text (the runner greps
+# it; the sign lands in the block the camera looks at, z 7-9).
+wait_until joined
+wait_until settled
+wait 60
+# stand at the check camera and give ourselves an oak sign (op): clear first so it lands in
+# hotbar slot 0
+key T
+wait_until screen_open
+type /clear @s
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /tp @s 9.5 71 6.5 0 0
+key ENTER
+wait_until screen_closed
+wait 20
+key T
+wait_until screen_open
+type /give @s minecraft:oak_sign 1
+key ENTER
+wait_until screen_closed
+wait 20
+key 1
+wait 5
+# look down-forward at the ground ahead and place the sign against it
+look 0 55
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+screenshot sign-editor
+wait 20
+type LineOne
+key Down
+type LineTwo
+wait 10
+screenshot sign-typed
+key Escape
+wait_until screen_closed
+screenshot sign-done
+wait 60

@@ -23,6 +23,10 @@ pub struct InteractInput {
     pub use_item: bool,
     /// Middle click: true on the press tick only.
     pub pick_block: bool,
+    /// Ctrl held at the middle click (`Minecraft.pickBlockOrEntity` passes `hasControlDown()`
+    /// as `include_data`: Ctrl + middle click copies block-entity data in creative). Read
+    /// only on the tick `pick_block` is true.
+    pub pick_block_ctrl: bool,
     /// Q: true on the press tick only.
     pub drop_item: bool,
     /// Ctrl+Q: true on the press tick only.

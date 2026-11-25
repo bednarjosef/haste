@@ -22,8 +22,20 @@ public final class Native {
     public static native int gameMode();
     /** The local player's operator permission level (0-4, from the server's entity events). */
     public static native int permissionLevel();
+    /**
+     * The global block state id ({@code Block.BLOCK_STATE_REGISTRY}) the client's world has at a
+     * position (-1 when the position has no chunk), for building the real state of a block entity
+     * the screens edit (vanilla's chunks know it; Haste's Rust world does).
+     */
+    public static native int blockState(int x, int y, int z);
     /** The local player's name. */
     public static native String playerName();
+    /**
+     * The cooldown percent of an item's cooldown group (vanilla
+     * {@code ItemCooldowns.getCooldownPercent} on the player's cooldowns), for the item overlay
+     * ({@code GuiGraphicsExtractor.itemCooldown}); 0 when the group has no cooldown.
+     */
+    public static native float itemCooldown(String group, float partialTick);
 
     /** Fills the mirror arrays with Rust's primitive player and debug state (layout: haste.gui.Mirror). */
     public static native void mirror(int[] ints, double[] doubles);
@@ -87,4 +99,18 @@ public final class Native {
      * ({@code resourcePacks}); Rust re-opens its asset stack and rebuilds the renderer.
      */
     public static native void resourcePacksChanged(String[] selectedIds);
+
+    // ---- sound event listeners (haste.gui.SoundImpl; the sound is Rust's) ----
+    /** Vanilla code registered its first sound event listener or removed its last one (the subtitle overlay). */
+    public static native void soundListening(boolean listening);
+    /**
+     * Fills {@code listener} with the sound listener transform (position, forward, up) and returns the sounds
+     * with a subtitle Rust played since the last call as {@code {String[] names, double[] values}} (layout:
+     * haste.gui.SoundImpl), or null when there were none.
+     */
+    public static native Object[] takePlayedSounds(double[] listener);
+
+    // ---- the server resource pack prompt (vanilla's PackConfirmScreen) ----
+    /** The player answered the server resource pack prompt (vanilla's confirm screen callback). */
+    public static native void packPromptAnswered(boolean accepted);
 }

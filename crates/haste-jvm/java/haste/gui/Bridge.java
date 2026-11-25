@@ -24,6 +24,19 @@ public final class Bridge {
     private int pressedButton = -1;
     private double lastX, lastY;
 
+    /** Vanilla's MouseHandler.LastClick record: time (Util.getMillis), screen, button. */
+    private static final class LastClick {
+        final long time;
+        final Object screen;
+        final int button;
+        LastClick(long time, Object screen, int button) {
+            this.time = time;
+            this.screen = screen;
+            this.button = button;
+        }
+    }
+    private LastClick lastClick;
+
     private Bridge() {}
 
     /** How long vanilla's bootstrap took (ms). */
@@ -109,12 +122,16 @@ public final class Bridge {
         this.pressedButton = -1;
         this.lastX = 0.0;
         this.lastY = 0.0;
+        this.lastClick = null;
         MouseImpl.pressed = -1;
         MouseImpl.x = 0.0;
         MouseImpl.y = 0.0;
         Proxies.hud.getChat().clearMessages(false);
         Proxies.hud.getChat().resetChatScroll();
-        Proxies.gui.setScreen(null);
+        // not Gui.setScreen(null) (which would open the title screen outside a world, like
+        // vanilla): the point here is no screen at all
+        if (ClientImpl.screen != null) ClientImpl.screen.removed();
+        ClientImpl.screen = null;
         MouseImpl.grabbed = false;
         Proxies.options.fov().set(70);
     }
@@ -137,20 +154,26 @@ public final class Bridge {
             s.resize(width, height);
         }
         GfxImpl.begin(width, height);
+        // vanilla advances the frame timer every frame (Minecraft.renderFrame), in a world or not: the
+        // title panorama spins by its real-time delta
+        Delta.frame(partial);
+        // the sounds Rust played since the last frame reach the sound event listeners (the subtitles)
+        SoundImpl.frame();
         if (Mirror.inWorld()) {
-            Delta.frame(partial);
             Proxies.hud.extractRenderState(Proxies.graphics, Delta.INSTANCE);
             GfxImpl.POSE.reset();
         }
         s = ClientImpl.screen;
-        if (s != null) s.extractRenderStateWithTooltipAndSubtitles(Proxies.graphics, (int) mouseX, (int) mouseY, partial);
+        if (s != null) s.extractRenderStateWithTooltipAndSubtitles(Proxies.graphics, (int) mouseX, (int) mouseY, Delta.INSTANCE.getGameTimeDeltaTicks());
         // vanilla Gui.extractRenderState draws the F3 debug overlay after the screen (unless the debug
         // options screen is up, which draws its own copy); it is the topmost HUD element.
         if (!(s instanceof net.minecraft.client.gui.screens.debug.DebugOptionsScreen)) {
             Proxies.hud.extractDebugOverlay(Proxies.graphics);
         }
+        // then the subtitles the HUD deferred, on top of everything (vanilla Gui.extractRenderState)
+        Proxies.hud.extractDeferredSubtitles();
         GfxImpl.end();
-        return GuiBatch.frame(GfxImpl.cursor);
+        return GuiBatch.frame(GfxImpl.cursor, GfxImpl.blurAfter, GfxImpl.panorama, GfxImpl.panoramaSpin);
     }
 
     /** One 20 Hz client tick: the HUD (chat fade, titles, overlay message), the chat queue and the open screen. */
@@ -158,10 +181,15 @@ public final class Bridge {
         Mirror.update();
         OptionBridge.tick();
         if (Mirror.inWorld()) {
-            // a dead player (killed, or joined while dead) sees the death screen
-            if (Mirror.health() <= 0f && !Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)
-                && !(ClientImpl.screen instanceof net.minecraft.client.gui.screens.DeathScreen)) {
-                Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(null, Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
+            // a dead player (killed, or joined while dead) sees the death screen; with immediate
+            // respawn on, vanilla's Gui.setScreen(null) calls player.respawn() instead
+            // (vanilla: Gui.tick -> setScreen(null) -> isDeadOrDying -> shouldShowDeathScreen)
+            if (Mirror.health() <= 0f && !(ClientImpl.screen instanceof net.minecraft.client.gui.screens.DeathScreen)) {
+                if (Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)) {
+                    Proxies.player.respawn();
+                } else {
+                    Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(null, Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
+                }
             }
             Proxies.hud.tick(false);
             Proxies.chatListener.tick();
@@ -179,6 +207,9 @@ public final class Bridge {
         Proxies.set(Proxies.player, "uuid", java.util.UUID.class, uuid);
         Proxies.set(Proxies.player, "stringUUID", String.class, uuid.toString());
         PlayerImpl.profile = new com.mojang.authlib.GameProfile(uuid, name);
+        // Player's own field (its constructor would set it; the proxy's is null without this):
+        // `Player.getName` reads it, e.g. the book's sign screen names the author.
+        Proxies.set(Proxies.player, "gameProfile", com.mojang.authlib.GameProfile.class, PlayerImpl.profile);
     }
 
     /** The joined world's dimension type (its id in the synchronised dimension_type registry). */
@@ -229,6 +260,17 @@ public final class Bridge {
     }
 
     /**
+     * The player started riding (vanilla ClientPacketListener.handleSetEntityPassengersPacket, on
+     * the foot-to-riding transition): the "mount.onboard" overlay message with the bound sneak
+     * key's name, exactly the component vanilla builds. No cushion seating exists in Haste, so
+     * "mount.sit" never applies.
+     */
+    public void showMountMessage() {
+        net.minecraft.network.chat.Component shiftKey = Proxies.options.keyShift.getTranslatedKeyMessage();
+        Proxies.hud.setOverlayMessage(net.minecraft.network.chat.Component.translatable("mount.onboard", shiftKey), false);
+    }
+
+    /**
      * The connection was lost or the server kicked us: vanilla's disconnect screen with the reason (a text component
      * in its JSON form). In menu mode the open screen (the connecting screen's parent, e.g. the server list) is the
      * parent, so the screen's button returns there like vanilla's ConnectScreen failure path.
@@ -242,6 +284,68 @@ public final class Bridge {
             : ClientImpl.screen;
         Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(parent,
             net.minecraft.network.chat.Component.translatable("disconnect.lost"), reason));
+    }
+
+    /**
+     * The server resource pack prompt (vanilla's
+     * {@code ClientCommonPacketListenerImpl.PackConfirmScreen}, a ConfirmScreen): shown while
+     * connecting to (or playing on) a server that pushes a pack and whose per-server setting is
+     * "Prompt" (servers.dat {@code acceptTextures} absent). {@code forced} is the push's required
+     * flag (a required pack words the screen as mandatory and declines by disconnecting);
+     * {@code promptJson} is the push's optional prompt text (a text component in its JSON form).
+     *
+     * <p>Replaces an already-open prompt (vanilla's {@code addOrUpdatePackPrompt} rebuilds it for
+     * the pushes waiting now). The answer reaches Rust through
+     * {@link haste.rt.Native#packPromptAnswered(boolean)}; the screen the prompt opened over is
+     * restored then, like vanilla's {@code parentScreen}.
+     */
+    public void showPackPrompt(boolean forced, String promptJson) {
+        net.minecraft.network.chat.Component prompt = null;
+        if (promptJson != null && !promptJson.isEmpty()) {
+            prompt = net.minecraft.network.chat.ComponentSerialization.CODEC
+                .parse(com.mojang.serialization.JsonOps.INSTANCE, com.google.gson.JsonParser.parseString(promptJson))
+                .result().orElse(null);
+        }
+        // The title (line 1) and message (line 2) of vanilla's two wordings; a server prompt is
+        // folded into the message with vanilla's "message from server" wrapping.
+        net.minecraft.network.chat.Component title = forced
+            ? net.minecraft.network.chat.Component.translatable("multiplayer.requiredTexturePrompt.line1")
+            : net.minecraft.network.chat.Component.translatable("multiplayer.texturePrompt.line1");
+        net.minecraft.network.chat.Component message = forced
+            ? net.minecraft.network.chat.Component.translatable("multiplayer.requiredTexturePrompt.line2")
+                .withStyle(net.minecraft.ChatFormatting.YELLOW, net.minecraft.ChatFormatting.BOLD)
+            : net.minecraft.network.chat.Component.translatable("multiplayer.texturePrompt.line2");
+        if (prompt != null) {
+            message = net.minecraft.network.chat.Component.translatable("multiplayer.texturePrompt.serverPrompt",
+                message, prompt);
+        }
+        net.minecraft.network.chat.Component yes = forced
+            ? net.minecraft.network.chat.CommonComponents.GUI_PROCEED
+            : net.minecraft.network.chat.CommonComponents.GUI_YES;
+        net.minecraft.network.chat.Component no = forced
+            ? net.minecraft.network.chat.CommonComponents.GUI_DISCONNECT
+            : net.minecraft.network.chat.CommonComponents.GUI_NO;
+        // What the prompt returns to once answered (the connecting screen, the game, ...); a
+        // prompt already open keeps its parent (vanilla's PackConfirmScreen keeps its first).
+        Screen parent = ClientImpl.screen instanceof PackPromptScreen open ? open.parent : ClientImpl.screen;
+        Proxies.gui.setScreen(new PackPromptScreen(parent, accepted -> {
+            // vanilla's callback returns to the parent screen first, then answers
+            Proxies.gui.setScreen(parent);
+            haste.rt.Native.packPromptAnswered(accepted);
+        }, title, message, yes, no));
+    }
+
+    /** The server resource pack prompt: vanilla's ConfirmScreen wording, the answer to Rust. */
+    private static final class PackPromptScreen extends net.minecraft.client.gui.screens.ConfirmScreen {
+        /** What the prompt returns to once answered (vanilla's parentScreen). */
+        final Screen parent;
+
+        PackPromptScreen(Screen parent, it.unimi.dsi.fastutil.booleans.BooleanConsumer callback,
+            net.minecraft.network.chat.Component title, net.minecraft.network.chat.Component message,
+            net.minecraft.network.chat.Component yes, net.minecraft.network.chat.Component no) {
+            super(callback, title, message, yes, no);
+            this.parent = parent;
+        }
     }
 
     /** F1: hides or shows the HUD (vanilla's toggle). */
@@ -281,13 +385,44 @@ public final class Bridge {
         boolean r;
         if (pressed) {
             pressedButton = button;
-            r = s.mouseClicked(e, false);
+            // vanilla MouseHandler.onButton: double click when the previous click this screen
+            // accepted was < 250 ms ago, on the same screen object, with the same button.
+            s.afterMouseAction();
+            long currentTime = net.minecraft.util.Util.getMillis();
+            r = s.mouseClicked(e, isDoubleClick(s, button, currentTime));
+            if (r) recordClick(s, button, currentTime);
         } else {
             pressedButton = -1;
             r = s.mouseReleased(e);
         }
         InventorySync.sync();
         return r;
+    }
+
+    /** Whether {@code screen/button/now} is a double click under the vanilla rule (no mutation). */
+    private boolean isDoubleClick(Object screen, int button, long now) {
+        return this.lastClick != null
+            && now - this.lastClick.time < 250L
+            && this.lastClick.screen == screen
+            && this.lastClick.button == button;
+    }
+
+    /** Records a click that the screen accepted, as vanilla does only on a true result. */
+    private void recordClick(Object screen, int button, long now) {
+        this.lastClick = new LastClick(now, screen, button);
+    }
+
+    /** Self-test of the vanilla double-click rule on explicit times; true when every case holds. */
+    public static boolean doubleClickRuleSelfTest() {
+        Bridge b = new Bridge();
+        Object s = new Object();
+        if (b.isDoubleClick(s, 1, 1000)) return false; // no accepted click yet (a rejected click records nothing)
+        b.recordClick(s, 1, 1000);
+        if (!b.isDoubleClick(s, 1, 1100)) return false; // 100 ms later: double
+        if (b.isDoubleClick(s, 1, 1250)) return false; // 250 ms is not < 250
+        if (b.isDoubleClick(s, 2, 1100)) return false; // other button
+        if (b.isDoubleClick(new Object(), 1, 1100)) return false; // other screen
+        return true;
     }
 
     public boolean scroll(double x, double y, double dx, double dy) {
@@ -300,8 +435,13 @@ public final class Bridge {
 
     // ---- game input through the KeyMappings (haste.gui.OptionBridge) ----
 
-    /** A game key event (SDL3 scancode) mirrored into the KeyMappings; no screen may be open. */
-    public void gameKey(int scancode, boolean pressed) { OptionBridge.gameKey(scancode, pressed); }
+    /** A game key event (SDL3 scancode) mirrored into the KeyMappings; no screen may be open.
+     * {@code mods} is the SDL keymod state of the event, kept current for the Ctrl-at-consume
+     * reads (vanilla polls the live keyboard there, e.g. the drop's one-item-or-stack). */
+    public void gameKey(int scancode, boolean pressed, int mods) {
+        ClientImpl.mods = mods;
+        OptionBridge.gameKey(scancode, pressed);
+    }
 
     /** A game mouse button (vanilla numbering) mirrored into the KeyMappings. */
     public void gameMouse(int button, boolean pressed) { OptionBridge.gameMouse(button, pressed); }
@@ -341,6 +481,18 @@ public final class Bridge {
         InventorySync.sync();
     }
 
+    /**
+     * Removes from the selected hotbar slot (vanilla `MultiPlayerGameMode.dropItem` -> `Inventory.removeFromSelected`):
+     * one item, or the whole stack when {@code all}. The removal happens on the client inventory itself
+     * (the one the HUD and screens read); the server does not echo it back, so `InventorySync` mirrors
+     * the change to Rust. Returns whether the removed stack was empty (nothing left the slot).
+     */
+    public boolean removeFromSelected(boolean all) {
+        net.minecraft.world.item.ItemStack removed = Proxies.inventory.removeFromSelected(all);
+        InventorySync.sync();
+        return removed.isEmpty();
+    }
+
     /** The chat log as plain text, oldest first (vanilla's ChatComponent; headless clients and tests). */
     @SuppressWarnings("unchecked")
     public String chatHistory() {
@@ -357,9 +509,28 @@ public final class Bridge {
         }
     }
 
+    /** A use opened the command block editor (vanilla `LocalPlayer.openCommandBlock`). */
+    public void openCommandBlock(int x, int y, int z) {
+        Handlers.openCommandBlock(x, y, z);
+    }
+
+    /** The server forgot a chunk: its block entities leave the Java-side store (vanilla unloads them with the chunk). */
+    public void dropChunkBlockEntities(int chunkX, int chunkZ) {
+        BlockEntities.dropChunk(chunkX, chunkZ);
+    }
+
+    /** Number of block entities in the Java-side store (tests: chunk drops). */
+    public int blockEntityCount() {
+        return BlockEntities.count();
+    }
+
+    /** A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`). */
+    public void openItemGui(int hand) {
+        Handlers.openItemGui(hand);
+    }
+
     /** Names of the server's commands the local player may use (the root of the command tree), one per line. */
-    public String commandNames() {
-        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+    public String commandNames() {        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
         StringBuilder sb = new StringBuilder();
         for (var n : Handlers.commands.getRoot().getChildren()) {
             if (n.canUse(src)) sb.append(n.getName()).append('\n');

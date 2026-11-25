@@ -15,7 +15,7 @@ public final class GuiBatch {
     public static final int TEXT = 3;            // x y argb shadow(0/1) str
     public static final int TEXTURE = 4;         // tex x y w h u v uw vh texW texH tint blend  (u v uw vh float bits)
     public static final int SPRITE = 5;          // sprite x y w h tint blend
-    public static final int ITEM = 6;            // item x y count
+    public static final int ITEM = 6;            // item x y count foil(0 none, 1 standard, 2 special)
     public static final int SCISSOR_PUSH = 7;    // x1 y1 x2 y2
     public static final int SCISSOR_POP = 8;
     public static final int TRANSLATE_PUSH = 9;  // dx dy dz (float bits)
@@ -53,12 +53,17 @@ public final class GuiBatch {
     public static int length() { return len; }
 
     /**
-     * Returns {int[] commands, String[] strings, int[] {cursor}} for this frame and resets the buffer. The cursor
-     * code is the shape the screen asked for (0 default arrow, then CursorTypes' order: 1 arrow, 2 I-beam,
-     * 3 crosshair, 4 pointing hand, 5 resize north-south, 6 resize east-west, 7 resize all, 8 not allowed).
+     * Returns {int[] commands, String[] strings, int[] {cursor, blurAfter, panorama, spin}} for this frame and
+     * resets the buffer. The cursor code is the shape the screen asked for (0 default arrow, then CursorTypes' order:
+     * 1 arrow, 2 I-beam, 3 crosshair, 4 pointing hand, 5 resize north-south, 6 resize east-west, 7 resize
+     * all, 8 not allowed). {@code blurAfter} is the command index the open screen's blur goes after
+     * (vanilla: {@code Screen.extractBlurredBackground}), or -1 when no screen asked for one. {@code panorama}
+     * is 1 when a screen extracted the title panorama this frame ({@code Screen.extractPanorama}), and
+     * {@code spin} its rotation in degrees (raw float bits; vanilla's {@code PanoramaRenderState.spin}).
      */
-    public static Object[] frame(int cursor) {
-        Object[] r = { Arrays.copyOf(buf, len), Arrays.copyOf(strings, nstrings), new int[] { cursor } };
+    public static Object[] frame(int cursor, int blurAfter, boolean panorama, float spin) {
+        Object[] r = { Arrays.copyOf(buf, len), Arrays.copyOf(strings, nstrings),
+            new int[] { cursor, blurAfter, panorama ? 1 : 0, Float.floatToRawIntBits(spin) } };
         reset();
         return r;
     }

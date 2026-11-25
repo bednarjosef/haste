@@ -4,7 +4,16 @@
 //! and optional `grass_color`, `foliage_color`, `dry_foliage_color` (an int, or a `#rrggbb`
 //! string as in the data pack JSON) and `grass_color_modifier` (`none`, `dark_forest`, `swamp`).
 
-use haste_protocol::haste_core::{BiomeId, BlockPos, Identifier};
+// `biomes.rs` is included through a `#[path]` module, so its submodules resolve next to it
+// in `src/`, not in `src/biomes/` — point them at their files explicitly.
+#[path = "biomes/ambient_sounds.rs"]
+pub mod ambient_sounds;
+#[path = "biomes/audio.rs"]
+pub mod audio;
+#[path = "biomes/zoom.rs"]
+pub mod zoom;
+
+use haste_protocol::haste_core::{BiomeId, BlockPos, ChunkPos, Identifier};
 use haste_protocol::nbt::NbtCompound;
 use haste_protocol::SyncedRegistries;
 use haste_render::{BiomeClimate, BiomeFog, GrassModifier};
@@ -15,16 +24,14 @@ pub struct WorldBiomes<'a>(pub &'a haste_world::World);
 
 impl haste_render::BiomeSource for WorldBiomes<'_> {
     fn biome(&self, pos: BlockPos) -> BiomeId {
+        // Vanilla `BiomeManager.getBiome`: the fiddled nearest corner's cell, which can be
+        // one quart cell off the block's own in each axis (crossing a section or chunk
+        // border; 0 where that neighbour is not loaded).
+        let (qx, qy, qz) = zoom::zoomed_cell(self.0.biome_zoom_seed(), pos.x, pos.y, pos.z);
         self.0
-            .chunk(pos.chunk())
-            .and_then(|c| c.section(pos.y >> 4))
-            .map(|s| {
-                s.biome(
-                    ((pos.x & 15) >> 2) as u8,
-                    ((pos.y & 15) >> 2) as u8,
-                    ((pos.z & 15) >> 2) as u8,
-                )
-            })
+            .chunk(ChunkPos::new(qx >> 2, qz >> 2))
+            .and_then(|c| c.section(qy >> 2))
+            .map(|s| s.biome((qx & 3) as u8, (qy & 3) as u8, (qz & 3) as u8))
             .unwrap_or(BiomeId(0))
     }
 }
@@ -64,6 +71,8 @@ pub fn climate_from_nbt(c: &NbtCompound) -> BiomeClimate {
             .get_numeric_float("temperature")
             .unwrap_or(plains.temperature),
         downfall: c.get_numeric_float("downfall").unwrap_or(plains.downfall),
+        // `has_precipitation` (26.3's rename of `Biome.hasPrecipitation`); plains has it.
+        has_precipitation: c.get_bool("has_precipitation").unwrap_or(true),
         water_color: eff("water_color").unwrap_or(plains.water_color),
         grass_color: eff("grass_color"),
         foliage_color: eff("foliage_color"),
@@ -136,6 +145,7 @@ mod tests {
             BiomeClimate {
                 temperature: 0.8,
                 downfall: 0.9,
+                has_precipitation: true,
                 water_color: 0x617B64,
                 grass_color: None,
                 foliage_color: Some(0x6A7039),

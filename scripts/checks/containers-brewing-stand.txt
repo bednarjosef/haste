@@ -1,0 +1,61 @@
+# Container check: brewing stand. The brewing screen is 176x166 centred in the 480x270 GUI,
+# so its origin is (152, 52) and a slot's centre is its menu position + 8 (vanilla
+# BrewingStandMenu: potions (56,51) (79,58) (102,51), ingredient (79,17), fuel (17,17); the
+# player inventory and hotbar are the container screen's standard rows).
+#   potion slot 0 (menu slot 0) -> (152+56+8, 52+51+8)  = (216, 111)
+#   potion slot 1 (menu slot 1) -> (152+79+8, 52+58+8)  = (239, 118)
+#   potion slot 2 (menu slot 2) -> (152+102+8, 52+51+8) = (262, 111)
+#   ingredient (menu slot 3)    -> (152+79+8, 52+17+8)  = (239, 77)
+#   fuel (menu slot 4)          -> (152+17+8, 52+17+8)  = (177, 77)
+#   player inventory (slots 5+) -> (152+8+8, 52+84+8)   = (168, 144), step 18
+#   hotbar (slots 32+)          -> (152+8+8, 52+142+8) = (168, 202), step 18
+# The runner tps us into the check's own area, gives a water bottle (a potion with water
+# contents), a nether wart and a blaze powder and places the stand when the setup
+# screenshot appears. The brew (water bottle + nether wart, fueled by the blaze powder)
+# is vanilla's awkward potion and takes 400 ticks, waited out before the result is taken.
+wait_until joined
+wait_until settled
+screenshot cbrew-setup
+# The runner now tps us to (126.5, 71, 2.5) facing the stand, clears the inventory and gives
+# the items. Waiting for the hotbar absorbs the busy shared server.
+wait_until hotbar_item
+# Open the stand: look at it and use (the runner placed it at (126, 71, 5), on this check's
+# own stone platform; from the eye at (126.5, 72.62, 2.5), pitch 20 aims at the face at
+# y ~71.7).
+look 0 20
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait_until screen_open
+wait 10
+screenshot cbrew-open
+# The water bottle goes into potion slot 0, the nether wart into the ingredient slot, the
+# blaze powder into the fuel slot: pick each up from its own hotbar slot (0: 168 202,
+# 1: 186 202, 2: 204 202) and drop it in.
+click left 168 202
+click left 216 111
+click left 186 202
+click left 239 77
+click left 204 202
+click left 177 77
+# The brew takes 400 ticks (20 s) once the fuel burns; wait for the potion. The screen stays
+# open (the vanilla client keeps it open while the arrow fills).
+wait 600
+screenshot cbrew-brewed
+# Take the awkward potion: shift-click potion slot 0 straight into the inventory.
+key_down LShift
+wait 2
+click left 216 111
+wait 2
+key_up LShift
+wait 10
+screenshot cbrew-taken
+# Close with E (the inventory key, vanilla's keyInventory path in keyPressed).
+key E
+wait 20
+wait_until screen_closed
+screenshot cbrew-closed
+# 10 s tail: the runner reads `data get entity ... Inventory` (the awkward potion) from
+# this frame on.
+wait 200

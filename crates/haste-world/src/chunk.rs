@@ -3,12 +3,13 @@
 use haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
 
-use crate::light::NibbleArray;
+use crate::light::{NibbleArray, SkyLight};
 use crate::palette::{BiomeContainer, BlockContainer, DecodedSection, PaletteError};
 
 /// One 16x16x16 section of a chunk.
 pub struct Section {
-    /// Number of non-air blocks (vanilla's `block_count`); used to skip empty sections.
+    /// Number of non-air blocks (vanilla's `block_count`); the mesher's feed skips
+    /// sections that are empty and were never meshed.
     pub block_count: i16,
     /// Number of fluid blocks as the server sent it (not maintained by `set`); 0 lets the
     /// mesher skip fluid work for the section.
@@ -39,6 +40,11 @@ impl Section {
         self.block_count == 0
     }
 
+    /// Heap bytes of this section's block and biome containers (live allocations).
+    pub fn memory_bytes(&self) -> u64 {
+        self.blocks.memory_bytes() + self.biomes.memory_bytes()
+    }
+
     /// Biome at cell coordinates (0..4 within the section).
     pub fn biome(&self, x: u8, y: u8, z: u8) -> BiomeId {
         self.biomes.get_biome(x, y, z)
@@ -64,19 +70,41 @@ impl Heightmap {
     }
 }
 
-/// Sky and block light per section, parallel to `Chunk::sections`.
+/// Sky and block light per section, parallel to `Chunk::sections`. Sky light follows
+/// vanilla `DataLayer`: absent or uniform sections keep no array (see `SkyLight`), so a
+/// section costs heap memory only when its light genuinely varies.
 #[derive(Default)]
 pub struct ChunkLight {
-    pub sky: Vec<Option<NibbleArray>>,
+    pub sky: Vec<SkyLight>,
     pub block: Vec<NibbleArray>,
 }
 
 impl ChunkLight {
     pub(crate) fn new(section_count: usize) -> Self {
         Self {
-            sky: vec![None; section_count],
+            sky: vec![SkyLight::Absent; section_count],
             block: vec![NibbleArray::default(); section_count],
         }
+    }
+
+    /// Heap bytes of the stored light (the `World::memory_stats` light half): one owned
+    /// 2048-byte array (an `Arc` allocation: 2048 + 16 header) per section whose light
+    /// genuinely varies — uniform sky sections are one byte, absent ones nothing, and
+    /// all-zero block light shares one array — plus the Vec slots themselves.
+    pub fn heap_bytes(&self) -> u64 {
+        let arrays = self
+            .sky
+            .iter()
+            .filter(|s| matches!(s, SkyLight::Array(_)))
+            .count() as u64
+            + self
+                .block
+                .iter()
+                .filter(|s| !(s.all_zero() || s.all_full()))
+                .count() as u64;
+        arrays * (2048 + 16)
+            + (self.sky.capacity() * std::mem::size_of::<SkyLight>()
+                + self.block.capacity() * std::mem::size_of::<NibbleArray>()) as u64
     }
 }
 
@@ -93,6 +121,10 @@ pub struct Chunk {
     pub block_entities: ahash::HashMap<BlockPos, BlockEntityData>,
     /// Sky/block light per section (same indexing as `sections`).
     pub light: ChunkLight,
+    /// Per-column lowest sky source y (vanilla `ChunkSkyLightSources`), lazily built by
+    /// the light engine on the first block change that needs it. `i32::MIN` per column
+    /// means the column is open to the world's floor.
+    pub(crate) sky_sources: Option<Box<[i32; 256]>>,
     /// One dirty bit per section (index = section y - `min_section`), so remesh marking
     /// is a bit-set instead of a hash insert. Owned by the chunk, cleared when the
     /// world drains the dirty sections.
@@ -161,6 +193,7 @@ impl Chunk {
                 .map(|be| (be.pos, be.clone()))
                 .collect(),
             light: ChunkLight::new(section_count),
+            sky_sources: None,
             dirty: vec![0; section_count.div_ceil(64)],
         };
         chunk.apply_light(&data.light);
@@ -251,18 +284,21 @@ impl Chunk {
     }
 
     /// Appends this chunk's dirty sections to `out` (in section order), clearing the
-    /// bits as they go.
+    /// bits as they go. Every dirty section is reported, empty ones included: vanilla's
+    /// `SectionUpdateTracker.setDirty` marks regardless of contents and
+    /// `SectionRenderDispatcher.RenderSection.CompileTask` stores an empty mesh for a
+    /// section that compiled to nothing, replacing the old one. Skipping a section that
+    /// became empty would leave the renderer holding its previous mesh (a ghost block);
+    /// the load-time cost of reporting air sections is filtered by the client's feed
+    /// (`WorldFeed`, which never submits an empty section it has not meshed before).
     pub(crate) fn take_dirty(&mut self, out: &mut Vec<SectionPos>) {
         for (w, word) in self.dirty.iter_mut().enumerate() {
             let mut bits = *word;
             while bits != 0 {
                 let b = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                out.push(SectionPos::new(
-                    self.pos.x,
-                    self.min_section + (w * 64 + b) as i32,
-                    self.pos.z,
-                ));
+                let y = self.min_section + (w * 64 + b) as i32;
+                out.push(SectionPos::new(self.pos.x, y, self.pos.z));
             }
             *word = 0;
         }
@@ -283,14 +319,15 @@ pub fn synthetic_chunk_data(
 mod tests {
     use super::*;
 
-    /// A chunk with `sections` single-value air sections (the dirty bitset is what
-    /// these tests exercise; the contents do not matter).
+    /// A chunk with `sections` stone-filled sections (the dirty bitset is what these
+    /// tests exercise; the contents are irrelevant to it, every dirty section is
+    /// reported whatever it holds).
     fn chunk_with_sections(sections: usize, min_section: i32) -> Chunk {
         let cd = synthetic_chunk_data(
             ChunkPos::new(1, -2),
             min_section,
             sections,
-            |_si, _x, _y, _z| BlockStateId::AIR,
+            |_si, _x, _y, _z| BlockStateId(1),
         );
         Chunk::decode(&cd, min_section, sections, 15, 7, u32::MAX).unwrap()
     }

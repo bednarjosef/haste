@@ -13,19 +13,27 @@
 //! * [`GameState`] is the Rust-owned state the proxies read through natives (inventory, chat
 //!   history, player name) and the outbox screens write to (sent chat messages).
 
+mod crate_dir;
 mod error;
 mod gui;
 mod host;
+// Declared here with `#[path]` (not in `proxies.rs`, which is at its recorded size cap): the
+// item cooldowns mirror belongs with the proxies' player state.
+#[path = "proxies/item_cooldowns.rs"]
+pub mod item_cooldowns;
 pub mod keys;
+mod launch_options;
 mod loader;
 mod natives;
 mod proxies;
+pub mod sound_manager;
 
 pub use error::JvmError;
 pub use gui::{GuiPipeline, ScreenKind};
 pub use host::{JvmConfig, JvmHost, StartTimings};
-pub use loader::{ClassLog, ClassSource, ALLOW_CLASSES, ALLOW_PACKAGES, DENY};
+pub use item_cooldowns::{set_item_cooldowns, ItemCooldownHud, ItemCooldownsHud};
+pub use loader::{ClassLog, ClassSource, ALLOW_CLASSES, ALLOW_PACKAGES, DENY, WARM_CLASSES};
 pub use proxies::{
-    decode_stack, empty_stack, encode_stack, ChatMessage, CreateWorldRequest, DebugInfo, GameState,
-    PlayerVitals, TargetedState, INVENTORY_SIZE,
+    decode_stack, empty_stack, encode_stack, AttackStrengthHud, ChatMessage, CreateWorldRequest,
+    DebugInfo, GameState, MountHud, PlayerVitals, TargetedState, INVENTORY_SIZE,
 };

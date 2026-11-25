@@ -11,56 +11,25 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use haste_core::entity::MetadataValue;
+use crate::model_dump;
 use haste_core::ids::RegistryIndex;
 use haste_core::model::CubeModel;
 use haste_core::Identifier;
-use serde::Deserialize;
 
-use crate::model_dump;
+/// The renderers' shadow radius and strength by entity type (`EntityRenderer.shadowRadius`).
+mod shadow;
+pub use shadow::{shadow_radius_for_name, shadow_strength_for_name};
 
-/// One table row: adult and baby layer ids (`minecraft:pig#main`), textures (jar paths under
-/// `assets/minecraft/textures/`, without the prefix), and the layers' root scales.
-struct Entry {
-    layer: &'static str,
-    texture: &'static str,
-    root_scale: f32,
-    /// The baby layer/texture when vanilla renders babies with their own `*_BABY` layer;
-    /// `None` when the adult layer is used for both.
-    baby: Option<(&'static str, &'static str)>,
-}
+mod names;
+use names::load_entity_type_names;
 
-const fn row(layer: &'static str, texture: &'static str) -> Entry {
-    Entry {
-        layer,
-        texture,
-        root_scale: 1.0,
-        baby: None,
-    }
-}
+mod decoration_kind;
+pub use decoration_kind::{decoration_kind, DecorationKind};
 
-const fn row_baby(
-    layer: &'static str,
-    texture: &'static str,
-    baby_layer: &'static str,
-    baby_texture: &'static str,
-) -> Entry {
-    Entry {
-        layer,
-        texture,
-        root_scale: 1.0,
-        baby: Some((baby_layer, baby_texture)),
-    }
-}
-
-const fn row_scaled(layer: &'static str, texture: &'static str, root_scale: f32) -> Entry {
-    Entry {
-        layer,
-        texture,
-        root_scale,
-        baby: None,
-    }
-}
+mod baby;
+pub use baby::{is_baby, BABY_METADATA_INDEX};
+mod row;
+use row::{row, row_baby, row_scaled, Entry};
 
 /// The table. Textures and layers read from each vanilla renderer named in the comments
 /// (`cache/source/26.3/client/net/minecraft/client/renderer/entity/`).
@@ -264,6 +233,11 @@ static TABLE: &[(&str, Entry)] = &[
         "minecraft:evoker",
         row_scaled("minecraft:evoker#main", "entity/illager/evoker", 0.9375),
     ),
+    // EvokerFangsRenderer: ModelLayers.EVOKER_FANGS, textures/entity/illager/evoker_fangs.png
+    (
+        "minecraft:evoker_fangs",
+        row("minecraft:evoker_fangs#main", "entity/illager/evoker_fangs"),
+    ),
     // FoxRenderer: ModelLayers.FOX / FOX_BABY, textures/entity/fox/fox.png / fox_baby.png
     //   (red variant is the default; snow/sleep textures later)
     (
@@ -378,6 +352,11 @@ static TABLE: &[(&str, Entry)] = &[
     (
         "minecraft:iron_golem",
         row("minecraft:iron_golem#main", "entity/iron_golem/iron_golem"),
+    ),
+    // LlamaSpitRenderer: ModelLayers.LLAMA_SPIT, textures/entity/llama/llama_spit.png
+    (
+        "minecraft:llama_spit",
+        row("minecraft:llama_spit#main", "entity/llama/llama_spit"),
     ),
     // LlamaRenderer: ModelLayers.LLAMA / LLAMA_BABY,
     //   textures/entity/llama/llama_creamy.png / llama_creamy_baby.png (default variant CREAMY)
@@ -649,6 +628,11 @@ static TABLE: &[(&str, Entry)] = &[
         "minecraft:tadpole",
         row("minecraft:tadpole#main", "entity/tadpole/tadpole"),
     ),
+    // ThrownTridentRenderer: ModelLayers.TRIDENT, textures/entity/trident/trident.png
+    (
+        "minecraft:trident",
+        row("minecraft:trident#main", "entity/trident/trident"),
+    ),
     // TraderLlamaRenderer: ModelLayers.TRADER_LLAMA / TRADER_LLAMA_BABY,
     //   textures/entity/llama/llama_creamy.png / llama_creamy_baby.png (creamy is the default)
     (
@@ -826,13 +810,6 @@ static TABLE: &[(&str, Entry)] = &[
     ),
 ];
 
-/// The metadata index of `AgeableMob.DATA_BABY_ID` (and `Zombie`/`Zoglin`/`Piglin`'s own
-/// `DATA_BABY_ID`, which lands on the same slot): `Entity` defines indices 0-7, `LivingEntity`
-/// 8-14, `Mob` 15, and `AgeableMob` appends its boolean at 16 (Entity.java:323-330,
-/// LivingEntity.java:323-331, Mob.java:270-273, AgeableMob.java:105-107 in the decompiled
-/// source; each class's `defineSynchedData` calls `super` first, then appends).
-pub const BABY_METADATA_INDEX: u8 = 16;
-
 /// The model for entity type `kind`, from the dump. `None` when the type is not in the table,
 /// the registry name cannot be resolved, the dump is missing or the dump lacks the layer:
 /// callers fall back to the dimension box. Results are cached per type (models stay shared
@@ -854,26 +831,27 @@ pub fn model_entry(kind: RegistryIndex) -> Option<(bool, Arc<CubeModel>)> {
     if let Some(hit) = cache.lock().unwrap().get(&kind) {
         return hit.clone();
     }
-    let name = entity_type_names()?.get(&kind)?.clone();
-    let entry = model_for_name(&name).map(|m| (has_head(&m.root), m));
+    let name = entity_type_names()?.get(&kind).copied()?;
+    let entry = model_for_name(name).map(|m| (has_head(&m.root), m));
     cache.lock().unwrap().insert(kind, entry.clone());
     entry
 }
 
-/// The `minecraft:entity_type` name for `kind` (shared map, read once from the reports).
-pub fn entity_type_name(kind: RegistryIndex) -> Option<String> {
-    entity_type_names()?.get(&kind).cloned()
+/// The `minecraft:entity_type` name for `kind` (shared map, read once from the reports; the
+/// strings are leaked with the map, so this is a copy-free `&'static str`).
+pub fn entity_type_name(kind: RegistryIndex) -> Option<&'static str> {
+    entity_type_names()?.get(&kind).copied()
 }
 
 /// The table-covered entity type names by protocol id (loaded lazily, once per process).
-pub fn entity_type_names() -> Option<&'static HashMap<RegistryIndex, String>> {
-    static NAMES: OnceLock<Option<HashMap<RegistryIndex, String>>> = OnceLock::new();
+pub fn entity_type_names() -> Option<&'static HashMap<RegistryIndex, &'static str>> {
+    static NAMES: OnceLock<Option<HashMap<RegistryIndex, &'static str>>> = OnceLock::new();
     NAMES.get_or_init(load_entity_type_names).as_ref()
 }
 
 /// Whether the tree contains a part named "head" (computed once per type, not per frame).
 fn has_head(part: &haste_core::model::ModelPart) -> bool {
-    part.name == "head" || part.children.iter().any(has_head)
+    part.id == haste_core::parts::HEAD || part.children.iter().any(has_head)
 }
 
 /// The table entry for `name`: (layer id, root scale) for tests and callers
@@ -896,56 +874,6 @@ pub fn table_textures() -> impl Iterator<Item = &'static str> {
         .iter()
         .flat_map(|(_, e)| entry_textures(e))
         .filter(|t| !t.is_empty())
-}
-
-/// `minecraft:entity_type` names by protocol id, from the data-generator reports
-/// (`haste_core::paths::datagen_reports`, owned by world-and-data). haste-entity reads the one
-/// registry it needs itself: haste-data's `Registries::parse` is not exported and pulling all
-/// of `GameData` in here would duplicate the client's load. Every entity type is kept (the
-/// decoration kinds need names the model table does not cover); `model_entry` filters.
-fn load_entity_type_names() -> Option<HashMap<RegistryIndex, String>> {
-    let path = haste_core::paths::datagen_reports().join("registries.json");
-    let bytes = std::fs::read(path).ok()?;
-    let registries: HashMap<&str, EntityTypeRegistryJson> = serde_json::from_slice(&bytes).ok()?;
-    let reg = registries.get("minecraft:entity_type")?;
-    let mut names = HashMap::with_capacity(reg.entries.len());
-    for (name, e) in &reg.entries {
-        names.insert(RegistryIndex(e.protocol_id), (*name).to_owned());
-    }
-    Some(names)
-}
-
-/// What special renderer (if any) an entity type takes: `ItemFrame(glow)` or `Painting`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DecorationKind {
-    ItemFrame { glow: bool },
-    Painting,
-}
-
-/// The decoration kind of an entity type (`minecraft:item_frame`, `glow_item_frame`,
-/// `painting`); `None` for every other type. Warm lookups are a map probe, never an allocation
-/// (called per entity per frame).
-pub fn decoration_kind(kind: RegistryIndex) -> Option<DecorationKind> {
-    static NAMES: OnceLock<HashMap<RegistryIndex, String>> = OnceLock::new();
-    let name = NAMES
-        .get_or_init(|| load_entity_type_names().unwrap_or_default())
-        .get(&kind)?;
-    match name.as_str() {
-        "minecraft:item_frame" => Some(DecorationKind::ItemFrame { glow: false }),
-        "minecraft:glow_item_frame" => Some(DecorationKind::ItemFrame { glow: true }),
-        "minecraft:painting" => Some(DecorationKind::Painting),
-        _ => None,
-    }
-}
-
-#[derive(Deserialize)]
-struct EntityTypeRegistryJson {
-    entries: HashMap<String, EntryId>,
-}
-
-#[derive(Deserialize)]
-struct EntryId {
-    protocol_id: u32,
 }
 
 /// The model for entity type `name` (a full registry id like `minecraft:pig`), from the dump.
@@ -982,166 +910,6 @@ pub fn baby_model_for_name(name: &str) -> Option<Arc<CubeModel>> {
     let mut m = (*model).clone();
     m.texture = texture;
     Some(Arc::new(m))
-}
-
-/// Whether the entity's metadata says it is a baby: `AgeableMob.DATA_BABY_ID` (index 16) or
-/// the same-slot flags `Zombie`/`Zoglin`/`Piglin` define. Types without any baby flag are
-/// never babies.
-pub fn is_baby(metadata: &crate::metadata::Metadata) -> bool {
-    matches!(
-        metadata.get(BABY_METADATA_INDEX).map(|e| &e.value),
-        Some(MetadataValue::Boolean(true))
-    )
-}
-
-/// The vanilla `EntityRenderer.shadowRadius` for an entity type: the value its renderer
-/// constructor passes to `LivingEntityRenderer`/`MobRenderer`, or the base it sets directly
-/// (`EntityRenderer.shadowRadius` defaults to 0.0, so types absent here cast no shadow). Read
-/// from 26.3 `net.minecraft.client.renderer.entity` (the class named per arm); a table-covered
-/// living type not named falls back to the usual mob 0.5. `store::render_instances` multiplies
-/// it by the baby/living scale, like `LivingEntityRenderer.getShadowRadius`.
-pub fn shadow_radius_for_name(name: &str) -> f32 {
-    let r = match name {
-        // AllayRenderer 0.4, ArmadilloRenderer 0.7, AxolotlRenderer 0.5
-        "minecraft:allay" => 0.4,
-        "minecraft:armadillo" => 0.7,
-        "minecraft:axolotl" => 0.5,
-        // BatRenderer 0.25, BeeRenderer 0.4, BlazeRenderer 0.5, BreezeRenderer 0.5
-        "minecraft:bat" => 0.25,
-        "minecraft:bee" => 0.4,
-        "minecraft:blaze" => 0.5,
-        "minecraft:breeze" => 0.5,
-        // CamelRenderer / CamelHuskRenderer 0.7, CatRenderer 0.4, CaveSpiderRenderer 0.56
-        "minecraft:camel" | "minecraft:camel_husk" => 0.7,
-        "minecraft:cat" => 0.4,
-        "minecraft:cave_spider" => 0.56,
-        // ChickenRenderer 0.3, CodRenderer 0.3, CopperGolemRenderer 0.5, CowRenderer 0.7
-        "minecraft:chicken" => 0.3,
-        "minecraft:cod" => 0.3,
-        "minecraft:copper_golem" => 0.5,
-        "minecraft:cow" | "minecraft:mooshroom" => 0.7,
-        // CreakingRenderer 0.6, CreeperRenderer 0.5
-        "minecraft:creaking" => 0.6,
-        "minecraft:creeper" => 0.5,
-        // DolphinRenderer 0.7, Donkey/Mule 0.75 (AbstractHorseRenderer)
-        "minecraft:dolphin" => 0.7,
-        "minecraft:donkey" | "minecraft:mule" => 0.75,
-        // DrownedRenderer / HuskRenderer / ZombieRenderer 0.5 (AbstractZombieRenderer)
-        "minecraft:drowned"
-        | "minecraft:husk"
-        | "minecraft:zombie"
-        | "minecraft:zombie_villager" => 0.5,
-        // EnderDragonRenderer 0.5, EndermanRenderer 0.5, EndermiteRenderer 0.3
-        "minecraft:ender_dragon" => 0.5,
-        "minecraft:enderman" => 0.5,
-        "minecraft:endermite" => 0.3,
-        // EvokerRenderer / IllusionerRenderer / PillagerRenderer / VindicatorRenderer 0.5
-        "minecraft:evoker"
-        | "minecraft:illusioner"
-        | "minecraft:pillager"
-        | "minecraft:vindicator" => 0.5,
-        // FoxRenderer 0.4, FrogRenderer 0.3, GhastRenderer 1.5
-        "minecraft:fox" => 0.4,
-        "minecraft:frog" => 0.3,
-        "minecraft:ghast" => 1.5,
-        // GoatRenderer 0.7, GuardianRenderer/ElderGuardian 0.5, Hoglin/Zoglin 0.7
-        "minecraft:goat" => 0.7,
-        "minecraft:guardian" | "minecraft:elder_guardian" => 0.5,
-        "minecraft:hoglin" | "minecraft:zoglin" => 0.7,
-        // Horse family 0.75 (AbstractHorseRenderer)
-        "minecraft:horse" | "minecraft:skeleton_horse" | "minecraft:zombie_horse" => 0.75,
-        // IronGolemRenderer 0.7, Llama/TraderLlama 0.7, Nautilus/ZombieNautilus 0.7
-        "minecraft:iron_golem" => 0.7,
-        "minecraft:llama" | "minecraft:trader_llama" => 0.7,
-        "minecraft:nautilus" | "minecraft:zombie_nautilus" => 0.7,
-        // OcelotRenderer 0.4, PandaRenderer 0.9, ParrotRenderer 0.3, PhantomRenderer 0.75
-        "minecraft:ocelot" => 0.4,
-        "minecraft:panda" => 0.9,
-        "minecraft:parrot" => 0.3,
-        "minecraft:phantom" => 0.75,
-        // PigRenderer 0.7, PolarBearRenderer 0.9, PufferfishRenderer 0.2
-        "minecraft:pig" => 0.7,
-        "minecraft:polar_bear" => 0.9,
-        "minecraft:pufferfish" => 0.2,
-        // RabbitRenderer 0.3, RavagerRenderer 1.1, SalmonRenderer 0.4
-        "minecraft:rabbit" => 0.3,
-        "minecraft:ravager" => 1.1,
-        "minecraft:salmon" => 0.4,
-        // SheepRenderer 0.7, ShulkerRenderer 0.0, SilverfishRenderer 0.3
-        "minecraft:sheep" => 0.7,
-        "minecraft:shulker" => 0.0,
-        "minecraft:silverfish" => 0.3,
-        // Skeleton family 0.5 (AbstractSkeletonRenderer), Slime/MagmaCube 0.25, Sniffer 1.1
-        "minecraft:skeleton"
-        | "minecraft:stray"
-        | "minecraft:bogged"
-        | "minecraft:wither_skeleton" => 0.5,
-        "minecraft:slime" | "minecraft:magma_cube" => 0.25,
-        "minecraft:sniffer" => 1.1,
-        // SnowGolemRenderer 0.5, SpiderRenderer 0.8, Squid/GlowSquid 0.7, Strider 0.5
-        "minecraft:snow_golem" => 0.5,
-        "minecraft:spider" => 0.8,
-        "minecraft:squid" | "minecraft:glow_squid" => 0.7,
-        "minecraft:strider" => 0.5,
-        // TadpoleRenderer 0.14, TropicalFishRenderer 0.15, TurtleRenderer 0.7
-        "minecraft:tadpole" => 0.14,
-        "minecraft:tropical_fish" => 0.15,
-        "minecraft:turtle" => 0.7,
-        // VexRenderer 0.3, Villager/WanderingTrader 0.5, WardenRenderer 0.9
-        "minecraft:vex" => 0.3,
-        "minecraft:villager" | "minecraft:wandering_trader" => 0.5,
-        "minecraft:warden" => 0.9,
-        // WitherBossRenderer 1.0, WolfRenderer 0.5, WitchRenderer 0.5
-        "minecraft:wither" => 1.0,
-        "minecraft:wolf" => 0.5,
-        "minecraft:witch" => 0.5,
-        // ArmorStandRenderer / ShulkerRenderer pass 0.0; the rest of the table (living types
-        // not named above) use the usual 0.5.
-        "minecraft:armor_stand" => 0.0,
-        // Non-living renderers that set the base radius directly: ItemEntityRenderer 0.15,
-        // ExperienceOrbRenderer 0.15, AbstractBoatRenderer 0.8, AbstractMinecartRenderer 0.7,
-        // TntRenderer 0.5, FallingBlockRenderer 0.5, EndCrystalRenderer 0.5.
-        "minecraft:item" | "minecraft:experience_orb" => 0.15,
-        "minecraft:oak_boat"
-        | "minecraft:spruce_boat"
-        | "minecraft:birch_boat"
-        | "minecraft:jungle_boat"
-        | "minecraft:acacia_boat"
-        | "minecraft:cherry_boat"
-        | "minecraft:dark_oak_boat"
-        | "minecraft:mangrove_boat"
-        | "minecraft:pale_oak_boat"
-        | "minecraft:bamboo_raft"
-        | "minecraft:oak_chest_boat"
-        | "minecraft:spruce_chest_boat"
-        | "minecraft:birch_chest_boat"
-        | "minecraft:jungle_chest_boat"
-        | "minecraft:acacia_chest_boat"
-        | "minecraft:cherry_chest_boat"
-        | "minecraft:dark_oak_chest_boat"
-        | "minecraft:mangrove_chest_boat"
-        | "minecraft:pale_oak_chest_boat"
-        | "minecraft:bamboo_chest_raft" => 0.8,
-        "minecraft:minecart"
-        | "minecraft:chest_minecart"
-        | "minecraft:furnace_minecart"
-        | "minecraft:hopper_minecart"
-        | "minecraft:tnt_minecart"
-        | "minecraft:command_block_minecart" => 0.7,
-        "minecraft:tnt" | "minecraft:falling_block" | "minecraft:end_crystal" => 0.5,
-        _ if TABLE.iter().any(|(n, _)| *n == name) => 0.5,
-        _ => 0.0,
-    };
-    r
-}
-
-/// The vanilla `EntityRenderer.shadowStrength` for an entity type: 0.75 for items and
-/// experience orbs (`ItemEntityRenderer`/`ExperienceOrbRenderer`), 1.0 otherwise.
-pub fn shadow_strength_for_name(name: &str) -> f32 {
-    match name {
-        "minecraft:item" | "minecraft:experience_orb" => 0.75,
-        _ => 1.0,
-    }
 }
 
 /// The `EntityAttachment.NAME_TAG` anchor above the entity's feet: the `AT_HEIGHT` fallback is

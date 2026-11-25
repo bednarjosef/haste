@@ -16,6 +16,14 @@ use haste_core::entity::Pose;
 use haste_core::math::Vec3;
 use haste_core::model::{BodyOp, BodyTransform, CubeModel, ModelPart, PoseOverrides};
 
+pub(crate) mod arm_pose;
+mod crouch;
+mod swim;
+
+pub use arm_pose::{poses, set_item_uses, ArmPose, ItemUse, ItemUses, UseAnimation};
+use haste_core::parts;
+use swim::setup_swim;
+
 use crate::store::{wrap_degrees, Entity};
 
 // `Mth.PI`/`Mth.TWO_PI` equivalents.
@@ -55,12 +63,8 @@ fn bob(age: f32, scale: f32) -> Vec3 {
 
 /// Replace (or insert) a part's additive rotation, for the models that run after the humanoid
 /// walk swing and override it (`SkeletonModel.setupAnim`).
-fn set_rotation(o: &mut PoseOverrides, name: &str, rot: Vec3) {
-    if let Some(slot) = o.rotations.iter_mut().find(|(n, _)| n == name) {
-        slot.1 = rot;
-    } else {
-        o.rotations.push((name.into(), rot));
-    }
+fn set_rotation(o: &mut PoseOverrides, id: haste_core::parts::PartId, rot: Vec3) {
+    o.set_rotation(id, rot);
 }
 
 /// Which `setupAnim` a dumped model uses, recognised from its part names (the model layer is the
@@ -79,24 +83,24 @@ enum ModelKind {
     None,
 }
 
-fn part_exists(p: &ModelPart, name: &str) -> bool {
-    p.name == name || p.children.iter().any(|c| part_exists(c, name))
+fn part_exists(p: &ModelPart, id: parts::PartId) -> bool {
+    p.id == id || p.children.iter().any(|c| part_exists(c, id))
 }
 
 /// Classifies a model from its parts (a short, allocation-free tree walk: the dumped layers have
 /// a handful of parts).
 fn model_kind(model: &CubeModel) -> ModelKind {
-    if part_exists(&model.root, "right_middle_front_leg") {
+    if part_exists(&model.root, parts::RIGHT_MIDDLE_FRONT_LEG) {
         ModelKind::Spider
-    } else if part_exists(&model.root, "right_wing") {
+    } else if part_exists(&model.root, parts::RIGHT_WING) {
         ModelKind::Chicken
-    } else if part_exists(&model.root, "right_hind_leg") {
+    } else if part_exists(&model.root, parts::RIGHT_HIND_LEG) {
         // QuadrupedModel and CreeperModel share the same leg/head setupAnim.
         ModelKind::Quadruped
-    } else if part_exists(&model.root, "arms") && !part_exists(&model.root, "right_arm") {
+    } else if part_exists(&model.root, parts::ARMS) && !part_exists(&model.root, parts::RIGHT_ARM) {
         // VillagerModel: a single "arms" part (crossed arms) and no separate arms.
         ModelKind::Villager
-    } else if part_exists(&model.root, "right_arm") {
+    } else if part_exists(&model.root, parts::RIGHT_ARM) {
         // HumanoidModel subclasses plus the arm models with their own setupAnim, told apart by
         // the texture the registry set.
         let texture = model.texture.path();
@@ -125,7 +129,7 @@ fn model_kind(model: &CubeModel) -> ModelKind {
 /// model's base pose). `has_head` is whether the model has a "head" part; a model with no
 /// recognised setupAnim still gets the head aim if it has one. Allocates only the overrides the
 /// caller's `EntityInstance` already owns.
-pub(crate) fn setup_anim(
+pub fn setup_anim(
     e: &Entity,
     model: &CubeModel,
     has_head: bool,
@@ -138,7 +142,7 @@ pub(crate) fn setup_anim(
     // `LivingEntityRenderer.extractRenderState`: an upside-down entity (Dinnerbone/Grumm) has its
     // look pitch and head yaw negated before any model setup runs.
     let upside = is_upside_down(e);
-    let mut pitch = e.pitch;
+    let mut pitch = e.pitch_at(partial);
     if upside {
         pitch = -pitch;
         head_rel = -head_rel;
@@ -148,6 +152,9 @@ pub(crate) fn setup_anim(
     let walk_speed = e.walk.speed(partial);
     let swing = e.swing.animation(partial);
     let age = e.tick_count as f32 + partial;
+    // The head's yaw relative to the body in radians: the arm poses read it
+    // (`HumanoidModel.setupAnim`'s `this.head.yRot`).
+    let head_rel_rad = head_rel.to_radians();
 
     match model_kind(model) {
         ModelKind::Humanoid => {
@@ -161,6 +168,8 @@ pub(crate) fn setup_anim(
                 age,
                 is_passenger,
                 false,
+                arm_pose::poses(e, arm_pose::item_uses()),
+                head_rel_rad,
             );
             push_head(&mut o, e, head_rel, partial, true);
         }
@@ -175,6 +184,10 @@ pub(crate) fn setup_anim(
                 age,
                 is_passenger,
                 true,
+                // `ZombieModel.setupAttackAnimation`'s `animateZombieArms` overrides
+                // whatever the pose set, so the zombie branch never poses the arms.
+                (ArmPose::Empty, ArmPose::Empty),
+                head_rel_rad,
             );
             push_head(&mut o, e, head_rel, partial, true);
         }
@@ -189,6 +202,10 @@ pub(crate) fn setup_anim(
                 age,
                 is_passenger,
                 false,
+                // `AbstractSkeletonRenderer.getArmPose` (the bow hold) is not ported yet;
+                // an empty hand hangs (vanilla's mob rule), a bow hand is not raised.
+                (ArmPose::Empty, ArmPose::Empty),
+                head_rel_rad,
             );
             push_head(&mut o, e, head_rel, partial, true);
             // `SkeletonModel.setupAnim` (26.3 client): an aggressive skeleton not holding a bow
@@ -234,17 +251,16 @@ pub(crate) fn setup_anim(
 }
 
 /// `LivingEntityRenderer.isEntityUpsideDown` / `AvatarRenderer.isEntityUpsideDown`: a mob named
-/// `Dinnerbone` or `Grumm` (custom name) is drawn upside down; a player uses its profile name
-/// (the cape is shown by default, so the check is not gated on the model part here).
+/// `Dinnerbone` or `Grumm` (custom name) is drawn upside down; a player uses its profile name,
+/// and only while its cape part is shown.
 fn is_upside_down(e: &Entity) -> bool {
     if e.is_player_type {
-        e.nametag.as_deref().is_some_and(is_upside_down_name)
+        crate::avatar::ModelParts::of(&e.metadata).shown(crate::avatar::PlayerModelPart::Cape)
+            && e.nametag.as_deref().is_some_and(is_upside_down_name)
     } else {
         e.metadata
-            .custom_name
-            .as_ref()
-            .map(|c| c.to_plain(&|_| None))
-            .is_some_and(|s| is_upside_down_name(&s))
+            .custom_name_plain()
+            .is_some_and(is_upside_down_name)
     }
 }
 
@@ -277,11 +293,11 @@ fn fall_flying_scale(ticks: u32) -> f32 {
 /// `LivingEntityRenderer.setupRotations` plus `AvatarRenderer.setupRotations` (players only):
 /// the whole-model rotations the renderer applies between the body yaw and the model scale
 /// (death tilt, sleeping, upside-down, and the player flying/swimming pitch).
-pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> BodyTransform {
+pub fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> BodyTransform {
     let mut b = BodyTransform::default();
     let age = e.tick_count as f32 + partial;
-    // `extractRenderState` negates the look pitch for an upside-down entity.
-    let x_rot = if is_upside_down(e) { -e.pitch } else { e.pitch };
+    // `extractRenderState`: the look pitch interpolated over the tick, negated when upside down.
+    let x_rot = e.pitch_at(partial) * (if is_upside_down(e) { -1.0 } else { 1.0 });
 
     let death = death_time(e, partial);
     if death > 0.0 {
@@ -289,7 +305,7 @@ pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> Body
         let mut fall = (death - 1.0) / 20.0 * 1.6;
         fall = fall.sqrt().min(1.0);
         b.push(BodyOp::RotateZ((fall * 90.0).to_radians()));
-    } else if e.pose == Pose::SpinAttack {
+    } else if e.metadata.living.auto_spin_attack {
         b.push(BodyOp::RotateX((-90.0 - x_rot).to_radians()));
         b.push(BodyOp::RotateY((age * -75.0).to_radians()));
     } else if e.pose == Pose::Sleeping {
@@ -321,7 +337,7 @@ pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> Body
     if e.is_player_type {
         if e.metadata.shared.elytra_flying {
             let scale = fall_flying_scale(e.fall_flying_ticks);
-            if e.pose != Pose::SpinAttack {
+            if !e.metadata.living.auto_spin_attack {
                 b.push(BodyOp::RotateX((scale * (-90.0 - x_rot)).to_radians()));
             }
         } else {
@@ -342,21 +358,21 @@ pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> Body
     b
 }
 
-/// The look pitch in radians, negated for an upside-down entity
-/// (`LivingEntityRenderer.extractRenderState`).
-fn look_pitch(e: &Entity) -> f32 {
-    let pitch = if is_upside_down(e) { -e.pitch } else { e.pitch };
-    pitch.to_radians()
+/// The look pitch in radians, interpolated over the tick (`entity.getXRot(partialTicks)`,
+/// negated for an upside-down entity).
+fn look_pitch(e: &Entity, partial: f32) -> f32 {
+    let p = e.pitch_at(partial);
+    (if is_upside_down(e) { -p } else { p }).to_radians()
 }
 
 /// The head aim: `state.xRot` (look pitch, radians) and `state.yRot` (head yaw relative to the
 /// body). `humanoid` adds the fall-flying/swimming head tip (`HumanoidModel.setupAnim`).
 fn push_head(o: &mut PoseOverrides, e: &Entity, head_rel: f32, partial: f32, humanoid: bool) {
-    let mut head = Vec3::new(look_pitch(e), head_rel.to_radians(), 0.0);
+    let mut head = Vec3::new(look_pitch(e, partial), head_rel.to_radians(), 0.0);
     if humanoid {
         head.x = head_x_rot(e, head.x, partial);
     }
-    o.rotations.push(("head".into(), head));
+    o.set_rotation(parts::HEAD, head);
 }
 
 /// `HumanoidModel.setupAnim`'s head pitch: fall flying and swimming tip the head down.
@@ -372,6 +388,8 @@ fn head_x_rot(e: &Entity, mut x: f32, partial: f32) -> f32 {
 }
 
 /// `HumanoidModel.setupAnim` (with `ZombieModel`'s `animateZombieArms` when `zombie`).
+/// `arm` is the (right, left) arm pose the held items and use state chose
+/// (`AvatarRenderer.getArmPose`); `head_rel` the head's yaw relative to the body in radians.
 #[allow(clippy::too_many_arguments)]
 fn humanoid(
     o: &mut PoseOverrides,
@@ -383,8 +401,10 @@ fn humanoid(
     age: f32,
     is_passenger: bool,
     zombie: bool,
+    arm: (ArmPose, ArmPose),
+    head_rel: f32,
 ) {
-    let pitch = look_pitch(e);
+    let pitch = look_pitch(e, partial);
     // Walk swing (`cos(animationPos * 0.6662) * 2 * speed * 0.5` for arms, `* 1.4` for legs).
     let mut ra = Vec3::new((walk_pos * 0.6662 + PI).cos() * walk_speed, 0.0, 0.0);
     let mut la = Vec3::new((walk_pos * 0.6662).cos() * walk_speed, 0.0, 0.0);
@@ -400,6 +420,11 @@ fn humanoid(
         la.x += -PI / 5.0;
         rl = Vec3::new(-1.4137167, PI / 10.0, 0.07853982);
         ll = Vec3::new(-1.4137167, -PI / 10.0, -0.07853982);
+    }
+    // `HumanoidModel.poseRightArm`/`poseLeftArm` (the zombie's `animateZombieArms` below
+    // overrides the arms, like vanilla's `ZombieModel.setupAttackAnimation`).
+    if !zombie {
+        arm_pose::apply(e, arm, &mut ra, &mut la, (head_rel, pitch));
     }
     // `HumanoidModel.setupAttackAnimation` (main arm right, WHACK animation).
     if swing > 0.0 {
@@ -426,9 +451,7 @@ fn humanoid(
         la = Vec3::new(x, y, 0.0);
     }
     if e.metadata.shared.crouching {
-        body.x = 0.5;
-        ra.x += 0.4;
-        la.x += 0.4;
+        crouch::pose(o, &mut body, &mut ra, &mut la);
     }
     ra += bob(age, 1.0);
     la += bob(age, -1.0);
@@ -437,75 +460,15 @@ fn humanoid(
     if swim > 0.0 {
         setup_swim(&mut ra, &mut la, &mut rl, &mut ll, walk_pos, swim, e);
     }
-    o.rotations.push(("right_arm".into(), ra));
-    o.rotations.push(("left_arm".into(), la));
-    o.rotations.push(("right_leg".into(), rl));
-    o.rotations.push(("left_leg".into(), ll));
+    o.set_rotation(parts::RIGHT_ARM, ra);
+    o.set_rotation(parts::LEFT_ARM, la);
+    o.set_rotation(parts::RIGHT_LEG, rl);
+    o.set_rotation(parts::LEFT_LEG, ll);
     if body != Vec3::ZERO {
-        o.rotations.push(("body".into(), body));
+        o.set_rotation(parts::BODY, body);
     }
 }
 
-/// `HumanoidModel.setupSwimAnimation`: the crawl stroke. `swim` is the smoothed swim amount; the
-/// arm of the swinging hand keeps its pose (`state.currentSwing`).
-fn setup_swim(
-    ra: &mut Vec3,
-    la: &mut Vec3,
-    rl: &mut Vec3,
-    ll: &mut Vec3,
-    walk_pos: f32,
-    swim: f32,
-    e: &Entity,
-) {
-    let quadratic = |x: f32| -65.0 * x + x * x;
-    let swim_pos = walk_pos % 26.0;
-    // Main hand is right: hand 0 = right, 1 = left. No swing means both arms swim.
-    let (right_amount, left_amount) = if e.swing.is_swinging() {
-        if e.swing.hand() == 0 {
-            (0.0, swim)
-        } else {
-            (swim, 0.0)
-        }
-    } else {
-        (swim, swim)
-    };
-    if swim_pos < 14.0 {
-        la.x = rot_lerp_rad(left_amount, la.x, 0.0);
-        ra.x = lerp(right_amount, ra.x, 0.0);
-        la.y = rot_lerp_rad(left_amount, la.y, PI);
-        ra.y = lerp(right_amount, ra.y, PI);
-        la.z = rot_lerp_rad(
-            left_amount,
-            la.z,
-            PI + 1.8707964 * quadratic(swim_pos) / quadratic(14.0),
-        );
-        ra.z = lerp(
-            right_amount,
-            ra.z,
-            PI - 1.8707964 * quadratic(swim_pos) / quadratic(14.0),
-        );
-    } else if swim_pos < 22.0 {
-        let p = (swim_pos - 14.0) / 8.0;
-        la.x = rot_lerp_rad(left_amount, la.x, FRAC_PI_2 * p);
-        ra.x = lerp(right_amount, ra.x, FRAC_PI_2 * p);
-        la.y = rot_lerp_rad(left_amount, la.y, PI);
-        ra.y = lerp(right_amount, ra.y, PI);
-        la.z = rot_lerp_rad(left_amount, la.z, 5.012389 - 1.8707964 * p);
-        ra.z = lerp(right_amount, ra.z, 1.2707963 + 1.8707964 * p);
-    } else if swim_pos < 26.0 {
-        let p = (swim_pos - 22.0) / 4.0;
-        la.x = rot_lerp_rad(left_amount, la.x, FRAC_PI_2 - FRAC_PI_2 * p);
-        ra.x = lerp(right_amount, ra.x, FRAC_PI_2 - FRAC_PI_2 * p);
-        la.y = rot_lerp_rad(left_amount, la.y, PI);
-        ra.y = lerp(right_amount, ra.y, PI);
-        la.z = rot_lerp_rad(left_amount, la.z, PI);
-        ra.z = lerp(right_amount, ra.z, PI);
-    }
-    ll.x = lerp(swim, ll.x, 0.3 * (walk_pos * 0.33333334 + PI).cos());
-    rl.x = lerp(swim, rl.x, 0.3 * (walk_pos * 0.33333334).cos());
-}
-
-/// `SkeletonModel.setupAnim`'s aggressive arms (26.3 client): both arms raised to `-PI/2` and
 /// pushed by the swing, replacing the humanoid walk swing. `swing` is `state.swingAnimation`.
 fn skeleton_aggressive_arms(o: &mut PoseOverrides, swing: f32, age: f32) {
     let swing2 = (swing * PI).sin();
@@ -515,8 +478,8 @@ fn skeleton_aggressive_arms(o: &mut PoseOverrides, swing: f32, age: f32) {
     let mut la = Vec3::new(x, 0.1 - swing2 * 0.6, 0.0);
     ra += bob(age, 1.0);
     la += bob(age, -1.0);
-    set_rotation(o, "right_arm", ra);
-    set_rotation(o, "left_arm", la);
+    set_rotation(o, parts::RIGHT_ARM, ra);
+    set_rotation(o, parts::LEFT_ARM, la);
 }
 
 /// `Mth.triangleWave`.
@@ -540,19 +503,19 @@ fn villager(
         head.z = 0.3 * (0.45 * age).sin();
         head.x = 0.4;
     }
-    o.rotations.push(("head".into(), head));
-    o.rotations.push((
-        "right_leg".into(),
+    o.set_rotation(parts::HEAD, head);
+    o.set_rotation(
+        parts::RIGHT_LEG,
         Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed * 0.5, 0.0, 0.0),
-    ));
-    o.rotations.push((
-        "left_leg".into(),
+    );
+    o.set_rotation(
+        parts::LEFT_LEG,
         Vec3::new(
             (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed * 0.5,
             0.0,
             0.0,
         ),
-    ));
+    );
 }
 
 /// `AbstractIllager.IllagerArmPose`, as far as the client can tell without item resolution:
@@ -598,8 +561,7 @@ fn illager(
     is_passenger: bool,
     texture: &str,
 ) {
-    o.rotations
-        .push(("head".into(), Vec3::new(pitch, head_rel.to_radians(), 0.0)));
+    o.set_rotation(parts::HEAD, Vec3::new(pitch, head_rel.to_radians(), 0.0));
     let mut ra = Vec3::ZERO;
     let mut la = Vec3::ZERO;
     let mut rl = Vec3::ZERO;
@@ -627,16 +589,16 @@ fn illager(
         ra = Vec3::new(x, -y, 0.0) + bob(age, 1.0);
         la = Vec3::new(x, y, 0.0) + bob(age, -1.0);
     }
-    o.rotations.push(("right_arm".into(), ra));
-    o.rotations.push(("left_arm".into(), la));
-    o.rotations.push(("right_leg".into(), rl));
-    o.rotations.push(("left_leg".into(), ll));
+    o.set_rotation(parts::RIGHT_ARM, ra);
+    o.set_rotation(parts::LEFT_ARM, la);
+    o.set_rotation(parts::RIGHT_LEG, rl);
+    o.set_rotation(parts::LEFT_LEG, ll);
     // `crossedArms` toggles the "arms" part against the two separate arms.
     if pose == IllagerArmPose::Crossed {
-        o.hidden.push("right_arm".into());
-        o.hidden.push("left_arm".into());
+        o.hide(parts::RIGHT_ARM);
+        o.hide(parts::LEFT_ARM);
     } else {
-        o.hidden.push("arms".into());
+        o.hide(parts::ARMS);
     }
 }
 
@@ -664,17 +626,12 @@ fn iron_golem(
         let t = triangle_wave(walk_pos, 13.0);
         ((-0.2 + 1.5 * t) * walk_speed, (-0.2 - 1.5 * t) * walk_speed)
     };
-    o.rotations
-        .push(("right_arm".into(), Vec3::new(ra, 0.0, 0.0)));
-    o.rotations
-        .push(("left_arm".into(), Vec3::new(la, 0.0, 0.0)));
-    o.rotations
-        .push(("head".into(), Vec3::new(pitch, head_rel.to_radians(), 0.0)));
+    o.set_rotation(parts::RIGHT_ARM, Vec3::new(ra, 0.0, 0.0));
+    o.set_rotation(parts::LEFT_ARM, Vec3::new(la, 0.0, 0.0));
+    o.set_rotation(parts::HEAD, Vec3::new(pitch, head_rel.to_radians(), 0.0));
     let t = triangle_wave(walk_pos, 13.0) * walk_speed;
-    o.rotations
-        .push(("right_leg".into(), Vec3::new(-1.5 * t, 0.0, 0.0)));
-    o.rotations
-        .push(("left_leg".into(), Vec3::new(1.5 * t, 0.0, 0.0)));
+    o.set_rotation(parts::RIGHT_LEG, Vec3::new(-1.5 * t, 0.0, 0.0));
+    o.set_rotation(parts::LEFT_LEG, Vec3::new(1.5 * t, 0.0, 0.0));
 }
 
 /// `CreeperRenderer.scale`: the swell-driven wobble and the cubed swell, as a per-axis scale
@@ -698,14 +655,10 @@ pub(crate) fn creeper_scale(e: &Entity, partial: f32) -> Vec3 {
 fn quadruped(o: &mut PoseOverrides, walk_pos: f32, walk_speed: f32) {
     let c = (walk_pos * 0.6662).cos() * 1.4 * walk_speed;
     let c2 = (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed;
-    o.rotations
-        .push(("right_hind_leg".into(), Vec3::new(c, 0.0, 0.0)));
-    o.rotations
-        .push(("left_hind_leg".into(), Vec3::new(c2, 0.0, 0.0)));
-    o.rotations
-        .push(("right_front_leg".into(), Vec3::new(c2, 0.0, 0.0)));
-    o.rotations
-        .push(("left_front_leg".into(), Vec3::new(c, 0.0, 0.0)));
+    o.set_rotation(parts::RIGHT_HIND_LEG, Vec3::new(c, 0.0, 0.0));
+    o.set_rotation(parts::LEFT_HIND_LEG, Vec3::new(c2, 0.0, 0.0));
+    o.set_rotation(parts::RIGHT_FRONT_LEG, Vec3::new(c2, 0.0, 0.0));
+    o.set_rotation(parts::LEFT_FRONT_LEG, Vec3::new(c, 0.0, 0.0));
 }
 
 /// `SpiderModel.setupAnim`.
@@ -721,30 +674,26 @@ fn spider(o: &mut PoseOverrides, walk_pos: f32, walk_speed: f32) {
     let step_mid_front = ((ap + FRAC_PI_2).sin() * 0.4).abs() * speed;
     let step_front = ((ap + PI * 3.0 / 2.0).sin() * 0.4).abs() * speed;
     let leg = |swing: f32, step: f32| Vec3::new(0.0, swing, step);
-    o.rotations
-        .push(("right_hind_leg".into(), leg(swing_hind, step_hind)));
-    o.rotations
-        .push(("left_hind_leg".into(), leg(-swing_hind, -step_hind)));
-    o.rotations.push((
-        "right_middle_hind_leg".into(),
+    o.set_rotation(parts::RIGHT_HIND_LEG, leg(swing_hind, step_hind));
+    o.set_rotation(parts::LEFT_HIND_LEG, leg(-swing_hind, -step_hind));
+    o.set_rotation(
+        parts::RIGHT_MIDDLE_HIND_LEG,
         leg(swing_mid_hind, step_mid_hind),
-    ));
-    o.rotations.push((
-        "left_middle_hind_leg".into(),
+    );
+    o.set_rotation(
+        parts::LEFT_MIDDLE_HIND_LEG,
         leg(-swing_mid_hind, -step_mid_hind),
-    ));
-    o.rotations.push((
-        "right_middle_front_leg".into(),
+    );
+    o.set_rotation(
+        parts::RIGHT_MIDDLE_FRONT_LEG,
         leg(swing_mid_front, step_mid_front),
-    ));
-    o.rotations.push((
-        "left_middle_front_leg".into(),
+    );
+    o.set_rotation(
+        parts::LEFT_MIDDLE_FRONT_LEG,
         leg(-swing_mid_front, -step_mid_front),
-    ));
-    o.rotations
-        .push(("right_front_leg".into(), leg(swing_front, step_front)));
-    o.rotations
-        .push(("left_front_leg".into(), leg(-swing_front, -step_front)));
+    );
+    o.set_rotation(parts::RIGHT_FRONT_LEG, leg(swing_front, step_front));
+    o.set_rotation(parts::LEFT_FRONT_LEG, leg(-swing_front, -step_front));
 }
 
 /// `ChickenModel.setupAnim` (legs walk, wings flap).
@@ -752,16 +701,14 @@ fn chicken(o: &mut PoseOverrides, e: &Entity, partial: f32, walk_pos: f32, walk_
     let flap = lerp(partial, e.o_flap, e.flap);
     let flap_speed = lerp(partial, e.o_flap_speed, e.flap_speed);
     let flap_angle = (flap.sin() + 1.0) * flap_speed;
-    o.rotations.push((
-        "right_leg".into(),
+    o.set_rotation(
+        parts::RIGHT_LEG,
         Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
-    ));
-    o.rotations.push((
-        "left_leg".into(),
+    );
+    o.set_rotation(
+        parts::LEFT_LEG,
         Vec3::new((walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed, 0.0, 0.0),
-    ));
-    o.rotations
-        .push(("right_wing".into(), Vec3::new(0.0, 0.0, flap_angle)));
-    o.rotations
-        .push(("left_wing".into(), Vec3::new(0.0, 0.0, -flap_angle)));
+    );
+    o.set_rotation(parts::RIGHT_WING, Vec3::new(0.0, 0.0, flap_angle));
+    o.set_rotation(parts::LEFT_WING, Vec3::new(0.0, 0.0, -flap_angle));
 }

@@ -12,7 +12,9 @@
 //!   `ItemAttributeModifiers` computes it;
 //! - `minecraft:consumable`: how long an item is used and the animation played while it is;
 //! - `minecraft:tool`: what an item mines and how fast (physics turns it into its mining `Tool`);
-//! - `minecraft:glider`: the elytra (and any mod item that carries it).
+//! - `minecraft:glider`: the elytra (and any mod item that carries it);
+//! - `minecraft:death_protection`: the totem of undying (and any mod item that carries it);
+//! - `minecraft:use_effects`: what using the item does to the player (sprint, input speed).
 //!
 //! A missing report directory or unreadable file yields an empty table, never an error: the
 //! components report is optional data.
@@ -22,155 +24,35 @@ use std::path::Path;
 
 use ahash::AHashMap;
 
-use haste_core::model::EquipmentSlot;
 use haste_core::{Identifier, RegistryIndex};
 
 use crate::registries::Registries;
 
-/// The `equippable` component of one item: the slot it goes in and the equipment asset it draws.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ItemEquippable {
-    pub slot: EquipmentSlot,
-    /// `equippable.asset_id` (`minecraft:iron` -> `equipment/iron.json`); `None` for items whose
-    /// equippable has no asset (saddles on some mobs, the `equippable` marker without a texture).
-    pub asset: Option<Identifier>,
-}
+mod attributes;
+mod consumable;
+mod equippable;
+mod foil;
+mod patch;
+mod tool;
+mod use_effects;
 
-/// One entry of an item's `minecraft:attribute_modifiers` component
-/// (`ItemAttributeModifiers.Entry`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct AttributeModifier {
-    /// The attribute, e.g. `minecraft:attack_speed`.
-    pub attribute: Identifier,
-    /// The modifier amount.
-    pub amount: f64,
-    /// `AttributeModifier.Operation`: 0 add_value, 1 add_multiplied_base, 2 add_multiplied_total.
-    pub operation: i32,
-    /// `EquipmentSlotGroup` name: `any`, `mainhand`, `hand`, `offhand`, ...
-    pub slot: String,
-}
+#[cfg(test)]
+mod foil_tests;
+#[cfg(test)]
+mod tests;
 
-impl AttributeModifier {
-    /// Whether this modifier applies to an item held in the main hand
-    /// (`EquipmentSlotGroup.MAINHAND`): `any`, `mainhand` or `hand`.
-    pub fn applies_to_main_hand(&self) -> bool {
-        matches!(self.slot.as_str(), "any" | "mainhand" | "hand")
-    }
-}
+pub use attributes::AttributeModifier;
+pub use consumable::Consumable;
+pub use equippable::{parse_equippable, ItemEquippable};
+pub use foil::{FoilPatch, Patched};
+pub use tool::ToolComponent;
+pub use use_effects::UseEffects;
 
-/// An item's `minecraft:consumable` component (`world.item.component.Consumable`): how long the
-/// item is used and the animation played while it is.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Consumable {
-    /// `consume_seconds` (1.6 by default).
-    pub consume_seconds: f32,
-    /// `ItemUseAnimation` id (`animation`, `eat` by default).
-    pub animation: i32,
-}
-
-impl Consumable {
-    /// `Consumable.consumeTicks`: the use duration in ticks.
-    pub fn consume_ticks(&self) -> i32 {
-        (self.consume_seconds * 20.0) as i32
-    }
-}
-
-/// The `blocks` predicate of a `minecraft:tool` rule, in the report's own shape.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ToolBlocks {
-    /// `minecraft:stone` — one block.
-    Block(Identifier),
-    /// `#minecraft:mineable/pickaxe` — a block tag.
-    Tag(Identifier),
-    /// A JSON array of block names.
-    List(Vec<Identifier>),
-}
-
-impl ToolBlocks {
-    fn parse(v: &serde_json::Value) -> Option<ToolBlocks> {
-        match v {
-            serde_json::Value::String(s) => Some(match s.strip_prefix('#') {
-                Some(tag) => ToolBlocks::Tag(Identifier::parse(tag).ok()?),
-                None => ToolBlocks::Block(Identifier::parse(s).ok()?),
-            }),
-            serde_json::Value::Array(a) => Some(ToolBlocks::List(
-                a.iter()
-                    .filter_map(|e| e.as_str().and_then(|s| Identifier::parse(s).ok()))
-                    .collect(),
-            )),
-            _ => None,
-        }
-    }
-}
-
-/// One rule of a `minecraft:tool` component.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ToolRule {
-    pub blocks: ToolBlocks,
-    pub speed: Option<f32>,
-    pub correct_for_drops: Option<bool>,
-}
-
-/// The `minecraft:tool` component of one item (vanilla `ToolComponent`), parsed from the report;
-/// physics turns it into its mining `Tool`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ToolComponent {
-    pub rules: Vec<ToolRule>,
-    pub default_mining_speed: f32,
-    pub damage_per_block: i32,
-    /// Swords and some weapons cannot break blocks in creative.
-    pub can_destroy_blocks_in_creative: bool,
-}
-
-impl ToolComponent {
-    /// Parses the JSON value of a `minecraft:tool` component; `None` when malformed. One
-    /// unparseable rule fails the whole component, as vanilla's codec does (a decode error means
-    /// the component is absent and `getOrDefault` falls back to no tool).
-    pub fn from_json(v: &serde_json::Value) -> Option<ToolComponent> {
-        let raw: RawTool = serde_json::from_value(v.clone()).ok()?;
-        let rules = raw
-            .rules
-            .iter()
-            .map(|r| {
-                Some(ToolRule {
-                    blocks: ToolBlocks::parse(r.get("blocks")?)?,
-                    speed: r.get("speed").and_then(|s| s.as_f64()).map(|s| s as f32),
-                    correct_for_drops: r.get("correct_for_drops").and_then(|c| c.as_bool()),
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(ToolComponent {
-            rules,
-            default_mining_speed: raw.default_mining_speed,
-            damage_per_block: raw.damage_per_block,
-            can_destroy_blocks_in_creative: raw.can_destroy_blocks_in_creative,
-        })
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct RawTool {
-    #[serde(default)]
-    rules: Vec<serde_json::Value>,
-    #[serde(default = "one")]
-    default_mining_speed: f32,
-    #[serde(default = "one_i")]
-    damage_per_block: i32,
-    #[serde(default = "yes")]
-    can_destroy_blocks_in_creative: bool,
-}
-
-fn one() -> f32 {
-    1.0
-}
-
-fn one_i() -> i32 {
-    1
-}
-
-fn yes() -> bool {
-    true
-}
+use attributes::parse_modifiers;
+use consumable::parse_consumable;
+use foil::FoilDefaults;
+use patch::PatchTypes;
+use use_effects::parse_use_effects;
 
 /// Item default components: the `equippable` per `minecraft:item` registry index, and the
 /// `attribute_modifiers`, `consumable`, `tool` and `glider` sets by item name. Items without a
@@ -178,19 +60,46 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Default)]
 pub struct ItemComponents {
     equippable: Vec<Option<ItemEquippable>>,
-    /// The `minecraft:dyed_color` data-component-type id, from the registry report. `None` when
-    /// the report is absent.
-    dyed_color_type: Option<i32>,
+    /// `minecraft:max_damage` per `minecraft:item` registry index (`None` for items that do not
+    /// take damage).
+    max_damage: Vec<Option<u32>>,
+    /// The data-component-type ids of the patch components the stack readers decode
+    /// (`dyed_color`, `damage`, ...), from the registry report.
+    patch_types: PatchTypes,
     attributes: HashMap<Identifier, Vec<AttributeModifier>>,
     consumables: HashMap<Identifier, Consumable>,
+    /// `minecraft:food` by item: its `can_always_eat` flag (`FoodProperties.canAlwaysEat`).
+    foods: HashMap<Identifier, bool>,
     tools: HashMap<Identifier, ToolComponent>,
     gliders: HashSet<Identifier>,
+    /// Items whose default components carry `minecraft:death_protection`.
+    death_protection: HashSet<Identifier>,
+    use_effects: HashMap<Identifier, UseEffects>,
+    /// Items whose default components carry `minecraft:piercing_weapon` (the spears): the
+    /// weapon's optional draw sound, if the report names one.
+    piercing_weapons: HashMap<Identifier, Option<String>>,
+    /// `minecraft:minimum_attack_charge` by item (`Player.cannotAttackWithItem`).
+    minimum_attack_charges: HashMap<Identifier, f32>,
+    /// The `cooldown_group` of the items whose default components carry a
+    /// `minecraft:use_cooldown` that names one (`ItemCooldowns.getCooldownGroup`); an item
+    /// without an entry groups under its own registry id.
+    use_cooldowns: HashMap<Identifier, Identifier>,
+    /// The defaults of the components `ItemStack.hasFoil` reads, per `minecraft:item` index.
+    foil_defaults: Vec<FoilDefaults>,
+    /// `minecraft:compass`, the one `CompassItem` (whose `isFoil` also reads the
+    /// `lodestone_tracker`).
+    compass: Option<RegistryIndex>,
 }
 
 impl ItemComponents {
     /// The `equippable` of item `i`, if the report named one.
     pub fn equippable(&self, i: RegistryIndex) -> Option<&ItemEquippable> {
         self.equippable.get(i.0 as usize)?.as_ref()
+    }
+
+    /// The default `minecraft:max_damage` of item `i` (`None` when the item takes no damage).
+    pub fn max_damage(&self, i: RegistryIndex) -> Option<u32> {
+        self.max_damage.get(i.0 as usize).copied().flatten()
     }
 
     /// The item's default `minecraft:attribute_modifiers`.
@@ -200,7 +109,19 @@ impl ItemComponents {
 
     /// The item's default `minecraft:consumable`, if it has one.
     pub fn consumable(&self, item: &Identifier) -> Option<Consumable> {
-        self.consumables.get(item).copied()
+        self.consumables.get(item).cloned()
+    }
+
+    /// The names of the items whose default components carry `minecraft:consumable` (the
+    /// ones a use can emit effects for; the renderer packs their particle sprites).
+    pub fn consumable_items(&self) -> impl Iterator<Item = &Identifier> {
+        self.consumables.keys()
+    }
+
+    /// The item's default `minecraft:food`, if it has one: `Some(can_always_eat)`
+    /// (`FoodProperties.canAlwaysEat`, false by default).
+    pub fn food(&self, item: &Identifier) -> Option<bool> {
+        self.foods.get(item).copied()
     }
 
     /// The item's default `minecraft:tool` component, if it has one.
@@ -217,10 +138,52 @@ impl ItemComponents {
         &self.gliders
     }
 
+    /// The item's default `minecraft:piercing_weapon` draw sound (`weapon.makeSound`), when
+    /// the item is a spear. `Some(None)` = a spear without a sound.
+    pub fn piercing_weapon_sound(&self, item: &Identifier) -> Option<Option<&str>> {
+        self.piercing_weapons.get(item).map(|s| s.as_deref())
+    }
+
+    /// The item's default `minecraft:minimum_attack_charge` (`Player.cannotAttackWithItem`),
+    /// if it has one.
+    pub fn minimum_attack_charge(&self, item: &Identifier) -> Option<f32> {
+        self.minimum_attack_charges.get(item).copied()
+    }
+
+    /// The item's `minecraft:use_cooldown` group (`ItemCooldowns.getCooldownGroup`): the
+    /// component's `cooldown_group`, or the item's own registry id when it names none (or has
+    /// no component at all — then `None`, the caller falls back to the id it resolved).
+    pub fn cooldown_group(&self, item: &Identifier) -> Option<&Identifier> {
+        self.use_cooldowns.get(item)
+    }
+
+    /// The names of the items whose default components carry a `minecraft:use_cooldown` that
+    /// names a group (tests).
+    #[cfg(test)]
+    pub fn use_cooldown_items(&self) -> impl Iterator<Item = &Identifier> {
+        self.use_cooldowns.keys()
+    }
+
     /// Whether item's default components carry `minecraft:glider` (vanilla
     /// `LivingEntity.canGlideUsing`'s `DataComponents.GLIDER`).
     pub fn is_glider(&self, item: &Identifier) -> bool {
         self.gliders.contains(item)
+    }
+
+    /// Whether item's default components carry `minecraft:death_protection` (vanilla
+    /// `ItemStack.has(DataComponents.DEATH_PROTECTION)` for a stack without a patch).
+    pub fn has_death_protection(&self, item: &Identifier) -> bool {
+        self.death_protection.contains(item)
+    }
+
+    /// The item's `minecraft:use_effects`, `UseEffects.DEFAULT` when the report named none or
+    /// the item is unknown (vanilla's `getOrDefault(USE_EFFECTS, UseEffects.DEFAULT)`: every
+    /// item's prototype carries the component).
+    pub fn use_effects(&self, item: &Identifier) -> UseEffects {
+        self.use_effects
+            .get(item)
+            .copied()
+            .unwrap_or(UseEffects::DEFAULT)
     }
 
     /// `ItemAttributeModifiers.compute` for the main hand: `base` plus every main-hand modifier
@@ -244,23 +207,27 @@ impl ItemComponents {
         value
     }
 
-    /// The `dyed_color` (ARGB) a stack's component patch sets, if it is the patch's first added
-    /// component (`DyedItemColor.STREAM_CODEC` is a plain int; vanilla's `getOrDefault` falls
-    /// back to the layer's `color_when_undyed` when absent). A patch whose first add is a
-    /// component Haste cannot skip returns `None` (dye is then simply not applied).
+    /// The `dyed_color` (ARGB) a stack's component patch sets (`DyedItemColor.STREAM_CODEC` is
+    /// a plain int; vanilla's `getOrDefault` falls back to the layer's `color_when_undyed` when
+    /// absent). Read while the patch's adds are components Haste can skip (`damage`,
+    /// `max_damage`, `unbreakable`); behind any other component it returns `None` (dye is then
+    /// simply not applied).
     pub fn dyed_color(&self, components_raw: &[u8]) -> Option<u32> {
-        let dyed = self.dyed_color_type?;
-        let mut r = PatchReader::new(components_raw);
-        let adds = r.var_int()?;
-        let _removes = r.var_int()?;
-        if adds <= 0 {
+        self.patch_types.scan(components_raw).dyed_color
+    }
+
+    /// A stack's wear as `Crackiness.byDamage` takes it: `(damage, max_damage)` when the stack
+    /// is damageable (`ItemStack.isDamageableItem`: it has a max damage and is not
+    /// unbreakable), `None` otherwise. Both values come from the stack's patch when it sets
+    /// them (read like [`dyed_color`](Self::dyed_color)), else from the item's defaults (an
+    /// item with a max damage defaults to 0 damage, `Item.Properties.durability`).
+    pub fn wear(&self, item: RegistryIndex, components_raw: &[u8]) -> Option<(u32, u32)> {
+        let adds = self.patch_types.scan(components_raw);
+        if adds.unbreakable {
             return None;
         }
-        let ty = r.var_int()?;
-        if ty != dyed {
-            return None;
-        }
-        r.i32().map(|c| c as u32)
+        let max = adds.max_damage.or_else(|| self.max_damage(item))?;
+        Some((adds.damage.unwrap_or(0), max))
     }
 
     /// Sets an item's default `minecraft:attribute_modifiers` (tests and tools).
@@ -268,9 +235,38 @@ impl ItemComponents {
         self.attributes.insert(item, modifiers);
     }
 
+    /// Sets item `i`'s default `minecraft:equippable` (tests and tools).
+    pub fn insert_equippable(&mut self, i: RegistryIndex, equippable: ItemEquippable) {
+        let at = i.0 as usize;
+        if self.equippable.len() <= at {
+            self.equippable.resize(at + 1, None);
+        }
+        self.equippable[at] = Some(equippable);
+    }
+
     /// Sets an item's default `minecraft:consumable` (tests and tools).
     pub fn insert_consumable(&mut self, item: Identifier, consumable: Consumable) {
         self.consumables.insert(item, consumable);
+    }
+
+    /// Sets an item's default `minecraft:food` (tests and tools).
+    pub fn insert_food(&mut self, item: Identifier, can_always_eat: bool) {
+        self.foods.insert(item, can_always_eat);
+    }
+
+    /// Sets an item's default `minecraft:piercing_weapon` and its draw sound (tests).
+    pub fn insert_piercing_weapon(&mut self, item: Identifier, sound: Option<String>) {
+        self.piercing_weapons.insert(item, sound);
+    }
+
+    /// Sets an item's default `minecraft:minimum_attack_charge` (tests).
+    pub fn insert_minimum_attack_charge(&mut self, item: Identifier, charge: f32) {
+        self.minimum_attack_charges.insert(item, charge);
+    }
+
+    /// Sets an item's `minecraft:use_cooldown` group (tests).
+    pub fn insert_use_cooldown(&mut self, item: Identifier, group: Identifier) {
+        self.use_cooldowns.insert(item, group);
     }
 
     /// How many items carry `minecraft:attribute_modifiers`.
@@ -291,14 +287,22 @@ impl ItemComponents {
         let mut by_name: AHashMap<String, ItemEquippable> = AHashMap::new();
         let mut attributes: HashMap<Identifier, Vec<AttributeModifier>> = HashMap::new();
         let mut consumables: HashMap<Identifier, Consumable> = HashMap::new();
+        let mut foods: HashMap<Identifier, bool> = HashMap::new();
         let mut tools: HashMap<Identifier, ToolComponent> = HashMap::new();
         let mut gliders: HashSet<Identifier> = HashSet::new();
+        let mut death_protection: HashSet<Identifier> = HashSet::new();
+        let mut use_effects: HashMap<Identifier, UseEffects> = HashMap::new();
+        let mut piercing_weapons: HashMap<Identifier, Option<String>> = HashMap::new();
+        let mut minimum_attack_charges: HashMap<Identifier, f32> = HashMap::new();
+        let mut use_cooldowns: HashMap<Identifier, Identifier> = HashMap::new();
         let Ok(entries) = std::fs::read_dir(components_dir) else {
             return ItemComponents {
-                dyed_color_type: dyed_color_type(registries),
+                patch_types: PatchTypes::load(registries),
                 ..ItemComponents::default()
             };
         };
+        let mut max_damages: HashMap<Identifier, u32> = HashMap::new();
+        let mut foils: HashMap<Identifier, FoilDefaults> = HashMap::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -320,19 +324,68 @@ impl ItemComponents {
             let Some(components) = json.get("components") else {
                 continue;
             };
+            let foil = FoilDefaults::parse(components);
+            if foil != FoilDefaults::default() {
+                foils.insert(item.clone(), foil);
+            }
+            if let Some(m) = components
+                .get("minecraft:max_damage")
+                .and_then(|m| m.as_u64())
+            {
+                max_damages.insert(item.clone(), m as u32);
+            }
             if let Some(a) = components.get("minecraft:attribute_modifiers") {
                 attributes.insert(item.clone(), parse_modifiers(a));
             }
             if let Some(c) = components.get("minecraft:consumable") {
                 consumables.insert(item.clone(), parse_consumable(c));
             }
+            if let Some(f) = components.get("minecraft:food") {
+                let always = f
+                    .get("can_always_eat")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                foods.insert(item.clone(), always);
+            }
             if let Some(t) = components.get("minecraft:tool") {
                 if let Some(t) = ToolComponent::from_json(t) {
                     tools.insert(item.clone(), t);
                 }
             }
+            if let Some(p) = components.get("minecraft:piercing_weapon") {
+                // The draw sound the report names ("sound": "minecraft:item.spear.attack" or
+                // an inline sound object); a spear may also name none.
+                let sound = p.get("sound").and_then(|s| match s {
+                    serde_json::Value::String(n) => Some(n.clone()),
+                    serde_json::Value::Object(_) => s
+                        .get("sound_id")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n.to_owned()),
+                    _ => None,
+                });
+                piercing_weapons.insert(item.clone(), sound);
+            }
+            if let Some(c) = components.get("minecraft:minimum_attack_charge") {
+                if let Some(c) = c.as_f64() {
+                    minimum_attack_charges.insert(item.clone(), c as f32);
+                }
+            }
             if components.get("minecraft:glider").is_some() {
-                gliders.insert(item);
+                gliders.insert(item.clone());
+            }
+            if components.get("minecraft:death_protection").is_some() {
+                death_protection.insert(item.clone());
+            }
+            if let Some(e) = components.get("minecraft:use_effects") {
+                use_effects.insert(item.clone(), parse_use_effects(e));
+            }
+            if let Some(group) = components
+                .get("minecraft:use_cooldown")
+                .and_then(|c| c.get("cooldown_group"))
+                .and_then(|g| g.as_str())
+                .and_then(|g| Identifier::parse(g).ok())
+            {
+                use_cooldowns.insert(item.clone(), group);
             }
         }
         let len = registries.len("minecraft:item");
@@ -342,13 +395,34 @@ impl ItemComponents {
                 equippable[i.0 as usize] = Some(eq);
             }
         }
+        let mut max_damage = vec![None; len];
+        for (item, m) in max_damages {
+            if let Some(i) = registries.index("minecraft:item", &item) {
+                max_damage[i.0 as usize] = Some(m);
+            }
+        }
+        let mut foil_defaults = vec![FoilDefaults::default(); len];
+        for (item, f) in foils {
+            if let Some(i) = registries.index("minecraft:item", &item) {
+                foil_defaults[i.0 as usize] = f;
+            }
+        }
         ItemComponents {
             equippable,
-            dyed_color_type: dyed_color_type(registries),
+            max_damage,
+            foil_defaults,
+            compass: registries.index("minecraft:item", &Identifier::minecraft("compass")),
+            patch_types: PatchTypes::load(registries),
             attributes,
             consumables,
+            foods,
             tools,
             gliders,
+            death_protection,
+            use_effects,
+            piercing_weapons,
+            minimum_attack_charges,
+            use_cooldowns,
         }
     }
 
@@ -363,464 +437,5 @@ impl ItemComponents {
             &reports.join("minecraft").join("components").join("item"),
             &registries,
         ))
-    }
-}
-
-fn dyed_color_type(registries: &Registries) -> Option<i32> {
-    registries
-        .index(
-            "minecraft:data_component_type",
-            &Identifier::minecraft("dyed_color"),
-        )
-        .map(|i| i.0 as i32)
-}
-
-/// A minimal varint/int reader over a component patch's raw bytes (only what
-/// [`ItemComponents::dyed_color`] needs).
-struct PatchReader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl<'a> PatchReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        PatchReader { bytes, at: 0 }
-    }
-
-    fn var_int(&mut self) -> Option<i32> {
-        let mut value = 0u32;
-        let mut shift = 0;
-        loop {
-            let byte = *self.bytes.get(self.at)?;
-            self.at += 1;
-            value |= ((byte & 0x7F) as u32) << shift;
-            if byte & 0x80 == 0 {
-                return Some(value as i32);
-            }
-            shift += 7;
-            if shift >= 32 {
-                return None;
-            }
-        }
-    }
-
-    fn i32(&mut self) -> Option<i32> {
-        let b = self.bytes.get(self.at..self.at + 4)?;
-        self.at += 4;
-        Some(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    }
-}
-
-/// The `minecraft:equippable` component of one `{"components": {...}}` report file, or `None`
-/// when the item has none (or the file is malformed).
-pub fn parse_equippable(bytes: &[u8]) -> Option<ItemEquippable> {
-    let json: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let eq = json.get("components")?.get("minecraft:equippable")?;
-    let slot = eq.get("slot")?.as_str()?;
-    let slot = match slot {
-        "mainhand" => EquipmentSlot::MainHand,
-        "offhand" => EquipmentSlot::OffHand,
-        "feet" => EquipmentSlot::Feet,
-        "legs" => EquipmentSlot::Legs,
-        "chest" => EquipmentSlot::Chest,
-        "head" => EquipmentSlot::Head,
-        "body" => EquipmentSlot::Body,
-        "saddle" => EquipmentSlot::Saddle,
-        _ => return None,
-    };
-    let asset = eq
-        .get("asset_id")
-        .and_then(|a| a.as_str())
-        .and_then(|a| Identifier::parse(a).ok());
-    Some(ItemEquippable { slot, asset })
-}
-
-/// Parses the component value: the `ItemAttributeModifiers` codec is a bare list of entries, but
-/// a wrapped `{"modifiers": [...]}` is accepted too.
-fn parse_modifiers(v: &serde_json::Value) -> Vec<AttributeModifier> {
-    let list = v
-        .as_array()
-        .or_else(|| v.get("modifiers").and_then(|m| m.as_array()));
-    let Some(list) = list else {
-        return Vec::new();
-    };
-    list.iter()
-        .filter_map(|e| {
-            Some(AttributeModifier {
-                attribute: Identifier::parse(e.get("type")?.as_str()?).ok()?,
-                amount: e.get("amount")?.as_f64()?,
-                operation: operation_id(e.get("operation").and_then(|o| o.as_str())),
-                slot: e
-                    .get("slot")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("any")
-                    .to_owned(),
-            })
-        })
-        .collect()
-}
-
-/// `AttributeModifier.Operation` name -> id (unknown or absent: add_value, vanilla's default).
-fn operation_id(name: Option<&str>) -> i32 {
-    match name {
-        Some("add_multiplied_base") => 1,
-        Some("add_multiplied_total") => 2,
-        _ => 0,
-    }
-}
-
-/// Parses `minecraft:consumable` (`Consumable.CODEC`): `consume_seconds` and `animation` with
-/// their defaults.
-fn parse_consumable(v: &serde_json::Value) -> Consumable {
-    Consumable {
-        consume_seconds: v
-            .get("consume_seconds")
-            .and_then(|s| s.as_f64())
-            .unwrap_or(1.6) as f32,
-        animation: use_animation_id(v.get("animation").and_then(|a| a.as_str())),
-    }
-}
-
-/// `ItemUseAnimation` name -> id.
-fn use_animation_id(name: Option<&str>) -> i32 {
-    match name {
-        Some("none") => 0,
-        Some("drink") => 2,
-        Some("block") => 3,
-        Some("bow") => 4,
-        Some("trident") => 5,
-        Some("crossbow") => 6,
-        Some("spyglass") => 7,
-        Some("toot_horn") => 8,
-        Some("brush") => 9,
-        Some("bundle") => 10,
-        Some("spear") => 11,
-        // `eat` and any unknown name are vanilla's default.
-        _ => 1,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn attr(name: &str) -> Identifier {
-        Identifier::minecraft(name)
-    }
-
-    fn modifier(slot: &str, amount: f64) -> AttributeModifier {
-        AttributeModifier {
-            attribute: attr("attack_speed"),
-            amount,
-            operation: 0,
-            slot: slot.to_owned(),
-        }
-    }
-
-    #[test]
-    fn parses_the_equippable_component() {
-        let json = br#"{"components":{"minecraft:equippable":{"slot":"chest","asset_id":"minecraft:iron"}}}"#;
-        let eq = parse_equippable(json).unwrap();
-        assert_eq!(eq.slot, EquipmentSlot::Chest);
-        assert_eq!(eq.asset, Some(Identifier::minecraft("iron")));
-    }
-
-    #[test]
-    fn missing_equippable_is_none() {
-        assert_eq!(parse_equippable(br#"{"components":{}}"#), None);
-        assert_eq!(parse_equippable(b"not json"), None);
-    }
-
-    #[test]
-    fn main_hand_attribute_sums_only_main_hand_modifiers() {
-        let mut c = ItemComponents::default();
-        c.insert(
-            attr("diamond_sword"),
-            vec![
-                AttributeModifier {
-                    attribute: attr("attack_damage"),
-                    amount: 7.0,
-                    operation: 0,
-                    slot: "mainhand".into(),
-                },
-                modifier("mainhand", -2.4),
-                // Off-hand and armor modifiers are not the held item's.
-                modifier("offhand", 100.0),
-                modifier("armor", 100.0),
-            ],
-        );
-        // Player base attack speed 4.0 plus the sword's -2.4 modifier: 1.6.
-        assert!(
-            (c.main_hand_attribute(&attr("diamond_sword"), &attr("attack_speed"), 4.0) - 1.6).abs()
-                < 1e-9
-        );
-        // An item without the attribute keeps the base.
-        assert_eq!(
-            c.main_hand_attribute(&attr("stick"), &attr("attack_speed"), 4.0),
-            4.0
-        );
-    }
-
-    #[test]
-    fn parses_the_codec_shape() {
-        let v = serde_json::json!([
-            {"type": "minecraft:attack_speed", "id": "minecraft:base_attack_speed",
-             "amount": -2.8, "operation": "add_value", "slot": "mainhand"}
-        ]);
-        let m = parse_modifiers(&v);
-        assert_eq!(m, vec![modifier("mainhand", -2.8)]);
-        // A wrapped object and a missing slot (defaults to `any`) both parse.
-        let wrapped = serde_json::json!({"modifiers": [
-            {"type": "minecraft:attack_speed", "amount": 0.5}
-        ]});
-        assert_eq!(
-            parse_modifiers(&wrapped),
-            vec![AttributeModifier {
-                attribute: attr("attack_speed"),
-                amount: 0.5,
-                operation: 0,
-                slot: "any".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn parses_consumables_with_defaults() {
-        // `Consumable.CODEC` defaults: 1.6 s and `eat`.
-        assert_eq!(
-            parse_consumable(&serde_json::json!({})),
-            Consumable {
-                consume_seconds: 1.6,
-                animation: 1,
-            }
-        );
-        // A drink with its own time: `consumeTicks` = seconds * 20.
-        let drink = parse_consumable(&serde_json::json!({
-            "consume_seconds": 1.6, "animation": "drink"
-        }));
-        assert_eq!(drink.animation, 2);
-        assert_eq!(drink.consume_ticks(), 32);
-    }
-
-    #[test]
-    fn parses_the_tool_component() {
-        let t = ToolComponent::from_json(&serde_json::json!({
-            "rules": [
-                {"blocks": "minecraft:cobweb", "correct_for_drops": true, "speed": 15.0},
-                {"blocks": ["minecraft:stone", "minecraft:dirt"], "speed": 1.5},
-                {"blocks": "#minecraft:mineable/pickaxe", "speed": 8.0}
-            ],
-            "default_mining_speed": 1.0,
-            "damage_per_block": 1,
-            "can_destroy_blocks_in_creative": false
-        }))
-        .unwrap();
-        assert_eq!(t.rules.len(), 3);
-        assert_eq!(
-            t.rules[0].blocks,
-            ToolBlocks::Block(Identifier::minecraft("cobweb"))
-        );
-        assert_eq!(t.rules[0].speed, Some(15.0));
-        assert_eq!(
-            t.rules[2].blocks,
-            ToolBlocks::Tag(Identifier::minecraft("mineable/pickaxe"))
-        );
-        assert!(!t.can_destroy_blocks_in_creative);
-        // Defaults: speed 1, damage 1, creative break allowed; malformed is skipped.
-        let d = ToolComponent::from_json(&serde_json::json!({"rules": []})).unwrap();
-        assert_eq!((d.default_mining_speed, d.damage_per_block), (1.0, 1));
-        assert!(d.can_destroy_blocks_in_creative);
-        assert_eq!(
-            ToolComponent::from_json(&serde_json::json!({"rules": [{"blocks": 5}]})),
-            None
-        );
-    }
-
-    #[test]
-    fn loads_by_registry_name_and_ignores_unknown_items() {
-        let dir = std::env::temp_dir().join(format!(
-            "haste-components-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let item_dir = dir.join("item");
-        std::fs::create_dir_all(&item_dir).unwrap();
-        std::fs::write(
-            item_dir.join("iron_chestplate.json"),
-            br#"{"components":{"minecraft:equippable":{"slot":"chest","asset_id":"minecraft:iron"}}}"#,
-        )
-        .unwrap();
-        std::fs::write(item_dir.join("unknown_item.json"), br#"{"components":{}}"#).unwrap();
-        let registries_json = r#"{
-  "minecraft:item": {
-    "entries": {
-      "minecraft:air": { "protocol_id": 0 },
-      "minecraft:iron_chestplate": { "protocol_id": 1 }
-    }
-  },
-  "minecraft:data_component_type": {
-    "entries": {
-      "minecraft:damage": { "protocol_id": 0 },
-      "minecraft:dyed_color": { "protocol_id": 1 }
-    }
-  }
-}"#;
-        let regs = Registries::parse(registries_json).unwrap();
-        let components = ItemComponents::load(&item_dir, &regs);
-        let eq = components.equippable(RegistryIndex(1)).unwrap();
-        assert_eq!(eq.asset, Some(Identifier::minecraft("iron")));
-        assert!(components.equippable(RegistryIndex(0)).is_none());
-        // `dyed_color` as the patch's first add (type id 1, a big-endian int) decodes.
-        let patch = [1u8, 0, 1, 0x00, 0x11, 0x22, 0x33];
-        assert_eq!(components.dyed_color(&patch), Some(0x0011_2233));
-        // A patch whose first add is another component gives up (dye not applied).
-        assert_eq!(components.dyed_color(&[1, 0, 0, 5]), None);
-        assert_eq!(components.dyed_color(&[0, 0]), None);
-        // A missing directory is empty, not an error.
-        let empty = ItemComponents::load(&dir.join("nope"), &regs);
-        assert!(empty.equippable(RegistryIndex(1)).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// One report file per component: the load reads them all in one pass.
-    #[test]
-    fn loads_equippable_attributes_consumables_tools_and_gliders() {
-        let dir = std::env::temp_dir().join(format!(
-            "haste-components-all-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let item_dir = dir.join("item");
-        std::fs::create_dir_all(&item_dir).unwrap();
-        std::fs::write(
-            item_dir.join("iron_chestplate.json"),
-            br#"{"components":{"minecraft:equippable":{"slot":"chest","asset_id":"minecraft:iron"}}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            item_dir.join("diamond_sword.json"),
-            br#"{"components":{
-                "minecraft:attribute_modifiers": [
-                    {"type": "minecraft:attack_speed", "amount": -2.4, "operation": "add_value", "slot": "mainhand"}
-                ],
-                "minecraft:tool": {"rules": [
-                    {"blocks": "minecraft:cobweb", "speed": 15.0, "correct_for_drops": true}
-                ], "can_destroy_blocks_in_creative": false}
-            }}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            item_dir.join("apple.json"),
-            br#"{"components":{"minecraft:consumable": {"consume_seconds": 1.6, "animation": "eat"}}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            item_dir.join("elytra.json"),
-            br#"{"components":{"minecraft:glider": {}}}"#,
-        )
-        .unwrap();
-        // A malformed tool entry is skipped, not fatal.
-        std::fs::write(
-            item_dir.join("broken_pickaxe.json"),
-            br#"{"components":{"minecraft:tool": {"rules": [{"blocks": 5}]}}}"#,
-        )
-        .unwrap();
-        let registries_json = r#"{
-  "minecraft:item": {
-    "entries": {
-      "minecraft:air": { "protocol_id": 0 },
-      "minecraft:iron_chestplate": { "protocol_id": 1 },
-      "minecraft:diamond_sword": { "protocol_id": 2 },
-      "minecraft:apple": { "protocol_id": 3 },
-      "minecraft:elytra": { "protocol_id": 4 },
-      "minecraft:broken_pickaxe": { "protocol_id": 5 }
-    }
-  },
-  "minecraft:data_component_type": {
-    "entries": {
-      "minecraft:dyed_color": { "protocol_id": 0 }
-    }
-  }
-}"#;
-        let regs = Registries::parse(registries_json).unwrap();
-        let c = ItemComponents::load(&item_dir, &regs);
-        // equippable by registry index.
-        assert!(c.equippable(RegistryIndex(1)).is_some());
-        assert!(c.equippable(RegistryIndex(0)).is_none());
-        // attribute modifiers and consumable by name.
-        let sword = attr("diamond_sword");
-        assert_eq!(
-            c.main_hand_attribute(&sword, &attr("attack_speed"), 4.0),
-            1.6
-        );
-        assert_eq!(c.consumable(&attr("apple")).unwrap().consume_ticks(), 32);
-        // the tool component parses (and the malformed one was skipped).
-        let tool = c.tool(&sword).unwrap();
-        assert_eq!(tool.rules.len(), 1);
-        assert!(!tool.can_destroy_blocks_in_creative);
-        assert!(c.tool(&attr("broken_pickaxe")).is_none());
-        assert_eq!(c.tools().len(), 1);
-        // glider.
-        assert!(c.is_glider(&attr("elytra")));
-        assert!(!c.is_glider(&attr("stick")));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn operation_order_matches_vanilla() {
-        let mut c = ItemComponents::default();
-        c.insert(
-            attr("test_item"),
-            vec![
-                AttributeModifier {
-                    attribute: attr("attack_speed"),
-                    amount: 0.5,
-                    operation: 2, // add_multiplied_total (applied last)
-                    slot: "mainhand".into(),
-                },
-                AttributeModifier {
-                    attribute: attr("attack_speed"),
-                    amount: 1.0,
-                    operation: 0, // add_value (applied first)
-                    slot: "mainhand".into(),
-                },
-                AttributeModifier {
-                    attribute: attr("attack_speed"),
-                    amount: 0.25,
-                    operation: 1, // add_multiplied_base
-                    slot: "mainhand".into(),
-                },
-            ],
-        );
-        // base 4 -> +1 = 5 -> +0.25*4 = 6 -> +0.5*6 = 9.
-        assert_eq!(
-            c.main_hand_attribute(&attr("test_item"), &attr("attack_speed"), 4.0),
-            9.0
-        );
-    }
-
-    #[test]
-    #[ignore = "needs cache/datagen/26.3/reports (data generator)"]
-    fn loads_the_data_generator_attribute_modifiers() {
-        let c = ItemComponents::load_default().unwrap();
-        let speed = attr("attack_speed");
-        // Diamond pickaxe: base 4.0 - 2.8 = 1.2 (the report stores the float32 value).
-        let pick = c.main_hand_attribute(&attr("diamond_pickaxe"), &speed, 4.0);
-        assert!((pick - 1.2).abs() < 1e-6, "diamond pickaxe {pick}");
-        // Diamond sword: base 4.0 - 2.4 = 1.6.
-        let sword = c.main_hand_attribute(&attr("diamond_sword"), &speed, 4.0);
-        assert!((sword - 1.6).abs() < 1e-6, "diamond sword {sword}");
-        assert!(c.len() > 30, "{} items", c.len());
-        // Food and drink carry a `minecraft:consumable`.
-        let apple = c.consumable(&attr("apple")).expect("apple consumable");
-        assert_eq!((apple.animation, apple.consume_ticks()), (1, 32));
-        let potion = c.consumable(&attr("potion")).expect("potion consumable");
-        assert_eq!(potion.animation, 2);
     }
 }

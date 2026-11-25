@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Codebase tools for agents: see tools/hx/hx.py or `hx help`.
+exec python3 -I "$(dirname "$(readlink -f "$0")")/../tools/hx/hx.py" "$@"

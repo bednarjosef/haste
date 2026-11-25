@@ -1,0 +1,49 @@
+# Horse riding on the test server (127.0.0.1:25691). Live evidence and the steps that drive
+# the client; the RCON setup the driver runs is in horse-riding.sh.
+#
+# RIG (this branch's own area, x 340..360, z 0..20, top at y 120 — high above the natural
+# terrain, far from the shared spawn floor x 3..16, z 2..16, y 60..70, and from the boat
+# lane at x 370..394):
+#   fill 340 120 0 360 140 20 air      clear above the platform first: the natural terrain
+#                                      here can be higher than y 120 and would bury the
+#                                      player (the crosshair then hits the block around
+#                                      the eyes)
+#   fill 340 119 0 360 119 20 stone    platform, top at y 120
+#   tp <name> 345.5 120 5.0 0 20      the player at the platform's edge (eyes y 121.62)
+#   summon minecraft:horse 345.5 120 8.5 {Tame:1b,NoAI:1b,equipment:{saddle:{...}}}
+#                                    the tamed, saddled horse 3 blocks ahead (the saddle is
+#                                    the SADDLE entry of the `equipment` map in 26.3's NBT —
+#                                    `SaddleItem` is the pre-datafix name and is ignored;
+#                                    NoAI: a free horse wanders off its mounting spot while
+#                                    the script's first wait runs, and the ridden travel is
+#                                    unaffected)
+#
+# EVIDENCE (RCON, own username riding-mount-hud, on 25691; see horse-riding.sh for the reads):
+#   the horse's Pos before the ride (mounted, at rest) and after (W 3 s and a charged
+#   jump), the rider's RootVehicle naming the horse, and the server log's verdict —
+#   no "moved wrongly"/"moved too quickly" for the horse.
+#
+# The steps below drive the client: mount the horse with use-item (the crosshair aims at
+# its body), hold W for 3 s, then hold Space briefly (charging the jump bar) and release
+# it (the charged jump fires from the ground on the horse's next tick), ride on and hold
+# for the driver's reads.
+wait_until joined
+wait 400
+look 0 20
+wait 10
+click right 480 270
+wait 20
+click right 480 270
+wait 120
+key_down w
+wait 60
+key_up w
+wait 20
+key_down space
+wait 12
+key_up space
+wait 6
+key_down w
+wait 40
+key_up w
+wait 400

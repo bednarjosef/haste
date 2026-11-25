@@ -13,15 +13,27 @@ use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+use super::test_imports::*;
 use super::*;
+use crate::nbt::NbtCompound;
 use crate::packets::configuration::clientbound as ccb;
+use crate::packets::configuration::clientbound::RegistryEntry;
+use crate::packets::configuration::serverbound::KnownPack;
+use crate::packets::configuration::ClientboundConfiguration;
 use crate::packets::configuration::ServerboundConfiguration;
+use crate::packets::handshake::serverbound::INTENT_STATUS;
+use crate::packets::handshake::serverbound::INTENT_TRANSFER;
 use crate::packets::handshake::ServerboundHandshake;
 use crate::packets::login::clientbound as lcb;
+use crate::packets::login::ClientboundLogin;
 use crate::packets::login::ServerboundLogin;
 use crate::packets::play::clientbound as pcb;
+use crate::packets::play::{self};
 use crate::packets::status::ServerboundStatus as ServerboundStatusAlias;
-use crate::packets::PacketIds;
+use crate::packets::status::{self, ClientboundStatus};
+use crate::packets::{Decoded, Packet, PacketIds};
+use crate::wire::Reader;
+use crate::wire::Writer;
 
 const FAKE_UNKNOWN: &str = "minecraft:fake_unknown";
 
@@ -83,18 +95,18 @@ fn test_tables_owned() -> ProtocolTables {
 }
 
 /// [`test_tables_owned`] behind an `Arc` (the connection API).
-fn test_tables() -> Arc<ProtocolTables> {
+pub(super) fn test_tables() -> Arc<ProtocolTables> {
     Arc::new(test_tables_owned())
 }
 
-struct Server {
-    dec: TcpNetworkDecoder<BufReader<OwnedReadHalf>>,
-    enc: TcpNetworkEncoder<OwnedWriteHalf>,
-    tables: Arc<ProtocolTables>,
+pub(super) struct Server {
+    pub(super) dec: TcpNetworkDecoder<BufReader<OwnedReadHalf>>,
+    pub(super) enc: TcpNetworkEncoder<OwnedWriteHalf>,
+    pub(super) tables: Arc<ProtocolTables>,
 }
 
 impl Server {
-    async fn send<P: Packet>(&mut self, state: State, p: &P) {
+    pub(super) async fn send<P: Packet>(&mut self, state: State, p: &P) {
         let b =
             crate::packets::encode_with_id(&self.tables.packets, state, Direction::Clientbound, p)
                 .expect("clientbound id");
@@ -113,7 +125,7 @@ impl Server {
         self.enc.write_packet(w.into_inner().into()).await.unwrap();
         self.enc.flush().await.unwrap();
     }
-    async fn recv<T>(
+    pub(super) async fn recv<T>(
         &mut self,
         state: State,
         decoders: &'static [(&'static str, crate::packets::DecodeFn<T>)],
@@ -747,7 +759,11 @@ fn cosmetic_warning_fires_once_per_name() {
 
 impl Server {
     /// Accepts a connection and runs handshake + offline login.
-    async fn accept(listener: &TcpListener, tables: Arc<ProtocolTables>, intent: i32) -> Server {
+    pub(super) async fn accept(
+        listener: &TcpListener,
+        tables: Arc<ProtocolTables>,
+        intent: i32,
+    ) -> Server {
         let (stream, _) = listener.accept().await.unwrap();
         let (r, w) = stream.into_split();
         let mut s = Server {
@@ -786,13 +802,13 @@ impl Server {
         s
     }
 
-    async fn recv_cfg(&mut self) -> ServerboundConfiguration {
+    pub(super) async fn recv_cfg(&mut self) -> ServerboundConfiguration {
         self.recv(State::Configuration, ServerboundConfiguration::DECODERS)
             .await
     }
 
     /// Expects brand + client information.
-    async fn expect_hello(&mut self) {
+    pub(super) async fn expect_hello(&mut self) {
         assert!(matches!(
             self.recv_cfg().await,
             ServerboundConfiguration::CustomPayload(_)
@@ -805,7 +821,7 @@ impl Server {
 
     /// Sends registries with one biome named `biome`, finishes configuration
     /// and sends the play `login` with `entity_id`.
-    async fn finish_with(&mut self, biome: &str, entity_id: i32) {
+    pub(super) async fn finish_with(&mut self, biome: &str, entity_id: i32) {
         self.send(
             State::Configuration,
             &ccb::RegistryData {
@@ -1040,5 +1056,225 @@ async fn reconfiguration_cookies_resource_pack_and_transfer() {
     let log = server.await.unwrap();
     assert_eq!(&log[..3], ["pack 3", "pack 4", "pack 0"]);
     assert_eq!(&log[3..], ["reconfigured", "transferred"]);
+    conn.disconnect();
+}
+
+/// Serves `body` once over plain HTTP (a tiny static file server for the pack
+/// download tests; vanilla downloads packs over http/https only).
+pub(super) async fn serve_one_http(body: Bytes) -> reqwest::Url {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = reqwest::Url::parse(&format!("http://{addr}/pack.zip")).unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    });
+    url
+}
+
+/// The `resource_pack_push` flow with a downloads directory (vanilla's
+/// `DownloadedPackSource`): a good push downloads the pack (hash-checked, in
+/// the `downloads/<id>/<sha1>` cache) with vanilla's statuses ACCEPTED,
+/// DOWNLOADED, SUCCESSFULLY_LOADED; a wrong hash answers ACCEPTED then
+/// FAILED_DOWNLOAD; a non-http URL answers INVALID_URL.
+#[tokio::test]
+async fn server_pack_push_downloads_and_reports_statuses() {
+    let tables = test_tables();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // The pack: a small body with its SHA-1 as the push's hash.
+    let pack_bytes = Bytes::from_static(b"a server pushed this pack, hash-checked");
+    use sha1::Digest as _;
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(&pack_bytes);
+    let digest: [u8; 20] = hasher.finalize().into();
+    let hex = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let pack_url = serve_one_http(pack_bytes.clone()).await;
+    let hex_for_task = hex.clone();
+
+    let downloads = tempfile::tempdir().unwrap();
+    let downloads_dir = downloads.path().to_path_buf();
+
+    let task_tables = tables.clone();
+    let server = tokio::spawn(async move {
+        let mut s = Server::accept(&listener, task_tables, INTENT_LOGIN).await;
+        s.expect_hello().await;
+        let mut statuses = Vec::new();
+        // 1. A good push with the correct hash.
+        s.send(
+            State::Configuration,
+            &ccb::ResourcePackPush {
+                id: Uuid::from_u128(11),
+                url: pack_url.to_string(),
+                hash: hex_for_task,
+                forced: false,
+                prompt: None,
+            },
+        )
+        .await;
+        for _ in 0..3 {
+            let ServerboundConfiguration::ResourcePack(r) = s.recv_cfg().await else {
+                panic!("expected resource pack status")
+            };
+            statuses.push(format!("good {}", r.result));
+        }
+        // 2. The same URL with a wrong hash: ACCEPTED then FAILED_DOWNLOAD.
+        s.send(
+            State::Configuration,
+            &ccb::ResourcePackPush {
+                id: Uuid::from_u128(12),
+                url: pack_url.to_string(),
+                hash: "0".repeat(40),
+                forced: true,
+                prompt: None,
+            },
+        )
+        .await;
+        for _ in 0..2 {
+            let ServerboundConfiguration::ResourcePack(r) = s.recv_cfg().await else {
+                panic!("expected resource pack status")
+            };
+            statuses.push(format!("badhash {}", r.result));
+        }
+        // 3. A non-http URL: INVALID_URL only.
+        s.send(
+            State::Configuration,
+            &ccb::ResourcePackPush {
+                id: Uuid::from_u128(13),
+                url: "file:///etc/passwd".into(),
+                hash: String::new(),
+                forced: false,
+                prompt: None,
+            },
+        )
+        .await;
+        let ServerboundConfiguration::ResourcePack(r) = s.recv_cfg().await else {
+            panic!("expected resource pack status")
+        };
+        statuses.push(format!("badurl {}", r.result));
+        // 4. Pop the good pack: the live set empties.
+        s.send(
+            State::Configuration,
+            &ccb::ResourcePackPop {
+                id: Some(Uuid::from_u128(11)),
+            },
+        )
+        .await;
+        s.finish_with("plains", 5).await;
+        statuses.push("finished".into());
+        statuses
+    });
+
+    let mut opts = ConnectOptions::new(
+        addr.to_string(),
+        Account::Offline {
+            username: "tester".into(),
+        },
+    );
+    opts.tables = Some(tables.clone());
+    opts.downloads_dir = Some(downloads_dir.clone());
+    let (conn, login) = tokio::time::timeout(Duration::from_secs(10), Connection::connect(opts))
+        .await
+        .expect("connect timeout")
+        .unwrap();
+    assert_eq!(login.entity_id, EntityId(5));
+
+    // The good push downloaded (the file is in the cache, hash-named, with the
+    // exact bytes) but the pop removed it from the set before the play state,
+    // so the live set is empty (vanilla `handleResourcePackPop`).
+    let packs = conn.server_packs();
+    let file = downloads_dir
+        .join(Uuid::from_u128(11).to_string())
+        .join(&hex);
+    assert_eq!(std::fs::read(&file).unwrap(), &pack_bytes[..]);
+    assert!(packs.is_empty(), "the pop removed the pack: {packs:?}");
+    assert_eq!(conn.server_packs_version(), 0, "the set never existed live");
+
+    let statuses = server.await.unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            "good 3", // ACCEPTED
+            "good 4", // DOWNLOADED
+            "good 0", // SUCCESSFULLY_LOADED
+            "badhash 3",
+            "badhash 2", // FAILED_DOWNLOAD
+            "badurl 5",  // INVALID_URL
+            "finished",
+        ]
+    );
+    conn.disconnect();
+}
+
+/// `set_packet_wake`'s hook fires when the reader queues a play packet, after
+/// the send (a woken drainer sees the packet), and the queued packet carries
+/// the arrival timestamp `try_recv_arrived` reports (the client's
+/// arrival-to-apply latency log depends on both).
+#[tokio::test]
+async fn packet_wake_fires_on_arrival() {
+    let tables = test_tables();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(listener, tables.clone(), false, None));
+
+    let mut opts = ConnectOptions::new(
+        addr.to_string(),
+        Account::Offline {
+            username: "tester".into(),
+        },
+    );
+    opts.tables = Some(tables);
+    let (mut conn, _login) =
+        tokio::time::timeout(Duration::from_secs(10), Connection::connect(opts))
+            .await
+            .expect("connect timeout")
+            .unwrap();
+
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let w = wakes.clone();
+    conn.set_packet_wake(Arc::new(move || {
+        w.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+
+    // The login packet is queued before the hook is set, so it cannot have
+    // woken anything; it still arrives with a timestamp.
+    let first = tokio::time::timeout(Duration::from_secs(5), conn.recv_arrived())
+        .await
+        .expect("login timeout")
+        .expect("login");
+    assert!(matches!(first.packet, ClientboundPlay::Login(_)));
+    assert!(!first.at.elapsed().is_zero());
+
+    // Drain to the keep alive the server sends in the play state.
+    loop {
+        let a = tokio::time::timeout(Duration::from_secs(5), conn.recv_arrived())
+            .await
+            .expect("recv timeout")
+            .expect("connection open");
+        if matches!(a.packet, ClientboundPlay::KeepAlive(_)) {
+            break;
+        }
+    }
+    // The keep alive arrived through the reader, which queued it with the hook
+    // set: the hook fired (at least once — the reader may also have queued the
+    // level chunk in the same batch).
+    assert!(
+        wakes.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the wake hook fired when a packet was queued"
+    );
+    server.abort();
     conn.disconnect();
 }

@@ -1,6 +1,7 @@
 // Sky, celestial bodies, stars, clouds and rain. One environment atlas (sun, moon phases, clouds,
-// rain, snow, end sky) fetched by texel with per-vertex wrap rectangles. Colours in linear space
-// (the target is sRGB).
+// rain, snow, end sky) fetched by texel with per-vertex wrap rectangles. Colours in linear space;
+// `target_color` writes them sRGB-encoded for the non-sRGB target view (the GL fallback's sRGB
+// view gets the linear value for its hardware encode).
 
 struct Sky {
     view_proj: mat4x4<f32>,
@@ -12,13 +13,10 @@ struct Sky {
     sunrise_color: vec4<f32>,
     // xyz: horizontal direction of the sunrise glow, w: star brightness.
     sunrise_dir: vec4<f32>,
-    // xyz: camera position, w: unused.
-    cam_pos: vec4<f32>,
-    // x: cloud offset (blocks), y: fog end (blocks, cloud plane extent), z: cloud height,
-    // w: sky kind (0 overworld, 1 none, 2 end).
+    // w: the sky kind (0 overworld, 1 none, 2 end); y: 1 when the target view is sRGB and
+    // the hardware encodes (GL fallback, see entity.wgsl) — 0 with the non-sRGB view,
+    // where the sRGB-encoded bytes are written raw.
     params: vec4<f32>,
-    // x: cloud brightness, y: cloud alpha.
-    clouds: vec4<f32>,
     // Vanilla fog bands for the sky dome and weather: environmental start/end,
     // render distance start/end.
     fog_bands: vec4<f32>,
@@ -26,9 +24,13 @@ struct Sky {
     fog_bands2: vec4<f32>,
     // The sunrise/sunset fan's rotation (camera rotation frame).
     sunrise_matrix: mat4x4<f32>,
-    // End sky texture rectangle in the atlas, clouds rectangle.
+    // The End flash (vanilla `SkyRenderer.renderEndFlash`): intensity in x (0 = none),
+    // the x/y direction angles in degrees in y/z.
+    end_flash: vec4<f32>,
+    // The End flash quad's pose (camera rotation frame).
+    end_flash_matrix: mat4x4<f32>,
+    // End sky texture rectangle in the atlas.
     end_rect: vec4<u32>,
-    cloud_rect: vec4<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sky: Sky;
@@ -99,10 +101,10 @@ fn fs_background(in: BackgroundOut) -> @location(0) vec4<f32> {
         }
         let texel = (uv * 0.5 + 0.5) * 16.0 * vec2<f32>(sky.end_rect.zw);
         let c = fetch(vec2<f32>(sky.end_rect.xy) + texel, sky.end_rect);
-        return vec4<f32>(c.rgb * sky.sky_color.rgb, 1.0);
+        return vec4<f32>(target_color(c.rgb * sky.sky_color.rgb), 1.0);
     }
     // Skyless dimensions: flat fog colour (the overworld dome is the disc fan).
-    return vec4<f32>(sky.fog_color.rgb, 1.0);
+    return vec4<f32>(target_color(sky.fog_color.rgb), 1.0);
 }
 
 // ---- sky disc: the dome fan, fogged by spherical distance over the sky fog end ----
@@ -130,7 +132,14 @@ fn fs_disc(in: DiscOut) -> @location(0) vec4<f32> {
     // Vanilla sky.fsh: max(linear(spherical, 0, skyEnd), linear(cylindrical, skyEnd,
     // skyEnd)); the cylindrical term is 1 only past the ring where the spherical is too.
     let fog = linear_fog_value(length(in.pos), 0.0, sky.fog_bands2.x);
-    return vec4<f32>(mix(sky.sky_color.rgb, sky.fog_color.rgb, fog), 1.0);
+    return vec4<f32>(target_color(mix(sky.sky_color.rgb, sky.fog_color.rgb, fog)), 1.0);
+}
+
+@fragment
+fn fs_dark_disc(in: DiscOut) -> @location(0) vec4<f32> {
+    // Vanilla renderDarkDisc: the sky pipeline coloured black, fogged like the sky disc.
+    let fog = linear_fog_value(length(in.pos), 0.0, sky.fog_bands2.x);
+    return vec4<f32>(target_color(mix(vec3<f32>(0.0), sky.fog_color.rgb, fog)), 1.0);
 }
 
 // ---- sunrise/sunset fan: translucent timeline colour, alpha ramping center to ring ----
@@ -154,7 +163,7 @@ fn fs_sunrise(in: VertexOut) -> @location(0) vec4<f32> {
     if (a <= 0.0) {
         discard;
     }
-    return vec4<f32>(sky.sunrise_color.rgb, a);
+    return vec4<f32>(target_color(sky.sunrise_color.rgb), a);
 }
 
 // ---- celestial: sun, moon, stars in the camera's rotation frame, additive ----
@@ -191,69 +200,41 @@ fn vs_celestial(v: VertexIn) -> VertexOut {
 @fragment
 fn fs_celestial(in: VertexOut) -> @location(0) vec4<f32> {
     if (in.rect.z == 0u) {
-        // Stars: plain quads at the star brightness.
+        // Stars: plain quads coloured (b, b, b, b) with the star brightness b, blended
+        // src-alpha/one (vanilla `RenderPipelines.STARS`, `BlendFunction.OVERLAY`): b * b.
         let b = sky.sunrise_dir.w;
-        return vec4<f32>(in.color.rgb * b, 1.0);
+        return vec4<f32>(target_color(in.color.rgb * b * b), 1.0);
     }
     // Additive with the texture's alpha (src alpha, one), like vanilla's sun and moon.
     let c = fetch(in.uv, in.rect);
-    return vec4<f32>(c.rgb * c.a * in.color.rgb * in.color.a, 1.0);
+    return vec4<f32>(target_color(c.rgb * c.a * in.color.rgb * in.color.a), 1.0);
 }
 
-// ---- world-space: rain and snow columns (alpha blended, depth tested) ----
+// The colour a fragment writes to the target: the normal non-sRGB view stores the
+// sRGB-encoded bytes raw (so blends act on them like vanilla's plain UNORM target), and
+// the GL fallback's sRGB view gets the linear value for its hardware encode instead.
+fn target_color(rgb: vec3<f32>) -> vec3<f32> {
+    return select(srgb_encode(rgb), rgb, sky.params.y == 1.0);
+}
+
+// The sRGB transfer function (IEC 61966-2-1), the one the sRGB texture formats apply.
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3<f32>(0.0));
+    return select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3<f32>(0.0031308));
+}
+
+// ---- the End flash: a celestial quad in the flash's own pose (vanilla renderEndFlash) ----
 
 @vertex
-fn vs_world(v: VertexIn) -> VertexOut {
+fn vs_end_flash(v: VertexIn) -> VertexOut {
     var out: VertexOut;
-    out.clip = sky.view_proj * vec4<f32>(v.pos, 1.0);
+    let world = sky.end_flash_matrix * vec4<f32>(v.pos, 1.0);
+    let clip = sky.rot_view_proj * vec4<f32>(world.xyz, 1.0);
+    // Pinned to the far plane: behind everything, like the other celestial bodies.
+    out.clip = vec4<f32>(clip.xy, clip.w * 0.99999, clip.w);
     out.uv = v.uv;
     out.color = v.color;
     out.rect = v.rect;
-    out.fog = fog_factor(v.pos - sky.cam_pos.xyz);
+    out.fog = 0.0;
     return out;
-}
-
-@fragment
-fn fs_world(in: VertexOut) -> @location(0) vec4<f32> {
-    let c = fetch(in.uv, in.rect) * in.color;
-    if (c.a < 0.01) {
-        discard;
-    }
-    return vec4<f32>(mix(c.rgb, sky.fog_color.rgb, in.fog), c.a);
-}
-
-// ---- clouds: one plane at cloud height, each clouds.png texel a 12x12 block cell ----
-
-struct CloudOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) world: vec3<f32>,
-};
-
-@vertex
-fn vs_clouds(@builtin(vertex_index) i: u32) -> CloudOut {
-    let corner = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
-    )[i];
-    // The plane reaches past the cloud fog end (vanilla renders real cloud cells out to the
-    // cloud range option).
-    let extent = max(sky.fog_bands2.y, 256.0);
-    let world = vec3<f32>(sky.cam_pos.x + corner.x * extent, sky.params.z, sky.cam_pos.z + corner.y * extent);
-    var out: CloudOut;
-    out.clip = sky.view_proj * vec4<f32>(world, 1.0);
-    out.world = world;
-    return out;
-}
-
-@fragment
-fn fs_clouds(in: CloudOut) -> @location(0) vec4<f32> {
-    let cell = floor(vec2<f32>(in.world.x + sky.params.x, in.world.z) / 12.0);
-    let c = fetch(vec2<f32>(sky.cloud_rect.xy) + cell + vec2<f32>(0.5, 0.5), sky.cloud_rect);
-    if (c.a < 0.5) {
-        discard;
-    }
-    // Vanilla clouds.fsh: alpha *= 1 - linear_fog_value(spherical distance, 0, cloud end).
-    let rel = in.world - sky.cam_pos.xyz;
-    let fade = 1.0 - linear_fog_value(length(rel), 0.0, sky.fog_bands2.y);
-    return vec4<f32>(vec3<f32>(sky.clouds.x), sky.clouds.y * fade);
 }

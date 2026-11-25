@@ -41,7 +41,8 @@ fn game_data() -> Arc<GameData> {
 const FIXTURE_BLOCKS: &str = r#"{
   "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
   "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
-  "minecraft:dirt": { "states": [ { "id": 2, "default": true } ] }
+  "minecraft:dirt": { "states": [ { "id": 2, "default": true } ] },
+  "minecraft:chest": { "states": [ { "id": 3, "default": true }, { "id": 4 } ] }
 }"#;
 
 const FIXTURE_REGISTRIES: &str = r#"{
@@ -50,7 +51,8 @@ const FIXTURE_REGISTRIES: &str = r#"{
     "entries": {
       "minecraft:air": { "protocol_id": 0 },
       "minecraft:stone": { "protocol_id": 1 },
-      "minecraft:dirt": { "protocol_id": 2 }
+      "minecraft:dirt": { "protocol_id": 2 },
+      "minecraft:chest": { "protocol_id": 3 }
     }
   }
 }"#;
@@ -87,10 +89,13 @@ fn chunk_load_and_block_view() {
     assert_eq!(w.height(), 384);
     // chunk list
     assert_eq!(w.loaded_chunks().count(), 1);
-    // dirty: all sections of the chunk
+    // dirty: every section of the chunk, the air ones above the stone included
+    // (vanilla's `SectionUpdateTracker.setDirty` marks regardless of contents; the
+    // client's feed skips the ones it never meshed)
     let dirty = w.take_dirty_sections();
-    assert_eq!(dirty.len(), sections);
+    assert_eq!(dirty.len(), 24);
     assert!(dirty.contains(&SectionPos::new(0, -4, 0)));
+    assert!(dirty.contains(&SectionPos::new(0, 19, 0)));
     assert!(w.take_dirty_sections().is_empty());
 }
 
@@ -124,6 +129,39 @@ fn set_block_and_border_dirty() {
     assert!(dirty.contains(&SectionPos::new(0, 4, 0)));
     assert!(dirty.contains(&SectionPos::new(0, 3, 0)));
     assert_eq!(dirty.len(), 2);
+}
+
+/// A section that held its chunk's only block and becomes empty must still be
+/// reported when it is marked dirty: the renderer is holding a mesh for it, and only
+/// an empty mesh result replaces that (vanilla compiles every dirty section and stores
+/// `CompiledSectionMesh.EMPTY` for one that compiled to nothing).
+#[test]
+fn emptied_section_still_reaches_the_drain() {
+    let mut w = World::new(overworld(), game_data());
+    // one stone block at (5, 100, 5), everything else air
+    let cp = ChunkPos::new(0, 0);
+    let cd = synthetic_chunk_data(cp, -4, 24, |si, x, y, z| {
+        if si == 10 && x == 5 && y == 4 && z == 5 {
+            STONE
+        } else {
+            BlockStateId::AIR
+        }
+    });
+    w.load_chunk(&cd).unwrap();
+    let _ = w.take_dirty_sections();
+
+    // remove the last block of the section: the section is empty now, but the
+    // renderer could be holding its mesh, so it must be reported
+    let p = BlockPos::new(5, 100, 5);
+    w.set_block(p, BlockStateId::AIR);
+    let dirty = w.take_dirty_sections();
+    assert!(
+        dirty.contains(&p.section()),
+        "the emptied section must reach the drain"
+    );
+    // the sections around the block (its 3x3x3 neighbourhood) are marked too
+    assert!(dirty.contains(&SectionPos::new(0, 5, 0)));
+    assert!(dirty.contains(&SectionPos::new(0, 7, 0)));
 }
 
 #[test]
@@ -382,11 +420,13 @@ fn light_apply_and_read() {
     assert_eq!(w.sky_light(BlockPos::new(2, 64, 0)), 2);
     assert_eq!(w.block_light(BlockPos::new(0, 64, 0)), 2);
     assert_eq!(w.block_light(BlockPos::new(1, 64, 0)), 1);
-    // cleared section: sky reads 15 (no data), block 0
-    assert_eq!(w.sky_light(BlockPos::new(0, 80, 0)), 15);
+    // cleared section: sky reads 0 (vanilla stores an all-zero DataLayer for an
+    // empty-marked section, ClientPacketListener.readSectionList), block 0
+    assert_eq!(w.sky_light(BlockPos::new(0, 80, 0)), 0);
     assert_eq!(w.block_light(BlockPos::new(0, 80, 0)), 0);
-    // sections with no light data at all: sky 15, block 0
-    assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 15);
+    // section with no light data below a data section: sky reads the bottom row of the
+    // nearest section above (vanilla SkyLightSectionStorage.getLightValue), block 0
+    assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 0);
     assert_eq!(w.block_light(BlockPos::new(0, 0, 0)), 0);
     // light update dirties the changed section's neighbourhood
     assert!(!w.take_dirty_sections().is_empty());
@@ -643,6 +683,26 @@ fn set_block_drops_block_entity() {
     // the other one survives
     assert!(w.block_entity(BlockPos::new(11, 72, 11)).is_some());
     let _ = w.take_dirty_sections();
+}
+
+#[test]
+fn a_state_change_of_the_same_block_keeps_the_block_entity() {
+    // Vanilla `LevelChunk.setBlockState` removes the block entity only when the block changes
+    // (`!oldState.is(newBlock)`): a chest turning waterlogged or double keeps its entity.
+    let (mut w, sign, _chest) = world_with_block_entities();
+    w.set_block(sign, BlockStateId(3));
+    assert!(w.block_entity(sign).is_none(), "stone -> chest drops it");
+    w.set_block_entity(sign, block_entity(sign, 33));
+    w.set_block(sign, BlockStateId(4));
+    assert_eq!(
+        w.block_entity(sign).unwrap().kind,
+        33,
+        "chest state -> chest state keeps it"
+    );
+    w.set_block(sign, BlockStateId(4));
+    assert!(w.block_entity(sign).is_some(), "the same state keeps it");
+    w.set_block(sign, DIRT);
+    assert!(w.block_entity(sign).is_none(), "chest -> dirt drops it");
 }
 
 #[test]

@@ -3,12 +3,13 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 //! Every constant, where it comes from and how sure we are of it is listed in `NOTES.md`.
 //!
-//! Layout: [`collision`] (pure AABB sweep + step-up), [`movement`] (the tick), [`fluids`] (water
-//! and lava), [`flying`] (creative flight), [`elytra`] (gliding), [`attributes`], [`replay`]
+//! Layout: [`collision`] (pure AABB sweep + step-up), [`movement`] (the tick), [`climbing`]
+//! (ladders and vines), [`fluids`] (water and lava), [`flying`] (creative flight), [`elytra`] (gliding), [`attributes`], [`replay`]
 //! (trace replay harness), [`testing`] (in-memory world for tests).
 
 pub mod attributes;
 pub mod block_effects;
+pub mod climbing;
 pub mod collision;
 pub mod elytra;
 pub mod fluids;
@@ -17,6 +18,8 @@ pub mod mining;
 pub mod movement;
 pub mod raycast;
 pub mod replay;
+mod sprint;
+pub mod suffocation;
 pub mod testing;
 mod trig;
 
@@ -24,9 +27,12 @@ use haste_core::{Aabb, BlockStateId, DVec3};
 use serde::{Deserialize, Serialize};
 
 pub use attributes::{PlayerAttributes, Pose};
+pub use climbing::{on_climbable, ClimbableBlocks, NoClimbables};
 pub use collision::{collide, collide_with_step};
 pub use elytra::{effective_gravity, glide_velocity, look_angle};
-pub use movement::tick;
+pub use movement::{tick, tick_with};
+pub use sprint::can_start_sprinting;
+pub use suffocation::move_towards_closest_space;
 
 /// The local player's physics state. Positions/velocities are f64 like vanilla; angles f32.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -74,6 +80,45 @@ pub struct PlayerState {
     /// through blocks.
     #[serde(default)]
     pub no_physics: bool,
+    /// Levitation effect amplifier (vanilla `getEffect(MobEffects.LEVITATION)`; `None` without).
+    /// `LivingEntity.travelInAir` blends the rise towards `0.05 * (amplifier + 1)` per tick and
+    /// skips gravity, whatever the amplifier (a negative one makes the player hover or sink).
+    #[serde(default)]
+    pub levitation: Option<i32>,
+    /// Slow falling effect on us (vanilla `LivingEntity.hasEffect(MobEffects.SLOW_FALLING)`):
+    /// `getEffectiveGravity` caps the gravity at 0.01 while falling and the fall distance is
+    /// reset each tick.
+    #[serde(default)]
+    pub slow_falling: bool,
+    /// Jump boost effect amplifier (vanilla `getEffect(MobEffects.JUMP_BOOST)`; `None` without).
+    /// `LivingEntity.getJumpBoostPower` adds `0.1F * (amplifier + 1)` to the jump power.
+    #[serde(default)]
+    pub jump_boost: Option<i32>,
+    /// Sprinting impossible whatever the water (vanilla `LocalPlayer.isSprintingPossible`'s
+    /// first terms failing: blind (`Player.isMobilityRestricted`), or not enough food and no
+    /// may-fly ability). Set by the client each tick; stops a sprint and keeps it from starting.
+    #[serde(default)]
+    pub sprint_blocked: bool,
+    /// An item is being used over time (vanilla `LivingEntity.isUsingItem`). Set by the client
+    /// each tick.
+    #[serde(default)]
+    pub using_item: bool,
+    /// Slowed by the item in use (vanilla `LocalPlayer.isSlowDueToUsingItem`: using and the
+    /// stack's `use_effects` `can_sprint` false): a sprint cannot start. Set by the client each
+    /// tick.
+    #[serde(default)]
+    pub slow_using_item: bool,
+    /// The used item's `minecraft:use_effects` speed multiplier (vanilla
+    /// `LocalPlayer.itemUseSpeedMultiplier`: the used stack's component, `UseEffects.DEFAULT`'s
+    /// 0.2 when the item has none), applied to the movement input while using an item
+    /// (`LocalPlayer.modifyInput`). Set by the client each tick; 1.0 when no item is in use.
+    #[serde(default = "item_use_speed_default")]
+    pub item_use_speed: f32,
+}
+
+/// `PlayerState::item_use_speed`'s serde default: 1.0, no item in use.
+fn item_use_speed_default() -> f32 {
+    1.0
 }
 
 impl PlayerState {

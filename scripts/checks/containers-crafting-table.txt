@@ -1,0 +1,73 @@
+# Container check: crafting table. The crafting screen is 176x166 centred in the 480x270
+# GUI, so its origin is (152, 52) and a slot's centre is its menu position + 8 (vanilla
+# CraftingMenu: result (124,35), grid (30,17) step 18, inventory (8,84), hotbar (8,142)).
+#   result (menu slot 0)          -> (152+124+8, 52+35+8)  = (284, 95)
+#   grid (menu slots 1-9)        -> (152+30+8, 52+17+8)   = (190, 77), step 18
+#   player inventory (slots 10+) -> (152+8+8, 52+84+8)    = (168, 144), step 18
+#   hotbar (slots 37-45)         -> (152+8+8, 52+142+8)   = (168, 202), step 18
+# The runner starts a fresh player (always alive, empty, at the world spawn), then tps it
+# into this check's own area (x 120..130, z 0..10: never the shared spawn, where other
+# workers' players wander through the crosshair), gives the items and places the table
+# when the setup screenshot appears.
+wait_until joined
+wait_until settled
+screenshot ccraft-setup
+# The runner now tps us to (125.5, 71, 2.5) facing the table, clears the inventory,
+# gives the items and places the table. Waiting for the hotbar (not a fixed delay)
+# absorbs the busy shared server: the give's inventory sync can lag its RCON answer
+# by many seconds.
+wait_until hotbar_item
+# Open the table: look at it and use (the runner placed it at (125, 71, 5), on the
+# plain's ground so its north face is visible from the camera; from the eye at (125.5,
+# 72.62, 2.5), pitch 20 aims at the face at y ~71.7). The look is re-aimed right before
+# the use: the busy shared server sends correction teleports after the RCON tp, and one
+# landing between the aim and the click re-faces us with its (stale) rotation, so the
+# click would miss — a player re-aims before clicking.
+look 0 20
+wait 5
+look 0 20
+mouse_down right
+wait 2
+mouse_up right
+wait_until screen_open
+wait 10
+screenshot ccraft-open
+# Move the log (hotbar slot 0) into the grid's centre cell (menu slot 5: grid (1,1) ->
+# x = 190+18, y = 77+18 = (208, 95)).
+click left 168 202
+click left 208 95
+# Four planks appear in the result; shift-click moves them straight to the inventory.
+key_down LShift
+wait 2
+click left 284 95
+wait 2
+key_up LShift
+wait 10
+screenshot ccraft-planks
+# Close, reopen, craft again (plain click this time: pick the result up, put it down in
+# the player inventory), which is the click path every container shares. Close with E
+# (the inventory key, vanilla's keyInventory path in keyPressed) - like a player.
+key E
+wait 20
+screenshot ccraft-esc
+wait_until screen_closed
+look 0 20
+mouse_down right
+wait 2
+mouse_up right
+wait_until screen_open
+wait 10
+click left 168 202
+click left 208 95
+wait 10
+click left 284 95
+click left 168 202
+wait 10
+screenshot ccraft-second
+key E
+wait 20
+wait_until screen_closed
+screenshot ccraft-final
+# 10 s tail: the runner reads `data get entity ... Inventory` from this frame on, and
+# the shared test server can take seconds to answer.
+wait 200

@@ -11,6 +11,8 @@ pub struct Dimensions {
     pub width: f32,
     pub height: f32,
     pub eye_height: f32,
+    /// `EntityType.fireImmune()` (the recorder dump's `fire_immune`).
+    pub fire_immune: bool,
 }
 
 impl Default for Dimensions {
@@ -19,6 +21,7 @@ impl Default for Dimensions {
             width: 0.6,
             height: 1.8,
             eye_height: 1.62,
+            fire_immune: false,
         }
     }
 }
@@ -28,6 +31,7 @@ const DEFAULT: Dimensions = Dimensions {
     width: 0.6,
     height: 1.8,
     eye_height: 1.62,
+    fire_immune: false,
 };
 
 /// Sneaking/crawling height scaling. Observed on vanilla servers: a 1.8-tall humanoid crouches to
@@ -61,6 +65,24 @@ impl EntityDimensions {
         (d.width, height)
     }
 
+    /// `Entity.getEyeHeight()` for an entity of this type: the standing eye height the
+    /// oracle names (1.62 for the default box). 26.3's `LivingEntity.getDimensions(pose)`
+    /// ignores the pose (only sleeping swaps dimensions), so no pose scaling; a baby's is
+    /// halved, like the age scale `getDefaultDimensions` applies.
+    pub fn eye_height(&self, kind: RegistryIndex, baby: bool) -> f32 {
+        let h = self.map.get(&kind).copied().unwrap_or(DEFAULT).eye_height;
+        if baby {
+            h * 0.5
+        } else {
+            h
+        }
+    }
+
+    /// `EntityType.fireImmune()`: such entities never show flames (`Entity.isOnFire`).
+    pub fn fire_immune(&self, kind: RegistryIndex) -> bool {
+        self.map.get(&kind).copied().unwrap_or(DEFAULT).fire_immune
+    }
+
     /// Height for the crouch flags (when no explicit pose metadata arrived).
     pub fn crouching(&self, standing: (f32, f32)) -> (f32, f32) {
         (standing.0, standing.1 * CROUCH_RATIO)
@@ -71,18 +93,39 @@ impl EntityDimensions {
     }
 }
 
-/// Reads `entity_dimensions.json` if present. Format (brief):
-/// `{"version":1,"entities":{"minecraft:zombie":{"width":0.6,"height":1.95,"eye_height":1.74}}}`.
-/// Names need the entity_type registry to become indexes; until haste-data provides it we cannot
-/// map them, so this returns `None` and the default box is used. The oracle file is read once and
-/// cached; when world-and-data's `GameData` lands, the name -> `RegistryIndex` mapping goes through it.
+/// Reads `entity_dimensions.json` if present. Format (tools/recorder-mod `ServerDumps`):
+/// `{"version":1,"types":[{"id":<entity_type protocol id>,"type":"minecraft:oak_boat","width":1.375,
+/// "height":0.5625,"eye_height":...,"fixed":bool}],"player":{...}}`. Every entry already carries
+/// the registry protocol id, so no name -> index mapping is needed; `id` values the synced
+/// registry does not carry (a mod's) resolve to themselves and simply never hit. The file is read
+/// once and cached.
 fn load_oracle() -> Option<HashMap<RegistryIndex, Dimensions>> {
     let path = haste_core::paths::oracle_dir().join("entity_dimensions.json");
     let bytes = std::fs::read(path).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let entities = v.get("entities")?.as_object()?;
-    // No registry to resolve names against yet (world-and-data's GameData is not exported). Parsed but
-    // unmapped: return nothing rather than guessing index positions.
-    let _ = entities.len();
-    None
+    let types = v.get("types")?.as_array()?;
+    let mut map = HashMap::with_capacity(types.len());
+    for t in types {
+        let (Some(id), Some(width), Some(height), Some(eye_height)) = (
+            t.get("id").and_then(serde_json::Value::as_u64),
+            t.get("width").and_then(serde_json::Value::as_f64),
+            t.get("height").and_then(serde_json::Value::as_f64),
+            t.get("eye_height").and_then(serde_json::Value::as_f64),
+        ) else {
+            continue;
+        };
+        map.insert(
+            RegistryIndex(id as u32),
+            Dimensions {
+                width: width as f32,
+                height: height as f32,
+                eye_height: eye_height as f32,
+                fire_immune: t
+                    .get("fire_immune")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            },
+        );
+    }
+    Some(map)
 }

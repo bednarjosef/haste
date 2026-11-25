@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use haste_protocol::haste_core::game::TICK_SECONDS;
 use haste_protocol::haste_core::BlockPos;
-use haste_protocol::{Account, ConnectOptions};
+use haste_protocol::ConnectOptions;
 use haste_world::World;
 
 use crate::net::{self, EntitySink, NetDriver, WorldSink};
@@ -27,10 +27,20 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         .enable_all()
         .worker_threads(2)
         .build()?;
-    rt.block_on(run_async(address, args.username.clone(), args.seconds))
+    rt.block_on(run_async(
+        address,
+        args.username.clone(),
+        args.seconds,
+        args.render_distance,
+    ))
 }
 
-async fn run_async(address: String, username: String, seconds: u64) -> anyhow::Result<()> {
+async fn run_async(
+    address: String,
+    username: String,
+    seconds: u64,
+    render_distance: Option<u8>,
+) -> anyhow::Result<()> {
     let data = net::load_game_data()?;
     let options = match haste_setup::config::Config::load() {
         Ok(c) => c.options,
@@ -39,10 +49,13 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             haste_setup::options::Options::default()
         }
     };
-    let mut opts = ConnectOptions::new(address.clone(), Account::Offline { username });
-    opts.client_information.view_distance = options.render_distance as i8;
+    let join = net::account::join_account(&username).await?;
+    let mut opts = ConnectOptions::new(address.clone(), join.account);
+    opts.client_information.view_distance =
+        render_distance.unwrap_or(options.render_distance) as i8;
     let t0 = Instant::now();
     let mut driver = NetDriver::connect(opts).await?;
+    driver.chat.set_keys(join.keys);
     let regs = driver.connection().registries();
     let biomes = net::synced_biome_count(regs);
     let entity_types = regs
@@ -54,7 +67,9 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     // server sent one, else the static one).
     let type_names = net::entity_type_names(regs, &data);
     let mob_variants = net::mob_variants(regs);
+    let attribute_names = net::attribute_names(regs, &data);
     driver.session.set_entity_type_names(type_names);
+    driver.session.set_attribute_names(attribute_names);
     let mut world = World::new_with_biomes(
         driver.login().dimension.clone(),
         data.clone(),
@@ -106,6 +121,8 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             }
         }
         let ticked = driver.tick(&input, &mut world, &mut entities);
+        // The camera entity for the next tick (the windowed game refreshes it around the tick).
+        driver.session.camera.refresh(&entities);
         if walk
             .as_mut()
             .is_some_and(|w| w.after_tick(tick, &driver.session.player))
@@ -178,6 +195,43 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
         counters.own_sounds
     );
     println!("--- summary after {:.1} s", t0.elapsed().as_secs_f64());
+    {
+        // Storage-layout diagnostics (this is where a memory change gets its before/after
+        // numbers): the chunk map's heap census, the sky-light section census, and the
+        // process's resident set.
+        let mem = world.memory_stats();
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        println!(
+            "world memory: chunks {:.1} MiB, sections {:.1} MiB, heightmaps {:.1} MiB, light {:.1} MiB, block entities {:.1} MiB",
+            mib(mem.chunks),
+            mib(mem.sections),
+            mib(mem.heightmaps),
+            mib(mem.light),
+            mib(mem.block_entities),
+        );
+        let sky = world.sky_light_stats();
+        println!(
+            "sky light: {} sections, {} absent, {} uniform, {} zero, {} arrays ({:.1} MiB); block light: {} arrays ({:.1} MiB); distinct {} arrays, duplicates {:.1} MiB",
+            sky.sections,
+            sky.absent,
+            sky.uniform,
+            sky.uniform_zero,
+            sky.arrays,
+            mib(sky.array_bytes),
+            sky.block_arrays,
+            mib(sky.block_array_bytes),
+            sky.distinct_arrays,
+            mib(sky.duplicate_array_bytes),
+        );
+        let rss = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("VmRSS:").map(|v| v.trim().to_string()))
+            })
+            .unwrap_or_else(|| "unknown".into());
+        println!("process rss: {rss}");
+    }
     println!(
         "packets in {} ({} bytes), out {}; chunks loaded {} (unloaded {}, refused by world {}), now loaded {} with {} non-empty sections, entities {}, teleports {}",
         stats.packets_in,

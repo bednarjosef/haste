@@ -17,17 +17,26 @@ use clap::Parser;
 mod ambient_particles;
 mod app;
 mod block_particles;
+mod boat;
 mod game;
 mod hand;
 mod headless;
+mod horse;
+mod item_based_steering;
+mod item_particles;
 mod launch;
 mod net;
+mod pig;
 mod player;
 mod screen_effects;
 mod screenshots;
 mod script;
+mod script_frame;
 mod sound;
+mod strider;
+mod travel;
 mod ui;
+mod world_border;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -71,10 +80,44 @@ pub struct Args {
     /// Bench mode: write the summary as JSON to this file.
     #[arg(long)]
     pub bench_out: Option<std::path::PathBuf>,
+    /// Windowed bench mode (needs `--server`): like `--bench`, but a real window at
+    /// `--width`x`--height` with vsync off (unless `--vsync`), so the number includes
+    /// the present and is comparable with a windowed vanilla client. The window opens
+    /// for the duration of the run and closes by itself.
+    #[arg(long)]
+    pub bench_window: Option<u64>,
+    /// Force the window onto XWayland (the window system vanilla's client uses:
+    /// an X11 window gets a framebuffer of exactly `--width`x`--height`, no
+    /// desktop-scale doubling). Applies to the windowed bench and the normal
+    /// window.
+    #[arg(long)]
+    pub x11: bool,
     /// Bench mode: hold the settle camera still instead of the flight path (isolates one view,
     /// e.g. the screenshot comparison spot).
     #[arg(long)]
     pub bench_fixed: bool,
+    /// Pre-mesh mode (turn prediction for the mesh gate), overriding the saved option:
+    /// `off` is exactly vanilla's visible-only meshing, `cone` widens the mesh gate's
+    /// frustum toward the turn, `predict` drives that widening with an online yaw
+    /// predictor. The default comes from the config's `[options] premesh`.
+    #[arg(long)]
+    pub premesh: Option<String>,
+    /// Terrain GPU format: `vertex` (four 20-byte vertices plus six indices per
+    /// quad) or `quad` (vertex pulling: one 32-byte record per axis-aligned quad,
+    /// no index buffer). Set before the renderer and mesher start.
+    #[arg(long, default_value = "vertex")]
+    pub terrain_format: String,
+    /// Windowed bench camera path: `still` (default) holds the settle camera, `turns`
+    /// holds, then does 180-degree turns at a fixed speed every few seconds plus a
+    /// straight flight leg — the same motion every run, for the pre-mesh comparison.
+    #[arg(long, default_value = "still")]
+    pub bench_path: String,
+    /// The background-work budget: `fixed` (default) is the historical 2 ms / 8 ms mesh
+    /// upload budgets; `adaptive` predicts the next frame's cost from the recent frames
+    /// and gives the uploads the time left to the frame-time target, visible sections
+    /// first, so a burst of work no longer lands on whichever frame it arrived in.
+    #[arg(long)]
+    pub work_budget: Option<String>,
     /// Render distance in chunks, overriding the saved option (like `--vsync`).
     #[arg(long)]
     pub render_distance: Option<u8>,
@@ -125,6 +168,11 @@ fn main() -> anyhow::Result<()> {
         haste_setup::worlds::set_dir(dir.clone());
     }
     app::set_hud_from_args(&args.hud)?;
+    match args.terrain_format.as_str() {
+        "vertex" => {}
+        "quad" => haste_render::set_terrain_format_quad(true),
+        other => anyhow::bail!("--terrain-format must be `vertex` or `quad`, got `{other}`"),
+    }
     if let Some(cmd) = args.command {
         return launch::run(cmd, &args.username);
     }
@@ -148,6 +196,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(seconds) = args.bench {
         return app::bench(&args, seconds);
+    }
+    if let Some(seconds) = args.bench_window {
+        return app::bench_window(&args, seconds);
     }
     app::run(&args)
 }

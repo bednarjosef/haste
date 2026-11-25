@@ -89,6 +89,25 @@ Order: top to bottom by how many boxes a task unlocks.
 | A1b | haste-audio: per-source `playing()` (music must not count other sounds as the track) and stop-by-event-name | tests | OpenCode | queued |
 | A2 | Own footsteps, block break/place sounds: block sound types dumped by the recorder mod, played on the client's own actions | log of played events | GLM | queued |
 
+## F. Performance and footprint
+
+From the 2026-10-20 measurements (`NOTES.md`: the JVM's cost, slow frames). Each task reports
+numbers before and after (RSS, boot time, frame p50/p99/worst at rd 12 and 32).
+
+| # | Task | Done means | Worker | Status |
+|---|---|---|---|---|
+| F1 | JVM class data sharing: an AppCDS archive of the vanilla and bridge classes, built by `haste setup` into `cache/` and used at JVM start | boot time (6.6 s, 4.8 s of it vanilla's bootstrap) and metaspace (68 MiB) before/after | lead | queued |
+| F2 | JVM native memory measured (`-XX:NativeMemoryTracking=summary`): the JVM's real share of RSS beyond heap, metaspace and code cache | a NOTES entry with the breakdown | lead | queued |
+| F3 | JVM heap limits trimmed (152 MiB committed, about 104 used at rd 12) without longer GC pauses (now at most about 2.5 ms) | settled RSS and GC pauses before/after | lead | queued (after F2) |
+| F4 | JVM boot in the background while the window and the world load, so the HUD is ready sooner | time from launch to HUD ready before/after | lead | queued (after F1) |
+| F5 | AFK frame throttle: vanilla's `inactivityFpsLimit` option and `FramerateLimitTracker`'s AFK limits (30 after 1 min, 10 after 10 min without input) | test, option saved in options.txt | lead | queued |
+| F6 | The Max Framerate slider changes the frame limiter live (the live options carry `max_fps`) | scripted run: slider to 30, measured 30 FPS | lead | queued |
+| F7 | Trace the 16.7 ms p99 at rd 32 in performance mode (`--bench-trace`) | the cause named in NOTES | lead | queued |
+| F8 | GPU occlusion test with tighter boxes per facing group instead of the section's | opaque draws and GPU time at the ground and high spots before/after | lead | queued |
+| F9 | GPU occlusion test once per section instead of once per draw, and no pyramid rebuild while the camera and the depth are unchanged | GPU time of the cull passes before/after | lead | queued |
+| F10 | `SectionDraw` without per-draw bounds (the section's, looked up by slot) | draw-list CPU time at rd 32 before/after (0.58 ms) | lead | queued |
+| F11 | A Rust UI (HUD, chat, screens) for a no-mods mode without a JVM | blocked: architecture decision (tier 3 stays vanilla Java, `AGENTS.md`); see NOTES 2026-10-20 | lead | blocked: decision |
+
 ## R. Reviews against vanilla (decompiled source)
 
 | # | Task | Done means | Worker | Status |
